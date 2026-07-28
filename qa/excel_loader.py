@@ -2,7 +2,14 @@ import re
 
 import pandas as pd
 
-from qa.config import EXCEL_PLACEHOLDER_PATTERN, EXCLUDED_QA_ROWS, MIN_TEXT_LENGTH, WORDING_COLUMN_NAME
+from qa.config import (
+    EXCEL_PLACEHOLDER_PATTERN,
+    EXCLUDED_QA_ROWS,
+    MIN_TEXT_LENGTH,
+    URL_COLUMN_NAME,
+    URL_SHEET_KEYWORD,
+    WORDING_COLUMN_NAME,
+)
 from qa.text_utils import normalize, normalize_currency
 
 
@@ -100,3 +107,25 @@ def load_excel_wordings(excel_file: str, keyword: str) -> tuple:
         })
 
     return sheet, excel_wordings
+
+
+def load_excel_urls(excel_file: str) -> tuple:
+    """
+    Charge les URLs de reference depuis l'onglet dont le nom contient
+    URL_SHEET_KEYWORD ("UTM" par defaut, le nom peut contenir d'autres mots).
+    """
+    sheet = find_sheet(excel_file, URL_SHEET_KEYWORD)
+
+    df = pd.read_excel(excel_file, sheet_name=sheet, engine="openpyxl")
+    df.columns = df.columns.str.strip()
+
+    if URL_COLUMN_NAME not in df.columns:
+        raise ValueError(f"Colonne '{URL_COLUMN_NAME}' introuvable dans la feuille '{sheet}'.")
+
+    urls = [
+        str(u).strip()
+        for u in df[URL_COLUMN_NAME].dropna()
+        if str(u).strip()
+    ]
+
+    return sheet, urls

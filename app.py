@@ -103,18 +103,21 @@ with col5:
         type=["html"]
     )
 
-keyword = st.text_input("Campaign keyword", "HugPlan S1 Bronze")
+if mode == "Wording":
+    keyword = st.text_input("Campaign keyword", "HugPlan S1 Bronze")
+else:
+    keyword = ""
+    st.caption("ℹ️ En mode URL, l'onglet Excel est retrouvé automatiquement (nom contenant \"UTM\").")
+
+qa_mode = "wording" if mode == "Wording" else "url"
 
 # =========================
 # BOUTON COMPARER
 # =========================
 if st.button("🔍 Comparer"):
 
-    if mode == "URL":
-        st.warning("La partie URL n'est pas encore implémentée.")
-    
-    elif (html_file and excel_file) or (aem_url and excel_file):
-        
+    if (html_file and excel_file) or (aem_url and excel_file):
+
 
         if aem_url and (not username or not password):
             st.error("Merci de renseigner les identifiants AEM")
@@ -144,7 +147,8 @@ if st.button("🔍 Comparer"):
                 keyword=keyword,
                 aem_url=aem_url if aem_url else None,
                 username=username if aem_url else None,
-                password=password if aem_url else None
+                password=password if aem_url else None,
+                mode=qa_mode
             )
 
             today = datetime.now().strftime("%Y-%m-%d")

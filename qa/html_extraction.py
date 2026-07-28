@@ -40,7 +40,8 @@ def fetch_html_from_aem(link: str, username: str, password: str) -> str:
         response = requests.get(
             link,
             auth=HTTPBasicAuth(username, password),
-            verify=False
+            timeout=30,
+            verify=True
         )
 
         response.raise_for_status()
@@ -242,7 +243,12 @@ def extract_texts_from_textcontribution(soup: BeautifulSoup, title_to_component:
     return results
 
 
-def load_and_extract_html_texts(html_path: str) -> list:
+def load_raw_html(html_path: str) -> str:
+    """
+    Lit le fichier HTML sur disque et reconstruit le HTML reel si le fichier
+    fourni est une vue 'view-source' AEM. Utilise a la fois par l'extraction
+    de wording (apres nettoyage) et par la QA d'URL (sur le HTML brut).
+    """
     with open(html_path, "r", encoding="utf-8") as f:
         raw = f.read()
 
@@ -251,6 +257,11 @@ def load_and_extract_html_texts(html_path: str) -> list:
             print("🧩 Fichier 'view-source' AEM detecte → reconstruction du HTML reel…")
         raw = extract_real_html_from_viewsource(raw)
 
+    return raw
+
+
+def load_and_extract_html_texts(html_path: str) -> list:
+    raw = load_raw_html(html_path)
     cleaned = clean_template_code(raw)
 
     soup = BeautifulSoup(cleaned, "html.parser")

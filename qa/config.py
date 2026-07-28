@@ -10,6 +10,9 @@ CAMPAIGN_KEYWORD = "HugPlan S1 Bronze"    # Mot-clé pour sélectionner l'onglet
 MIN_TEXT_LENGTH = 3
 DEBUG_MODE = True
 
+URL_SHEET_KEYWORD = "UTM"                 # Mot-clé pour repérer l'onglet des URLs trackées
+URL_COLUMN_NAME = "<< TRACKED URL >>"     # Colonne des URLs de référence dans cet onglet
+
 # Fichiers par defaut pour l'execution standalone (python -m qa.engine)
 HTML_FILE = "input/email.html"
 EXCEL_FILE = "input/wording.xlsx"

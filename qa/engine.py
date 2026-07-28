@@ -1,8 +1,13 @@
 import os
 
 from qa.config import CAMPAIGN_KEYWORD, EXCEL_FILE, HTML_FILE
-from qa.excel_loader import load_excel_wordings
-from qa.html_extraction import fetch_html_from_aem, load_and_extract_html_texts, save_html_to_temp
+from qa.excel_loader import load_excel_urls, load_excel_wordings
+from qa.html_extraction import (
+    fetch_html_from_aem,
+    load_and_extract_html_texts,
+    load_raw_html,
+    save_html_to_temp,
+)
 from qa.report import save_report
 from qa.url_qa import run_url_qa
 from qa.wording_qa import run_wording_qa
@@ -28,18 +33,15 @@ def run_qa(html_file=None, excel_file=None, keyword="", aem_url=None, username=N
     print("🔎 QA EMAIL - HTML → Excel (text-contribution)")
     print("=" * 70)
 
-    # 1. Charger HTML
-    html_texts = load_and_extract_html_texts(html_file)
-
-    # 2. Charger Excel
-    sheet, excel_wordings = load_excel_wordings(excel_file, keyword)
-
-    # 3. Choisir le mode
     if mode == "wording":
+        html_texts = load_and_extract_html_texts(html_file)
+        sheet, excel_wordings = load_excel_wordings(excel_file, keyword)
         results = run_wording_qa(html_texts, excel_wordings)
 
     elif mode == "url":
-        results = run_url_qa(html_texts, excel_wordings)
+        raw_html = load_raw_html(html_file)
+        sheet, excel_urls = load_excel_urls(excel_file)
+        results = run_url_qa(raw_html, excel_urls)
 
     else:
         raise ValueError("Mode inconnu")
