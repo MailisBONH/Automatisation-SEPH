@@ -106,8 +106,11 @@ with col5:
 if mode == "Wording":
     keyword = st.text_input("Campaign keyword", "HugPlan S1 Bronze")
 else:
-    keyword = ""
-    st.caption("ℹ️ En mode URL, l'onglet Excel est retrouvé automatiquement (nom contenant \"UTM\").")
+    keyword = st.text_input("Campaign keyword", "HugPlan S1 Bronze")
+    st.caption(
+        "ℹ️ En mode URL, l'onglet Excel est retrouvé automatiquement (nom contenant \"UTM\"). "
+        "Ce mot-clé sert à sélectionner la bonne séquence à l'intérieur de cet onglet, s'il en contient plusieurs."
+    )
 
 qa_mode = "wording" if mode == "Wording" else "url"
 

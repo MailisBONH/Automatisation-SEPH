@@ -40,7 +40,7 @@ def run_qa(html_file=None, excel_file=None, keyword="", aem_url=None, username=N
 
     elif mode == "url":
         raw_html = load_raw_html(html_file)
-        sheet, excel_urls = load_excel_urls(excel_file)
+        sheet, excel_urls = load_excel_urls(excel_file, keyword)
         results = run_url_qa(raw_html, excel_urls)
 
     else:

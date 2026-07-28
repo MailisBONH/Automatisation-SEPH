@@ -85,7 +85,9 @@ L'application s'ouvre dans le navigateur (par défaut sur `http://localhost:8501
    - soit uploader un fichier `.html` (export "view-source" AEM ou HTML brut),
    - soit renseigner un **lien AEM** + **identifiant/mot de passe** pour le récupérer automatiquement.
 3. Uploader le **fichier Excel référentiel** (`.xlsx`).
-4. En mode **Wording**, renseigner le **Campaign keyword** : mot-clé recherché (insensible à la casse) dans le nom des onglets du fichier Excel pour identifier la bonne feuille. Le mot-clé doit correspondre à un **seul** onglet, sinon une erreur explicite est renvoyée. En mode **URL**, ce champ n'apparaît pas : l'onglet est retrouvé automatiquement (nom contenant `"UTM"`).
+4. Renseigner le **Campaign keyword** :
+   - en mode **Wording**, il sert à retrouver l'onglet Excel (mot-clé recherché, insensible à la casse, dans le nom des onglets). Il doit correspondre à un **seul** onglet, sinon une erreur explicite est renvoyée.
+   - en mode **URL**, l'onglet est retrouvé automatiquement (nom contenant `"UTM"`) ; le keyword sert alors à sélectionner la bonne **séquence** à l'intérieur de cet onglet, si celui-ci en regroupe plusieurs (voir [Comment fonctionne la QA URL](#comment-fonctionne-la-qa-url)).
 5. Cliquer sur **🔍 Comparer**.
 6. Consulter :
    - le taux de succès global et la répartition des types d'erreur,
@@ -111,8 +113,8 @@ L'application s'ouvre dans le navigateur (par défaut sur `http://localhost:8501
 En **mode URL**, l'onglet référentiel est différent :
 
 - Son **nom** doit contenir `"UTM"` (insensible à la casse, peut contenir d'autres mots, ex. `"DS - Antichurn S2 UTM"`) — un seul onglet doit correspondre.
-- **En-têtes sur la 1ʳᵉ ligne** (contrairement à l'onglet wording).
-- Colonne attendue : `<< TRACKED URL >>`, contenant la liste des URLs trackées (avec paramètres UTM) à retrouver dans le HTML.
+- Colonnes attendues (en-têtes sur la ligne où figure `<< TRACKED URL >>`, quelle que soit sa position) : une colonne exactement nommée `"URL"`, et la colonne `<< TRACKED URL >>` contenant les URLs trackées (avec paramètres UTM) à retrouver dans le HTML.
+- Si l'onglet regroupe **plusieurs séquences** (ex. `SEQ 1 NON FID` et `SEQ 1 FID` empilées dans le même onglet), chaque séquence commence par une ligne "séparateur" ne contenant que son nom dans la colonne `"URL"` — c'est ce nom que le `Campaign keyword` doit cibler. S'il n'y a pas de séparateur de ce type, tout l'onglet est utilisé sans filtrage.
 
 ## Comment fonctionne le matching
 
@@ -143,7 +145,11 @@ Chaque wording Excel non couvert par un match HTML est reporté en fin de tablea
 
 ## Comment fonctionne la QA URL
 
-L'onglet Excel de référence est celui dont le nom contient `"UTM"` (configurable via `URL_SHEET_KEYWORD`, voir [Configuration](#configuration)) ; les URLs attendues sont lues dans sa colonne `<< TRACKED URL >>` (`URL_COLUMN_NAME`). Tous les `href` du HTML sont extraits (`qa/url_utils.extract_hrefs`), puis chaque URL Excel est recherchée parmi eux (`qa/url_qa.run_url_qa`) :
+L'onglet Excel de référence est celui dont le nom contient `"UTM"` (configurable via `URL_SHEET_KEYWORD`, voir [Configuration](#configuration)).
+
+Cet onglet regroupe souvent plusieurs séquences empilées (une pour chaque variante de campagne : loyal/non-loyal, palier de fidélité...). `qa/excel_loader.load_excel_urls` repère les lignes "séparateur" (une seule cellule non vide, dans la colonne `"URL"`, contenant le nom de la séquence) pour découper l'onglet en sections, puis ne garde que les URLs de la section dont le nom correspond au `Campaign keyword` saisi (recherche insensible à la casse, comme pour la sélection d'onglet). Si aucun séparateur n'est trouvé, l'onglet est traité comme une liste plate et le keyword est ignoré.
+
+Les URLs attendues de la séquence retenue sont lues dans la colonne `<< TRACKED URL >>` (`URL_COLUMN_NAME`). Tous les `href` du HTML sont extraits (`qa/url_utils.extract_hrefs`), puis chaque URL Excel est recherchée parmi eux (`qa/url_qa.run_url_qa`) :
 
 | Cas | Statut | Match Type | Criticité |
 |---|---|---|---|
@@ -185,3 +191,4 @@ Les réglages globaux sont centralisés dans [`qa/config.py`](qa/config.py) :
 - **Fichiers temporaires partagés** : les uploads sont toujours écrits dans `temp/input.html` / `temp/input.xlsx`, quel que soit l'utilisateur — deux analyses lancées en même temps peuvent se marcher sur les pieds.
 - **Pas de tests automatisés.**
 - **Mode URL** : ne vérifie que la présence des URLs Excel dans le HTML (comme le script d'origine) — ne détecte pas les `href` présents dans le HTML mais absents du référentiel Excel.
+- **Découpage en séquences de l'onglet UTM** : ne gère qu'un seul niveau de séparateurs. Si un onglet imbrique des sous-catégories à l'intérieur d'une séquence (ex. des séparateurs répétés comme "FOOTER" dans chaque séquence), elles seront traitées comme des séquences distinctes plutôt que comme des sous-groupes.
