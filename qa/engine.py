@@ -9,6 +9,9 @@ from bs4 import BeautifulSoup, NavigableString
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
+from openpyxl.cell.rich_text import CellRichText
+from openpyxl.cell.text import InlineFont
+from openpyxl.cell.rich_text import TextBlock
 
 
 # =========================
@@ -139,7 +142,7 @@ def normalize(text: str) -> str:
     # Directives AEM / Adobe Campaign
     s = re.sub(r"<%=?\s*.*?\s*%>", "", s, flags=re.DOTALL)
     s = re.sub(r"\$\{[^}]*\}", "", s)
-    s = re.sub(r"\[.*?\]", "", text)
+    s = re.sub(r"\[.*?\]", "", s)
 
 
     # Placeholders metier PO
@@ -150,14 +153,14 @@ def normalize(text: str) -> str:
 
     # FIX mots AEM colles : 'pointspoint' -> 'points point'
 
-    s = re.sub(r"(points?)(points?)", r"\1 \2", text)
+    s = re.sub(r"(points?)(points?)", r"\1 \2", s)
     s = re.sub(r"\b(gifts)(gift)\b", r"\1 \2", s, flags=re.IGNORECASE)
 
-    
-    s = re.sub(r"\s+([.,])", r"\1", text)
 
-    
-    s = " ".join(text.split())
+    s = re.sub(r"\s+([.,])", r"\1", s)
+
+
+    s = " ".join(s.split())
 
 
     # HTML
@@ -394,16 +397,12 @@ def extract_texts_from_textcontribution(soup: BeautifulSoup, title_to_component:
             text = el.get_text(" ", strip=True)
             text = clean_text(text)
 
-
-            if "Card Number" in text:
-                print(
-                    "CARD CHECK",
-                    repr(text),
-                    is_valid(text)
-                )
-
             if not text or not is_valid(text):
                 continue
+            # Ignore les liens AEM techniques
+            if text.strip().lower() == "edit":
+                continue
+
             if text in seen:
                 continue
             
@@ -433,6 +432,9 @@ def extract_texts_from_textcontribution(soup: BeautifulSoup, title_to_component:
         block_text = block.get_text(" ", strip=True)
         block_text = clean_text(block_text)
 
+        if block_text.strip().lower() == "edit":
+            continue
+
         if block_text and is_valid(block_text) and block_text not in seen:
             item = {
                 "text": block_text,
@@ -455,12 +457,6 @@ def extract_texts_from_textcontribution(soup: BeautifulSoup, title_to_component:
 
             text = clean_text(el.get_text(" ", strip=True))
 
-            
-            if "Card" in str(el):
-                print("RAW EL =", repr(el.get_text(" ", strip=True)))
-                print("CLEAN =", repr(text))
-
-
             if not text or not is_valid(text):
                 continue
             if text in seen:
@@ -476,11 +472,6 @@ def extract_texts_from_textcontribution(soup: BeautifulSoup, title_to_component:
                 "type": get_type(el.name),
                 "component_class": component_class   # peut être None si non trouvé
             }
-
-
-            if "Card" in text:
-                print("FOUND CARD", text)
-
 
             results.append(item)
             seen.add(text)
@@ -872,9 +863,8 @@ def run_wording_qa(html_texts, excel_wordings):
         if agg:
             nb, idx, status, error, sim = agg
             agg_text = " ".join(html_texts[i + k]["text"] for k in range(nb))
-            agg_types = "/".join(dict.fromkeys(html_texts[i+k]["type"] for k in range(nb)))      
-            found_class = item.get("component_class")
-            results.append(_make_row(excel_wordings[idx], found_class, agg_text,
+            agg_types = "/".join(dict.fromkeys(html_texts[i+k]["type"] for k in range(nb)))
+            results.append(_make_row(excel_wordings[idx], item, agg_text,
                                      status, error, sim, f"Agrege ({nb} blocs)"))
             matched_excel_counts[idx] += 1
             for k in range(nb):
@@ -1091,6 +1081,66 @@ def run_qa(html_file=None, excel_file=None, keyword="", aem_url=None, username=N
 # =========================
 # RAPPORT EXCEL
 # =========================
+
+import difflib
+
+
+def build_rich_diff(text1, text2):
+
+    text1 = str(text1 or "")
+    text2 = str(text2 or "")
+
+    words1 = text1.split()
+    words2 = text2.split()
+
+    matcher = difflib.SequenceMatcher(
+        None,
+        words1,
+        words2
+    )
+
+    rich1 = CellRichText()
+    rich2 = CellRichText()
+
+    red_bold = InlineFont(
+        color="FF0000",
+        b=True
+    )
+
+    normal = InlineFont()
+
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+
+        part1 = " ".join(words1[i1:i2])
+        part2 = " ".join(words2[j1:j2])
+
+        if tag == "equal":
+
+            if part1:
+                rich1.append(
+                    TextBlock(normal, part1 + " ")
+                )
+
+            if part2:
+                rich2.append(
+                    TextBlock(normal, part2 + " ")
+                )
+
+        else:
+
+            if part1:
+                rich1.append(
+                    TextBlock(red_bold, part1 + " ")
+                )
+
+            if part2:
+                rich2.append(
+                    TextBlock(red_bold, part2 + " ")
+                )
+
+    return rich1, rich2
+
+
 def save_report(results: list, campaign_sheet_name: str):
     df = pd.DataFrame(results)
     total = len(df)
@@ -1133,9 +1183,43 @@ def save_report(results: list, campaign_sheet_name: str):
         for r, row in enumerate(df_data[columns].itertuples(index=False), start=2):
             for c, val in enumerate(row, start=1):
                 safe_val = "" if (isinstance(val, float) and val != val) else val
-                cell = ws_target.cell(r, c, safe_val)
-                cell.alignment = Alignment(vertical="top", wrap_text=True)
+                cell = ws_target.cell(r, c)
+                cell.alignment = Alignment(
+                    vertical="top",
+                    wrap_text=True
+                )
                 col_name = columns[c - 1]
+                if (
+                    col_name == "Excel Wording"
+                    and row[6] == "KO"   # Status
+                ):
+
+                    html_wording = row[5]
+
+                    rich_excel, _ = build_rich_diff(
+                        safe_val,
+                        html_wording
+                    )
+
+                    cell.value = rich_excel
+
+                elif (
+                    col_name == "HTML Wording"
+                    and row[6] == "KO"
+                ):
+
+                    excel_wording = row[4]
+
+                    _, rich_html = build_rich_diff(
+                        excel_wording,
+                        safe_val
+                    )
+
+                    cell.value = rich_html
+
+                else:
+
+                    cell.value = safe_val
                 if col_name == "Status":
                     cell.fill = PatternFill(
                         start_color="C6EFCE" if val == "OK" else "FFC7CE",

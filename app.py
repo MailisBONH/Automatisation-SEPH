@@ -7,6 +7,12 @@ from datetime import datetime
 
 import plotly.express as px
 from collections import Counter
+from st_aggrid import AgGrid
+from st_aggrid import GridOptionsBuilder
+from st_aggrid.shared import JsCode
+
+import difflib
+
 
 
 def color_rows(row):
@@ -14,6 +20,45 @@ def color_rows(row):
         return ["background-color: #d4edda"] * len(row)  # vert clair
     else:
         return ["background-color: #f8d7da"] * len(row)  # rouge clair
+
+def highlight_differences(excel_text, html_text):
+
+    excel_words = str(excel_text or "").split()
+    html_words = str(html_text or "").split()
+
+    matcher = difflib.SequenceMatcher(
+        None,
+        excel_words,
+        html_words
+    )
+
+    excel_parts = []
+    html_parts = []
+
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+
+        ex = " ".join(excel_words[i1:i2])
+        ht = " ".join(html_words[j1:j2])
+
+        if tag == "equal":
+
+            excel_parts.append(ex)
+            html_parts.append(ht)
+
+        else:
+
+            excel_parts.append(
+                f"<span style='font-weight:bold;color:#d62828'>{ex}</span>"
+            )
+
+            html_parts.append(
+                f"<span style='font-weight:bold;color:#d62828'>{ht}</span>"
+            )
+
+    return (
+        " ".join(excel_parts),
+        " ".join(html_parts)
+    )
 
 st.set_page_config(page_title="QA Email Tool", layout="wide")
 
@@ -112,6 +157,20 @@ if st.button("🔍 Comparer"):
             
 
             df = pd.DataFrame(results)
+
+            df_display = df.copy()
+
+            for idx, row in df_display.iterrows():
+
+                if row["Status"] == "KO":
+
+                    excel_diff, html_diff = highlight_differences(
+                        row.get("Excel Wording", ""),
+                        row.get("HTML Wording", "")
+                    )
+
+                    df_display.at[idx, "Excel Wording"] = excel_diff
+                    df_display.at[idx, "HTML Wording"] = html_diff
                     
             ok_count = len(df[df["Status"] == "OK"])
             ko_count = len(df[df["Status"] == "KO"])
@@ -186,8 +245,108 @@ if st.button("🔍 Comparer"):
                         use_container_width=True
                     )
 
+            html_renderer = JsCode("""
+            class HtmlCellRenderer {
+                init(params) {
+                    this.eGui = document.createElement('div');
+                    this.eGui.innerHTML = params.value || '';
+                }
 
-            st.dataframe(df.style.apply(color_rows, axis=1))
+                getGui() {
+                    return this.eGui;
+                }
+            }
+            """)
+
+            gb = GridOptionsBuilder.from_dataframe(df_display)
+
+            gb.configure_default_column(
+                wrapText=True,
+                autoHeight=True,
+                resizable=True
+            )
+
+            row_style = JsCode("""
+            function(params) {
+
+                if (params.data.Status === 'OK') {
+                    return {
+                        'backgroundColor': '#d4edda'
+                    }
+                }
+
+                return {
+                    'backgroundColor': '#f8d7da'
+                }
+            }
+            """)
+
+            html_renderer = JsCode("""
+            class HtmlCellRenderer {
+                init(params) {
+
+                    this.eGui = document.createElement('div');
+
+                    this.eGui.style.color = 'black';
+                    this.eGui.style.fontSize = '14px';
+
+                    this.eGui.innerHTML = params.value || '';
+                }
+
+                getGui() {
+                    return this.eGui;
+                }
+            }
+            """)
+
+            gb.configure_column(
+                "Excel Wording",
+                cellRenderer=html_renderer,
+                width=500
+            )
+
+            gb.configure_column(
+                "HTML Wording",
+                cellRenderer=html_renderer,
+                width=500
+            )
+
+            grid_options = gb.build()
+
+            grid_options["getRowStyle"] = row_style
+
+            custom_css = {
+                ".ag-theme-streamlit": {
+                    "--ag-foreground-color": "black",
+                    "--ag-data-color": "black",
+                    "--ag-header-foreground-color": "black"
+                }
+            }
+
+            custom_css = {
+                ".ag-root-wrapper": {
+                    "color": "black !important"
+                },
+                ".ag-cell": {
+                    "color": "black !important"
+                },
+                
+                ".ag-row": {
+                    "color": "black !important"
+                }
+            }
+
+            df_display = df_display.fillna("")
+            df_display = df_display.astype(str)
+
+            AgGrid(
+                df_display,
+                gridOptions=grid_options,
+                allow_unsafe_jscode=True,
+                custom_css=custom_css,
+                height=800,
+                theme="streamlit"
+            )
 
             with open(report_path, "rb") as f:
                 st.download_button(
