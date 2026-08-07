@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import os
 from qa.engine import run_qa
+from qa.excel_loader import load_excel_urls, load_excel_wordings
 
 from datetime import datetime
 
@@ -103,6 +104,13 @@ with col5:
         type=["html"]
     )
 
+excel_path = None
+if excel_file:
+    os.makedirs("temp", exist_ok=True)
+    excel_path = "temp/input.xlsx"
+    with open(excel_path, "wb") as f:
+        f.write(excel_file.getvalue())
+
 if mode == "Wording":
     keyword = st.text_input("Campaign keyword", "HugPlan S1 Bronze")
 else:
@@ -113,6 +121,52 @@ else:
     )
 
 qa_mode = "wording" if mode == "Wording" else "url"
+
+# =========================
+# DIAGNOSTIC EXCEL (avant de lancer la QA)
+# =========================
+if excel_path:
+    with st.expander("🔍 Diagnostic du fichier Excel", expanded=True):
+        try:
+            xls_preview = pd.ExcelFile(excel_path)
+            st.caption(f"Onglets détectés : {', '.join(xls_preview.sheet_names)}")
+        except Exception as e:
+            st.error(f"Impossible de lire le fichier Excel : {e}")
+            xls_preview = None
+
+        if xls_preview is not None:
+            if qa_mode == "wording":
+                try:
+                    diag_sheet, diag_wordings = load_excel_wordings(excel_path, keyword)
+                    st.success(f"✅ Onglet trouvé : **{diag_sheet}** — {len(diag_wordings)} wordings chargés")
+
+                    n_with_class = sum(1 for w in diag_wordings if w.get("Technical"))
+                    fill_rate = round(n_with_class / len(diag_wordings) * 100, 1) if diag_wordings else 0
+
+                    if fill_rate == 100:
+                        st.success("Classes techniques (TECHNICAL NAME) renseignées sur 100% des lignes.")
+                    elif fill_rate == 0:
+                        st.warning(
+                            "⚠️ Colonne 'TECHNICAL NAME' absente ou vide sur tout l'onglet — "
+                            "le matching par classe ne fonctionnera pas, tout reposera sur la comparaison de texte seule."
+                        )
+                    else:
+                        st.warning(
+                            f"⚠️ Classes techniques renseignées sur seulement {fill_rate}% des lignes — "
+                            "le matching sera moins précis pour les lignes sans classe."
+                        )
+                except ValueError as e:
+                    st.error(f"❌ {e}")
+
+            else:
+                try:
+                    diag_sheet, diag_urls = load_excel_urls(excel_path, keyword)
+                    st.success(
+                        f"✅ Onglet UTM trouvé : **{diag_sheet}** — "
+                        f"{len(diag_urls)} URL(s) de référence pour cette séquence"
+                    )
+                except ValueError as e:
+                    st.error(f"❌ {e}")
 
 # =========================
 # BOUTON COMPARER
@@ -133,13 +187,6 @@ if st.button("🔍 Comparer"):
             with open(html_path, "wb") as f:
                 f.write(html_file.read())
        
-        excel_path = "temp/input.xlsx"
-
-        # sauvegarde
-
-        with open(excel_path, "wb") as f:
-            f.write(excel_file.read())
-
         st.info("Analyse en cours... 🔄")
 
         # appel backend
