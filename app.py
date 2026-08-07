@@ -6,7 +6,7 @@ import re
 import uuid
 import contextlib
 from qa.engine import run_qa, run_qa_for_sequence
-from qa.excel_loader import list_url_sequences, load_excel_urls, load_excel_wordings
+from qa.excel_loader import list_url_sequences, load_excel_urls, load_excel_wordings, load_generic_wordings
 from qa.report import save_consolidated_report
 
 from datetime import datetime
@@ -274,6 +274,18 @@ batch_mode = st.checkbox(
     "📦 Traiter plusieurs séquences en une fois (même Excel, plusieurs HTML)"
 )
 
+include_generic = False
+if mode == "Wording":
+    include_generic = st.checkbox(
+        "🧩 Les composants génériques (footer, mentions légales, fidélité...) "
+        "sont dans un onglet séparé de l'Excel"
+    )
+    if include_generic:
+        st.caption(
+            "ℹ️ L'onglet des composants génériques est retrouvé automatiquement "
+            "(nom contenant \"GENERIC\") et fusionné avec l'onglet de la séquence testée."
+        )
+
 # =========================
 # UPLOAD FILES
 # =========================
@@ -422,6 +434,16 @@ if excel_path and not batch_mode:
                             f"⚠️ Classes techniques renseignées sur seulement {fill_rate}% des lignes — "
                             "le matching sera moins précis pour les lignes sans classe."
                         )
+
+                    if include_generic:
+                        try:
+                            diag_generic_sheet, diag_generic_wordings = load_generic_wordings(excel_path)
+                            st.success(
+                                f"✅ Onglet générique trouvé : **{diag_generic_sheet}** — "
+                                f"{len(diag_generic_wordings)} wording(s) génériques seront ajoutés"
+                            )
+                        except ValueError as e:
+                            st.error(f"❌ Composants génériques : {e}")
                 except ValueError as e:
                     st.error(f"❌ {e}")
 
@@ -470,7 +492,8 @@ if st.button(button_label):
                         html_file=batch_html_path,
                         excel_file=excel_path,
                         keyword=seq_name,
-                        mode=qa_mode
+                        mode=qa_mode,
+                        include_generic=include_generic
                     )
                     results_by_sequence[seq_name] = seq_results
                 except ValueError as e:
@@ -541,7 +564,8 @@ if st.button(button_label):
                 username=username if aem_url else None,
                 password=password if aem_url else None,
                 mode=qa_mode,
-                aem_temp_path=f"temp/{session_id}_aem_input.html"
+                aem_temp_path=f"temp/{session_id}_aem_input.html",
+                include_generic=include_generic
             )
 
             today = datetime.now().strftime("%Y-%m-%d")

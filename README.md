@@ -12,6 +12,7 @@ Interface Streamlit + moteur de comparaison Python, avec export du résultat en 
 - [Lancer l'application](#lancer-lapplication)
 - [Utilisation](#utilisation)
 - [Traiter plusieurs séquences en une fois](#traiter-plusieurs-séquences-en-une-fois)
+- [Composants génériques](#composants-génériques)
 - [Format attendu du fichier Excel](#format-attendu-du-fichier-excel)
 - [Comment fonctionne le matching](#comment-fonctionne-le-matching)
 - [Comment fonctionne la QA URL](#comment-fonctionne-la-qa-url)
@@ -32,7 +33,8 @@ Interface Streamlit + moteur de comparaison Python, avec export du résultat en 
 - **Mode URL** : vérification des liens (`href`) du HTML par rapport à la liste d'URLs trackées du référentiel Excel (correspondance exacte ou fonctionnelle sur les paramètres UTM) — voir [Comment fonctionne la QA URL](#comment-fonctionne-la-qa-url).
 - **Diagnostic à l'upload** : dès que l'Excel est chargé, l'app affiche les onglets détectés, si l'onglet/la colonne attendue est trouvée, et — en mode Wording — le taux de remplissage de `TECHNICAL NAME`, pour repérer un référentiel incomplet avant même de lancer la comparaison.
 - **Mode multi-séquences** : traiter plusieurs séquences d'une même campagne (plusieurs fichiers HTML + un seul Excel) en une fois, avec un rapport Excel consolidé et un récapitulatif par séquence — voir [Traiter plusieurs séquences en une fois](#traiter-plusieurs-séquences-en-une-fois).
-- **Logs de debug dans l'UI** : le détail de l'extraction (auparavant visible seulement dans la console du serveur) est affiché dans un expander repliable après chaque comparaison.
+- **Composants génériques** (mode Wording) : si le référentiel Wording d'une campagne ne couvre pas les composants communs à toutes les séquences (footer, mentions légales, bloc fidélité...), une case à cocher permet de les fusionner automatiquement depuis un onglet séparé — voir [Composants génériques](#composants-génériques).
+- **Logs de debug dans l'UI** : le détail de l'extraction (auparavant visible seulement dans la console du serveur) est affiché dans un expander repliable après chaque comparaison, et a été réduit à l'essentiel (plus de trace ligne par ligne de chaque texte extrait).
 - **Fichiers temporaires isolés par session** : chaque session de navigateur utilise ses propres fichiers dans `temp/`, deux analyses lancées en parallèle ne s'écrasent plus.
 
 ## Architecture du projet
@@ -58,7 +60,7 @@ output/                     Rapports Excel générés (non versionné)
 
 1. Si une URL AEM est fournie, le HTML est téléchargé (`fetch_html_from_aem`) et sauvegardé dans un fichier temporaire.
 2. `run_qa_for_sequence` exécute l'extraction + le matching pour une sequence, selon le `mode` :
-   - **`wording`** : `html_extraction.load_and_extract_html_texts` parse le HTML et retourne la liste des textes trouvés (`{text, tag, type, component_class}`) ; `excel_loader.load_excel_wordings` sélectionne l'onglet Excel correspondant au `keyword` de campagne et retourne la liste des wordings attendus (`{Component, Element, Wording, Technical, norm, curr}`) ; `wording_qa.run_wording_qa` compare les deux.
+   - **`wording`** : `html_extraction.load_and_extract_html_texts` parse le HTML et retourne la liste des textes trouvés (`{text, tag, type, component_class}`) ; `excel_loader.load_excel_wordings` sélectionne l'onglet Excel correspondant au `keyword` de campagne et retourne la liste des wordings attendus (`{Component, Element, Wording, Technical, norm, curr}`). Si `include_generic=True`, `excel_loader.load_generic_wordings` charge en plus l'onglet des composants génériques et ses wordings sont ajoutés à la liste avant le matching (voir [Composants génériques](#composants-génériques)). `wording_qa.run_wording_qa` compare le tout au HTML.
    - **`url`** : `html_extraction.load_raw_html` retourne le HTML brut (reconstruit si nécessaire) ; `excel_loader.load_excel_urls` sélectionne l'onglet dont le nom contient `"UTM"` et retourne la liste des URLs trackées attendues ; `url_qa.run_url_qa` compare les deux.
 3. `report.save_report` génère le rapport Excel dans `output/` (même format de sortie pour les deux modes).
 
@@ -111,6 +113,15 @@ Une campagne a souvent plusieurs séquences (Seq1, Seq2, Seq3...), chacune avec 
 5. Consulter le récapitulatif par séquence (Total/OK/KO/Score), le tableau combiné (colonne `Sequence` ajoutée), et télécharger le **rapport Excel consolidé** unique (`QA_MULTI_..._<horodatage>.xlsx`, voir [Rapport de sortie](#rapport-de-sortie)).
 
 Si une séquence échoue (onglet/colonne introuvable), l'erreur est affichée pour ce fichier précis et les autres séquences continuent d'être traitées normalement.
+
+## Composants génériques
+
+Certaines campagnes séparent dans l'Excel les wordings **spécifiques à la séquence** (ceux qui changent d'une séquence à l'autre) des composants **génériques**, communs à toutes les séquences d'une campagne (footer, mentions légales, bloc fidélité, bloc réassurance...), regroupés dans un onglet à part.
+
+- Cocher **🧩 Les composants génériques sont dans un onglet séparé de l'Excel** (mode Wording uniquement, disponible en mode simple et en mode multi-séquences).
+- L'onglet correspondant est retrouvé automatiquement (nom contenant `"GENERIC"`, configurable via `GENERIC_SHEET_KEYWORD`) et ses wordings sont **ajoutés** à ceux de la séquence testée avant le matching — aucune autre action requise.
+- Structure attendue, identique à l'onglet de campagne à un détail près : la colonne wording de cet onglet est recherchée via `"TRANSLATION"` **ou** `"TEXT"` (le premier qui donne une correspondance unique), car un onglet générique peut porter un texte déjà localisé dans une colonne simplement nommée `"TEXT"` plutôt que `"TRANSLATION ..."`.
+- Si l'onglet générique est introuvable ou que sa colonne wording est ambiguë, une erreur explicite est renvoyée (dans le diagnostic en mode simple, ou pour le fichier concerné en mode multi-séquences) plutôt que d'ignorer silencieusement les composants génériques.
 
 ## Format attendu du fichier Excel
 
@@ -204,6 +215,7 @@ Les réglages globaux sont centralisés dans [`qa/config.py`](qa/config.py) :
 | `EXCLUDED_QA_ROWS` | Paires (Component, Element) Excel ignorées systématiquement | `subject/subject`, `header/loyalty program name` |
 | `URL_SHEET_KEYWORD` | Mot-clé pour repérer l'onglet des URLs trackées (mode URL) | `"UTM"` |
 | `URL_COLUMN_NAME` | Colonne des URLs de référence dans cet onglet | `"<< TRACKED URL >>"` |
+| `GENERIC_SHEET_KEYWORD` | Mot-clé pour repérer l'onglet des composants génériques | `"GENERIC"` |
 | `OUTPUT_DIR` | Dossier de sortie des rapports | `"output"` |
 
 ## Limitations connues / roadmap
