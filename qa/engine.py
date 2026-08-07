@@ -16,23 +16,14 @@ from qa.wording_qa import run_wording_qa
 # =========================
 # PIPELINE PRINCIPAL
 # =========================
-def run_qa(html_file=None, excel_file=None, keyword="", aem_url=None, username=None, password=None, mode="wording"):
-
-    # ✅ Si URL AEM fournie → priorité
-    if aem_url:
-
-        html_content = fetch_html_from_aem(aem_url, username, password)
-
-        os.makedirs("temp", exist_ok=True)
-        html_file = "temp/aem_input.html"
-
-        save_html_to_temp(html_content, html_file)
-
-
-    print("\n" + "=" * 70)
-    print("🔎 QA EMAIL - HTML → Excel (text-contribution)")
-    print("=" * 70)
-
+def run_qa_for_sequence(html_file, excel_file, keyword, mode="wording"):
+    """
+    Execute l'extraction + le matching pour une sequence (un HTML + un
+    onglet/sequence Excel), sans generer de rapport. Utilise par run_qa()
+    (sequence unique, rapport genere ensuite) et par les traitements
+    multi-sequences (un rapport consolide est genere a part sur l'ensemble
+    des sequences, voir qa.report.save_consolidated_report).
+    """
     if mode == "wording":
         html_texts = load_and_extract_html_texts(html_file)
         sheet, excel_wordings = load_excel_wordings(excel_file, keyword)
@@ -45,6 +36,29 @@ def run_qa(html_file=None, excel_file=None, keyword="", aem_url=None, username=N
 
     else:
         raise ValueError("Mode inconnu")
+
+    return results, sheet
+
+
+def run_qa(html_file=None, excel_file=None, keyword="", aem_url=None, username=None, password=None,
+           mode="wording", aem_temp_path="temp/aem_input.html"):
+
+    # ✅ Si URL AEM fournie → priorité
+    if aem_url:
+
+        html_content = fetch_html_from_aem(aem_url, username, password)
+
+        os.makedirs(os.path.dirname(aem_temp_path) or ".", exist_ok=True)
+        html_file = aem_temp_path
+
+        save_html_to_temp(html_content, html_file)
+
+
+    print("\n" + "=" * 70)
+    print("🔎 QA EMAIL - HTML → Excel (text-contribution)")
+    print("=" * 70)
+
+    results, sheet = run_qa_for_sequence(html_file, excel_file, keyword, mode)
 
     # 4. Générer le rapport
     report_path = save_report(results, sheet)

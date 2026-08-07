@@ -11,6 +11,7 @@ Interface Streamlit + moteur de comparaison Python, avec export du résultat en 
 - [Installation](#installation)
 - [Lancer l'application](#lancer-lapplication)
 - [Utilisation](#utilisation)
+- [Traiter plusieurs séquences en une fois](#traiter-plusieurs-séquences-en-une-fois)
 - [Format attendu du fichier Excel](#format-attendu-du-fichier-excel)
 - [Comment fonctionne le matching](#comment-fonctionne-le-matching)
 - [Comment fonctionne la QA URL](#comment-fonctionne-la-qa-url)
@@ -29,13 +30,17 @@ Interface Streamlit + moteur de comparaison Python, avec export du résultat en 
 - **Dashboard Streamlit** : taux de succès global, répartition des erreurs par type (camemberts Plotly), tableau interactif (AgGrid) avec diff mot-à-mot en couleur entre le wording attendu et le wording trouvé.
 - **Rapport Excel exportable** (`Summary` / `Details` / `KO Only`) avec mise en forme conditionnelle (couleurs par statut/criticité) et diff en rich text.
 - **Mode URL** : vérification des liens (`href`) du HTML par rapport à la liste d'URLs trackées du référentiel Excel (correspondance exacte ou fonctionnelle sur les paramètres UTM) — voir [Comment fonctionne la QA URL](#comment-fonctionne-la-qa-url).
+- **Diagnostic à l'upload** : dès que l'Excel est chargé, l'app affiche les onglets détectés, si l'onglet/la colonne attendue est trouvée, et — en mode Wording — le taux de remplissage de `TECHNICAL NAME`, pour repérer un référentiel incomplet avant même de lancer la comparaison.
+- **Mode multi-séquences** : traiter plusieurs séquences d'une même campagne (plusieurs fichiers HTML + un seul Excel) en une fois, avec un rapport Excel consolidé et un récapitulatif par séquence — voir [Traiter plusieurs séquences en une fois](#traiter-plusieurs-séquences-en-une-fois).
+- **Logs de debug dans l'UI** : le détail de l'extraction (auparavant visible seulement dans la console du serveur) est affiché dans un expander repliable après chaque comparaison.
+- **Fichiers temporaires isolés par session** : chaque session de navigateur utilise ses propres fichiers dans `temp/`, deux analyses lancées en parallèle ne s'écrasent plus.
 
 ## Architecture du projet
 
 ```
 app.py                     Interface Streamlit : upload, lancement de la QA, affichage, export
 qa/
-├── engine.py               Orchestrateur : run_qa() enchaîne les étapes ci-dessous
+├── engine.py               Orchestrateur : run_qa_for_sequence() (1 sequence) et run_qa() (+ rapport)
 ├── config.py                Constantes de configuration (colonnes Excel, regex, seuils)
 ├── text_utils.py             Nettoyage et normalisation de texte (clean_text, normalize, normalize_currency)
 ├── html_extraction.py         Extraction du wording depuis le HTML / récupération AEM
@@ -44,18 +49,20 @@ qa/
 ├── wording_qa.py                Pipeline de QA "wording" (run_wording_qa)
 ├── url_utils.py                  Extraction des href + normalisation fonctionnelle des URLs
 ├── url_qa.py                    Pipeline de QA "url" (run_url_qa)
-└── report.py                   Génération du rapport Excel (Summary / Details / KO Only)
-temp/                       Fichiers uploadés temporairement (non versionné)
+└── report.py                   Génération des rapports Excel (save_report, save_consolidated_report)
+temp/                       Fichiers uploadés temporairement, isolés par session (non versionné)
 output/                     Rapports Excel générés (non versionné)
 ```
 
 ### Flux d'exécution (`run_qa`)
 
-1. Si une URL AEM est fournie, le HTML est téléchargé (`fetch_html_from_aem`) et sauvegardé dans `temp/aem_input.html`.
-2. Selon le `mode` :
+1. Si une URL AEM est fournie, le HTML est téléchargé (`fetch_html_from_aem`) et sauvegardé dans un fichier temporaire.
+2. `run_qa_for_sequence` exécute l'extraction + le matching pour une sequence, selon le `mode` :
    - **`wording`** : `html_extraction.load_and_extract_html_texts` parse le HTML et retourne la liste des textes trouvés (`{text, tag, type, component_class}`) ; `excel_loader.load_excel_wordings` sélectionne l'onglet Excel correspondant au `keyword` de campagne et retourne la liste des wordings attendus (`{Component, Element, Wording, Technical, norm, curr}`) ; `wording_qa.run_wording_qa` compare les deux.
    - **`url`** : `html_extraction.load_raw_html` retourne le HTML brut (reconstruit si nécessaire) ; `excel_loader.load_excel_urls` sélectionne l'onglet dont le nom contient `"UTM"` et retourne la liste des URLs trackées attendues ; `url_qa.run_url_qa` compare les deux.
 3. `report.save_report` génère le rapport Excel dans `output/` (même format de sortie pour les deux modes).
+
+En mode multi-séquences, l'app appelle directement `run_qa_for_sequence` une fois par (fichier HTML, séquence), sans passer par `run_qa`, puis génère un seul rapport consolidé via `report.save_consolidated_report` (voir [Traiter plusieurs séquences en une fois](#traiter-plusieurs-séquences-en-une-fois)).
 
 ## Installation
 
@@ -92,7 +99,20 @@ L'application s'ouvre dans le navigateur (par défaut sur `http://localhost:8501
 6. Consulter :
    - le taux de succès global et la répartition des types d'erreur,
    - le tableau détaillé (lignes vertes = OK, rouges = KO, diff mot-à-mot en gras rouge sur les KO),
-   - télécharger le rapport Excel complet via le bouton **⬇️ Télécharger le rapport Excel**.
+   - télécharger le rapport Excel complet via le bouton **⬇️ Télécharger le rapport Excel**,
+   - le détail de l'extraction dans l'expander **🐛 Logs de debug** (utile pour comprendre pourquoi un texte/une URL n'a pas été trouvé).
+
+## Traiter plusieurs séquences en une fois
+
+Une campagne a souvent plusieurs séquences (Seq1, Seq2, Seq3...), chacune avec son propre HTML mais partageant le même classeur Excel référentiel. Le mode multi-séquences évite de relancer l'app pour chacune :
+
+1. Cocher **📦 Traiter plusieurs séquences en une fois**. Le champ Lien AEM disparaît : ce mode ne fonctionne qu'avec des fichiers HTML uploadés (pas de récupération AEM par URL).
+2. Uploader le fichier Excel référentiel (unique) et **plusieurs fichiers HTML** (un par séquence).
+3. Pour chaque fichier HTML, choisir dans la liste déroulante la séquence correspondante — la liste propose les **onglets** du classeur en mode Wording, ou les **séquences détectées dans l'onglet UTM** en mode URL (voir [Comment fonctionne la QA URL](#comment-fonctionne-la-qa-url)). Comme il s'agit d'un choix dans une liste (pas d'un mot-clé tapé), il n'y a pas de risque d'ambiguïté.
+4. Cliquer sur **🔍 Comparer toutes les séquences**.
+5. Consulter le récapitulatif par séquence (Total/OK/KO/Score), le tableau combiné (colonne `Sequence` ajoutée), et télécharger le **rapport Excel consolidé** unique (`QA_MULTI_..._<horodatage>.xlsx`, voir [Rapport de sortie](#rapport-de-sortie)).
+
+Si une séquence échoue (onglet/colonne introuvable), l'erreur est affichée pour ce fichier précis et les autres séquences continuent d'être traitées normalement.
 
 ## Format attendu du fichier Excel
 
@@ -171,6 +191,8 @@ Le rapport Excel est généré dans `output/QA_<nom_feuille>_<horodatage>.xlsx` 
 
 Chaque ligne comporte : `Component Name`, `Element`, `Expected Class`, `HTML Class`, `Excel Wording`, `HTML Wording`, `Status`, `Error Type`, `Similarity`, `Criticality`, `Match Type`.
 
+En mode multi-séquences, `report.save_consolidated_report` génère un rapport unique `QA_MULTI_..._<horodatage>.xlsx` : les onglets `Details`/`KO Only` ajoutent une colonne `Sequence` (tri par séquence puis criticité), et le `Summary` ajoute un tableau récapitulatif Total/OK/KO/Score par séquence en plus du score global.
+
 ## Configuration
 
 Les réglages globaux sont centralisés dans [`qa/config.py`](qa/config.py) :
@@ -188,7 +210,7 @@ Les réglages globaux sont centralisés dans [`qa/config.py`](qa/config.py) :
 
 ## Limitations connues / roadmap
 
-- **Fichiers temporaires partagés** : les uploads sont toujours écrits dans `temp/input.html` / `temp/input.xlsx`, quel que soit l'utilisateur — deux analyses lancées en même temps peuvent se marcher sur les pieds.
 - **Pas de tests automatisés.**
 - **Mode URL** : ne vérifie que la présence des URLs Excel dans le HTML (comme le script d'origine) — ne détecte pas les `href` présents dans le HTML mais absents du référentiel Excel.
 - **Découpage en séquences de l'onglet UTM** : ne gère qu'un seul niveau de séparateurs. Si un onglet imbrique des sous-catégories à l'intérieur d'une séquence (ex. des séparateurs répétés comme "FOOTER" dans chaque séquence), elles seront traitées comme des séquences distinctes plutôt que comme des sous-groupes.
+- **`temp/` n'est jamais nettoyé automatiquement** : les fichiers y sont désormais isolés par session (pas de risque d'écrasement), mais ils s'accumulent d'une session à l'autre.

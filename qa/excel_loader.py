@@ -158,6 +158,43 @@ def _parse_url_sections(raw: pd.DataFrame, header_row_idx: int, section_col_idx:
     return sections
 
 
+def _locate_url_sheet_layout(excel_file: str):
+    """
+    Trouve l'onglet UTM et repere la ligne d'en-tete, la colonne des URLs
+    trackees et (si presente) la colonne des labels de sequence.
+    Retourne (sheet, raw, header_row_idx, tracked_col_idx, section_col_idx).
+    section_col_idx et/ou header_row_idx peuvent etre None si la structure
+    attendue n'est pas trouvee.
+    """
+    sheet = find_sheet(excel_file, URL_SHEET_KEYWORD)
+
+    raw = pd.read_excel(excel_file, sheet_name=sheet, header=None, engine="openpyxl")
+
+    header_row_idx, tracked_col_idx = _find_cell(raw, URL_COLUMN_NAME)
+    if header_row_idx is None:
+        return sheet, raw, None, None, None
+
+    section_col_idx = _find_cell(raw.iloc[[header_row_idx]].reset_index(drop=True), "URL")[1]
+
+    return sheet, raw, header_row_idx, tracked_col_idx, section_col_idx
+
+
+def list_url_sequences(excel_file: str) -> list:
+    """
+    Liste les noms de sequences detectees dans l'onglet UTM, sans filtrer par
+    mot-cle (utile pour proposer un choix a l'utilisateur, ex: mode
+    multi-sequences). Retourne une liste vide si l'onglet ne comporte pas de
+    decoupage en sequences (onglet a plat) ou si sa structure est inattendue.
+    """
+    sheet, raw, header_row_idx, tracked_col_idx, section_col_idx = _locate_url_sheet_layout(excel_file)
+
+    if header_row_idx is None or section_col_idx is None:
+        return []
+
+    sections = _parse_url_sections(raw, header_row_idx, section_col_idx, tracked_col_idx)
+    return [name for name, urls in sections.items() if name and urls]
+
+
 def load_excel_urls(excel_file: str, keyword: str) -> tuple:
     """
     Charge les URLs de reference depuis l'onglet dont le nom contient
@@ -170,15 +207,10 @@ def load_excel_urls(excel_file: str, keyword: str) -> tuple:
     contient aucun decoupage en sequences, keyword est ignore et toutes les
     URLs sont retournees.
     """
-    sheet = find_sheet(excel_file, URL_SHEET_KEYWORD)
+    sheet, raw, header_row_idx, tracked_col_idx, section_col_idx = _locate_url_sheet_layout(excel_file)
 
-    raw = pd.read_excel(excel_file, sheet_name=sheet, header=None, engine="openpyxl")
-
-    header_row_idx, tracked_col_idx = _find_cell(raw, URL_COLUMN_NAME)
     if header_row_idx is None:
         raise ValueError(f"Colonne '{URL_COLUMN_NAME}' introuvable dans la feuille '{sheet}'.")
-
-    section_col_idx = _find_cell(raw.iloc[[header_row_idx]].reset_index(drop=True), "URL")[1]
 
     if section_col_idx is None:
         # Pas de colonne "URL" (label de sequence) : impossible de decouper
