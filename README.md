@@ -91,10 +91,8 @@ L'application s'ouvre dans le navigateur (par défaut sur `http://localhost:8501
 2. **Source du HTML** :
    - soit uploader un fichier `.html` (export "view-source" AEM ou HTML brut),
    - soit renseigner un **lien AEM** + **identifiant/mot de passe** pour le récupérer automatiquement.
-3. Uploader le **fichier Excel référentiel** (`.xlsx`).
-4. Renseigner le **Campaign keyword** :
-   - en mode **Wording**, il sert à retrouver l'onglet Excel (mot-clé recherché, insensible à la casse, dans le nom des onglets). Il doit correspondre à un **seul** onglet, sinon une erreur explicite est renvoyée.
-   - en mode **URL**, l'onglet est retrouvé automatiquement (nom contenant `"UTM"`) ; le keyword sert alors à sélectionner la bonne **séquence** à l'intérieur de cet onglet, si celui-ci en regroupe plusieurs (voir [Comment fonctionne la QA URL](#comment-fonctionne-la-qa-url)).
+3. Uploader le **fichier Excel référentiel** (`.xlsx`) : dès qu'il est chargé, le champ suivant devient un **menu déroulant** proposant directement les onglets du classeur (mode Wording) ou les séquences détectées dans l'onglet UTM (mode URL) — plus besoin de taper un mot-clé exact. Tant qu'aucun Excel n'est uploadé, un champ texte "Campaign keyword" fait office de repli.
+4. Choisir l'**onglet Excel** (mode Wording) ou la **séquence** (mode URL, voir [Comment fonctionne la QA URL](#comment-fonctionne-la-qa-url)) dans la liste. En mode URL, si l'onglet UTM ne regroupe aucune séquence (onglet à plat), aucun choix n'est nécessaire.
 5. Cliquer sur **🔍 Comparer**.
 6. Consulter :
    - le taux de succès global et la répartition des types d'erreur,
@@ -124,7 +122,7 @@ Si une séquence échoue (onglet/colonne introuvable), l'erreur est affichée po
   |---|---|
   | `COMPONENT NAME` | Nom du composant (reporté sur les lignes vides jusqu'au composant suivant) |
   | `ELEMENT` | Élément du composant (titre, CTA, paragraphe...) |
-  | `TEXT EN` | Wording de référence (nom configurable, voir [Configuration](#configuration)) |
+  | *(colonne contenant `TRANSLATION`)* | Wording de référence à comparer au HTML — recherché par mot-clé insensible à la casse (ex. `"TRANSLATION GERMAN + ..."`), pas par nom exact. Mot-clé configurable, voir [Configuration](#configuration). |
   | `TECHNICAL NAME` | Classe technique AEM (`audit-component-xxx`) utilisée pour matcher avec le HTML |
 
 - Les placeholders entre crochets (ex. `[gift validity end date]`) sont automatiquement retirés avant comparaison.
@@ -199,7 +197,7 @@ Les réglages globaux sont centralisés dans [`qa/config.py`](qa/config.py) :
 
 | Constante | Rôle | Valeur par défaut |
 |---|---|---|
-| `WORDING_COLUMN_NAME` | Colonne Excel contenant le wording de référence | `"TEXT EN"` |
+| `WORDING_COLUMN_NAME` | Mot-clé (insensible à la casse) pour repérer la colonne wording de référence | `"TRANSLATION"` |
 | `CAMPAIGN_KEYWORD` | Mot-clé par défaut pour l'exécution standalone (`python -m qa.engine`) | `"HugPlan S1 Bronze"` |
 | `MIN_TEXT_LENGTH` | Longueur minimale d'un texte pour être pris en compte | `3` |
 | `DEBUG_MODE` | Active les logs détaillés d'extraction dans la console | `True` |

@@ -356,13 +356,36 @@ if batch_mode:
 
 else:
     if mode == "Wording":
-        keyword = st.text_input("Campaign keyword", "HugPlan S1 Bronze")
+        sheet_options = []
+        if excel_path:
+            try:
+                sheet_options = pd.ExcelFile(excel_path).sheet_names
+            except Exception as e:
+                st.error(f"❌ Impossible de lire les onglets du fichier Excel : {e}")
+
+        if sheet_options:
+            keyword = st.selectbox("Onglet Excel (campagne)", sheet_options)
+        else:
+            keyword = st.text_input("Campaign keyword", "HugPlan S1 Bronze")
+
     else:
-        keyword = st.text_input("Campaign keyword", "HugPlan S1 Bronze")
-        st.caption(
-            "ℹ️ En mode URL, l'onglet Excel est retrouvé automatiquement (nom contenant \"UTM\"). "
-            "Ce mot-clé sert à sélectionner la bonne séquence à l'intérieur de cet onglet, s'il en contient plusieurs."
-        )
+        sequence_options = []
+        if excel_path:
+            try:
+                sequence_options = list_url_sequences(excel_path)
+            except ValueError as e:
+                st.error(f"❌ {e}")
+
+        if sequence_options:
+            keyword = st.selectbox("Séquence (onglet UTM)", sequence_options)
+            st.caption("ℹ️ L'onglet UTM lui-même est retrouvé automatiquement (nom contenant \"UTM\").")
+        else:
+            keyword = st.text_input("Campaign keyword", "HugPlan S1 Bronze")
+            st.caption(
+                "ℹ️ En mode URL, l'onglet Excel est retrouvé automatiquement (nom contenant \"UTM\"). "
+                "Ce mot-clé sert à sélectionner la bonne séquence à l'intérieur de cet onglet, s'il en contient plusieurs "
+                "(le menu déroulant apparaîtra une fois l'Excel uploadé, si l'onglet en regroupe plusieurs)."
+            )
 
 qa_mode = "wording" if mode == "Wording" else "url"
 

@@ -83,12 +83,6 @@ def build_title_to_component_map(soup: BeautifulSoup) -> dict:
                     audit_sequence.append(("title", text_norm))
                 break
 
-    if DEBUG_MODE:
-        print("\n🔢 Séquence audit-* détectée :")
-        for kind, val in audit_sequence:
-            label = "★ COMPOSANT" if kind == "component" else "  TITRE    "
-            print(f"   {label} : {val[:70]}")
-
     # 2. Résoudre chaque titre vers son composant
     title_to_component = {}
     last_component = None
@@ -110,10 +104,8 @@ def build_title_to_component_map(soup: BeautifulSoup) -> dict:
                 # Titre suivi d'un autre titre, ou dernier élément → composant PRÉCÉDENT
                 title_to_component[val] = last_component
 
-    if DEBUG_MODE:
-        print("\n🗺️  Map titre → composant résolue :")
-        for k, v in title_to_component.items():
-            print(f"   '{k[:60]}' → {v}")
+    if DEBUG_MODE and title_to_component:
+        print(f"🗺️  {len(title_to_component)} titre(s) générique(s) résolu(s) vers un composant")
 
     return title_to_component
 
@@ -129,16 +121,13 @@ def extract_texts_from_textcontribution(soup: BeautifulSoup, title_to_component:
     On conserve maintenant TOUS les elements dans leur ordre d'apparition.
     Seule la deduplication par texte exact est maintenue (evite vrais doublons).
     """
-    if DEBUG_MODE:
-        print("\n🔎 Extraction depuis <div class='text-contribution'>…")
-
     results = []
     seen = set()
 
     blocks = soup.find_all(class_="text-contribution")
 
     if DEBUG_MODE:
-        print(f"   → {len(blocks)} bloc(s) detecte(s)")
+        print(f"🔎 {len(blocks)} bloc(s) 'text-contribution' détecté(s)")
 
     for block in blocks:
 
@@ -181,8 +170,6 @@ def extract_texts_from_textcontribution(soup: BeautifulSoup, title_to_component:
             }
             results.append(item)
             seen.add(text)
-            if DEBUG_MODE:
-                print(f"   ✓ [{item['type']}] {text[:90]}")
 
         # Fallback : texte nu du bloc
         block_text = block.get_text(" ", strip=True)
@@ -200,8 +187,6 @@ def extract_texts_from_textcontribution(soup: BeautifulSoup, title_to_component:
             }
             results.append(item)
             seen.add(block_text)
-            if DEBUG_MODE:
-                print(f"   ✓ [Text] {block_text[:90]}")
 
         # --- Traitement des audit-generique-title ---
     titles = soup.find_all(class_="audit-generique-title")
@@ -232,13 +217,8 @@ def extract_texts_from_textcontribution(soup: BeautifulSoup, title_to_component:
             results.append(item)
             seen.add(text)
 
-            if DEBUG_MODE:
-                print(f"   ✓ [TITRE/{item['type']}] {text[:80]} → {component_class}")
-
     if DEBUG_MODE:
-        print(f"\n{'='*62}")
-        print(f"✔ {len(results)} textes prets pour la comparaison")
-        print(f"{'='*62}")
+        print(f"✔ {len(results)} textes prêts pour la comparaison")
 
     return results
 

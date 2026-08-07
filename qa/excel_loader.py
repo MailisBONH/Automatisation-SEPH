@@ -42,6 +42,29 @@ def find_sheet(excel_file: str, keyword: str):
     return matches[0]
 
 
+def find_column(df: pd.DataFrame, keyword: str) -> str:
+    """
+    Trouve le nom exact d'une colonne dont le nom contient keyword
+    (insensible a la casse). Meme principe que find_sheet().
+    """
+    matches = [c for c in df.columns if keyword.lower() in str(c).lower()]
+
+    if len(matches) == 0:
+        raise ValueError(
+            f"Aucune colonne ne correspond à '{keyword}'. "
+            "Merci de vérifier le nom de la colonne wording."
+        )
+
+    if len(matches) > 1:
+        cols_list = ", ".join(str(c) for c in matches)
+        raise ValueError(
+            f"Plusieurs colonnes correspondent à '{keyword}' : {cols_list}. "
+            "Merci de préciser davantage le nom de la colonne wording."
+        )
+
+    return matches[0]
+
+
 def clean_excel_wording(text: str) -> str:
     if not text:
         return ""
@@ -65,8 +88,7 @@ def load_excel_wordings(excel_file: str, keyword: str) -> tuple:
     df = pd.read_excel(excel_file, sheet_name=sheet, header=1, engine="openpyxl")
     df.columns = df.columns.str.strip()
 
-    if WORDING_COLUMN_NAME not in df.columns:
-        raise ValueError(f"Colonne '{WORDING_COLUMN_NAME}' introuvable dans la feuille '{sheet}'.")
+    wording_column = find_column(df, WORDING_COLUMN_NAME)
 
     excel_wordings = []
     TECHNICAL_COLUMN = "TECHNICAL NAME"
@@ -89,7 +111,7 @@ def load_excel_wordings(excel_file: str, keyword: str) -> tuple:
             continue
 
 
-        wording = row.get(WORDING_COLUMN_NAME)
+        wording = row.get(wording_column)
 
         if pd.isna(wording):
             continue

@@ -5,7 +5,7 @@ import re
 # =========================
 OUTPUT_DIR = "output"
 
-WORDING_COLUMN_NAME = "TEXT EN"           # Colonne texte dans l'Excel
+WORDING_COLUMN_NAME = "TRANSLATION"       # Mot-clé (insensible à la casse) de la colonne wording dans l'Excel
 CAMPAIGN_KEYWORD = "HugPlan S1 Bronze"    # Mot-clé pour sélectionner l'onglet dans l'Excel
 MIN_TEXT_LENGTH = 3
 DEBUG_MODE = True
