@@ -151,13 +151,13 @@ Pour chaque texte extrait du HTML, `qa/wording_qa.py` essaie, dans l'ordre, les 
 
 1. **Direct** (`find_best_match`) — comparaison 1 pour 1 avec les wordings Excel partageant la même classe technique (`TECHNICAL NAME` ↔ classe CSS `audit-component-*` trouvée autour de l'élément HTML).
 2. **Agrégé** (`find_aggregated_match`) — regroupe 2 à 3 blocs HTML consécutifs (ex. titre + paragraphe) pour matcher une seule cellule Excel, utile quand le découpage HTML est plus fin que le découpage Excel.
-3. **Split** (`find_split_match`) — accepte le cas où le texte HTML est une sous-phrase d'une cellule Excel (typiquement quand un placeholder Excel a été retiré côté HTML).
+3. **Split** (`find_split_match`) — accepte le cas où le texte HTML est une sous-phrase d'une cellule Excel (typiquement quand un placeholder Excel a été retiré côté HTML, ou qu'un fragment HTML couvre une bonne partie d'une cellule combinée). Deux garde-fous contre les faux positifs : le fragment doit couvrir au moins 40 % de la longueur de la cellule Excel (`min_ratio`), et si le HTML et la cellule ont chacun une classe technique connue, elles doivent correspondre (sinon un fragment court peut coïncider par hasard avec une cellule sans rapport, ex. un mot isolé qui apparaît dans un tout autre paragraphe).
 4. **Closest match** (`find_closest_match`) — en dernier recours, retient le wording Excel le plus proche par similarité (`difflib.SequenceMatcher`, seuil ≥ 55 %) :
    - classe technique différente → KO `Wording in wrong component`,
    - similarité ≥ 85 % → OK,
    - sinon → KO `Wording differs`.
 
-Les étapes 1 et 2 ne verrouillent leur résultat que s'il est **OK** : un candidat de la bonne classe mais textuellement très différent (KO) n'empêche pas d'essayer l'étape suivante, qui peut trouver un meilleur match pour ce même fragment HTML (ex. un fragment court comme `"Unlimited"` qui matche par Split dans une cellule plus longue, alors que le Direct sur la même classe aurait comparé l'intégralité de la cellule et échoué). Le KO de l'étape 1/2 n'est utilisé que si aucune étape suivante ne trouve de OK.
+Les étapes 1 et 2 ne verrouillent leur résultat que s'il est **OK** : un candidat de la bonne classe mais textuellement très différent (KO) n'empêche pas d'essayer l'étape suivante, qui peut trouver un meilleur match pour ce même fragment HTML. Le KO de l'étape 1/2 n'est utilisé que si aucune étape suivante ne trouve de OK.
 
 La comparaison texte à texte elle-même (`compare()`) normalise les deux chaînes (`normalize()` dans `qa/text_utils.py` : retrait des tags AEM, placeholders, caractères invisibles) puis classe le résultat :
 

@@ -60,7 +60,7 @@ def run_wording_qa(html_texts, excel_wordings):
             continue
 
         # C) Split (HTML ⊂ Excel)
-        split = find_split_match(h_text, excel_wordings, matched_excel_counts)
+        split = find_split_match(item, excel_wordings, matched_excel_counts)
         if split:
             idx, status, error, sim = split
             results.append(make_row(excel_wordings[idx], item, h_text,

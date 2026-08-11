@@ -162,7 +162,7 @@ def find_aggregated_match(html_items, start_idx, excel_wordings, matched_excel_i
     return None
 
 
-def find_split_match(h_text: str, excel_wordings: list, matched_excel_idx: set):
+def find_split_match(html_item: dict, excel_wordings: list, matched_excel_idx: set, min_ratio: float = 0.40):
     """
     Matching par splitting : le texte HTML est une sous-phrase d'une cellule Excel.
     Ex: HTML = 'Get a gift ... before .'
@@ -170,10 +170,21 @@ def find_split_match(h_text: str, excel_wordings: list, matched_excel_idx: set):
         Apres normalize(), Excel devient 'Get a gift ... before .'
         → egalite exacte, deja gere dans compare().
 
-    Ce fallback couvre le cas ou la sous-phrase HTML est incluse dans l'Excel normalise.
+    Ce fallback couvre le cas ou la sous-phrase HTML est incluse dans l'Excel normalise
+    (placeholder retire, ou fragment HTML representant une bonne partie de la cellule
+    combinee). Deux garde-fous contre les faux positifs (un fragment court qui
+    apparait par coincidence dans une cellule sans rapport) :
+    - si le HTML et la cellule Excel ont chacun une classe technique connue et
+      qu'elles different, on ignore (meme logique que find_closest_match) ;
+    - le fragment HTML doit couvrir au moins min_ratio de la longueur de la
+      cellule Excel (une coincidence sur un mot isole donne un ratio tres bas).
+
     Ne marque PAS matched_excel_idx (d'autres fragments HTML peuvent couvrir la meme cellule).
-    Retourne (idx, status, error, sim) ou None.
+    Retourne (idx, status, error, sim) ou None. sim est un pourcentage (0-100).
     """
+    h_text = html_item["text"]
+    found_class = html_item.get("component_class")
+
     h_norm = normalize(h_text)
     if not h_norm or len(h_norm) < MIN_TEXT_LENGTH:
         return None
@@ -184,9 +195,14 @@ def find_split_match(h_text: str, excel_wordings: list, matched_excel_idx: set):
         e_norm = ex["norm"]
         if not e_norm:
             continue
+
+        expected_class = ex.get("Technical")
+        if found_class and expected_class and found_class != expected_class:
+            continue
+
         ratio = len(h_norm) / len(e_norm) if len(e_norm) > 0 else 0
-        if h_norm.lower() in e_norm.lower() and ratio >= 0.30:
-            return (idx, "OK", "", round(ratio, 2))
+        if h_norm.lower() in e_norm.lower() and ratio >= min_ratio:
+            return (idx, "OK", "", round(ratio * 100))
 
     return None
 
