@@ -4,6 +4,7 @@ import pandas as pd
 
 from qa.config import (
     EXCEL_PLACEHOLDER_PATTERN,
+    EXCLUDED_QA_ELEMENTS,
     EXCLUDED_QA_ROWS,
     GENERIC_SHEET_KEYWORD,
     MIN_TEXT_LENGTH,
@@ -111,7 +112,7 @@ def _parse_wording_rows(df: pd.DataFrame, wording_column: str) -> list:
         comp_norm = str(comp).strip().lower() if comp else ""
         elem_norm = elem.lower()
 
-        if (comp_norm, elem_norm) in EXCLUDED_QA_ROWS:
+        if (comp_norm, elem_norm) in EXCLUDED_QA_ROWS or elem_norm in EXCLUDED_QA_ELEMENTS:
             continue
 
         wording = row.get(wording_column)

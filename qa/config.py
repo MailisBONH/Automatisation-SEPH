@@ -35,3 +35,9 @@ EXCLUDED_QA_ROWS = {
     ("subject", "subject"),
     ("header", "loyalty program name"),
 }
+
+# Elements ignores quel que soit leur composant (comparaison sur ELEMENT
+# seul, insensible a la casse). "logo" : le texte de reference est le
+# alt-text d'une image, jamais extrait/verifie par l'outil (voir
+# extract_texts_from_textcontribution, qui ne lit que le texte visible).
+EXCLUDED_QA_ELEMENTS = {"logo"}

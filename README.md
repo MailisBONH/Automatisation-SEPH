@@ -138,7 +138,7 @@ Certaines campagnes séparent dans l'Excel les wordings **spécifiques à la sé
   | `TECHNICAL NAME` | Classe technique AEM (`audit-component-xxx`) utilisée pour matcher avec le HTML |
 
 - Les placeholders entre crochets (ex. `[gift validity end date]`) sont automatiquement retirés avant comparaison.
-- Certaines lignes sont ignorées systématiquement (`Subject` / `Header - Loyalty program name`, voir `EXCLUDED_QA_ROWS`).
+- Certaines lignes sont ignorées systématiquement (`Subject` / `Header - Loyalty program name`, voir `EXCLUDED_QA_ROWS`), ainsi que tout élément nommé `LOGO` quel que soit son composant (voir `EXCLUDED_QA_ELEMENTS`) — son wording de référence est un texte alternatif d'image (`alt`), jamais extrait ni vérifié par l'outil.
 
 En **mode URL**, l'onglet référentiel est différent :
 
@@ -216,6 +216,8 @@ Les réglages globaux sont centralisés dans [`qa/config.py`](qa/config.py) :
 | `MIN_TEXT_LENGTH` | Longueur minimale d'un texte pour être pris en compte | `3` |
 | `DEBUG_MODE` | Active les logs détaillés d'extraction dans la console | `True` |
 | `EXCLUDED_QA_ROWS` | Paires (Component, Element) Excel ignorées systématiquement | `subject/subject`, `header/loyalty program name` |
+| `EXCLUDED_QA_ELEMENTS` | Éléments Excel ignorés quel que soit le composant | `logo` |
+| `LEGAL_MENTION_CLASS_KEYWORDS` | Mots-clés identifiant une classe de mentions légales/footer, dont les liens individuels sont ignorés | `legal`, `footer` |
 | `URL_SHEET_KEYWORD` | Mot-clé pour repérer l'onglet des URLs trackées (mode URL) | `"UTM"` |
 | `URL_COLUMN_NAME` | Colonne des URLs de référence dans cet onglet | `"<< TRACKED URL >>"` |
 | `GENERIC_SHEET_KEYWORD` | Mot-clé pour repérer l'onglet des composants génériques | `"GENERIC"` |
