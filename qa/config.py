@@ -15,6 +15,11 @@ URL_COLUMN_NAME = "<< TRACKED URL >>"     # Colonne des URLs de référence dans
 
 GENERIC_SHEET_KEYWORD = "GENERIC"         # Mot-clé pour repérer l'onglet des composants génériques
 
+# Mots-clés (insensibles à la casse) identifiant une classe de mentions
+# légales / footer, dont on ignore les liens individuels (leur texte est
+# deja couvert par le paragraphe complet qui les englobe).
+LEGAL_MENTION_CLASS_KEYWORDS = ("legal", "footer")
+
 # Fichiers par defaut pour l'execution standalone (python -m qa.engine)
 HTML_FILE = "input/email.html"
 EXCEL_FILE = "input/wording.xlsx"

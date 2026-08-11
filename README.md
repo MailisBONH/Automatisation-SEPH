@@ -26,7 +26,8 @@ Interface Streamlit + moteur de comparaison Python, avec export du résultat en 
 - **Extraction automatique du wording** depuis le HTML :
   - lecture des blocs `class="text-contribution"` et `class="audit-generique-title"` (marqueurs AEM),
   - reconstruction du HTML réel si le fichier fourni est une vue "view-source" AEM,
-  - nettoyage des artefacts techniques : directives `<% %>` / `<%= %>`, variables `${...}`, placeholders `[xxx]`, caractères invisibles (LRM/RLM), entités HTML.
+  - nettoyage des artefacts techniques : directives `<% %>` / `<%= %>`, variables `${...}`, placeholders `[xxx]`, caractères invisibles (LRM/RLM), entités HTML,
+  - les liens (`<a>`) individuels à l'intérieur d'un composant de mentions légales/footer (classe contenant `"legal"` ou `"footer"`, voir `LEGAL_MENTION_CLASS_KEYWORDS`) sont ignorés : leur texte est déjà couvert par le paragraphe complet qui les englobe.
 - **Matching tolérant** entre HTML et Excel, avec plusieurs stratégies en cascade (direct, agrégation de blocs, sous-phrase, meilleure correspondance approximative) et un traitement dédié aux devises (séparateurs `|`, `/`, `I`).
 - **Dashboard Streamlit** : taux de succès global, répartition des erreurs par type (camemberts Plotly), tableau interactif (AgGrid) avec diff mot-à-mot en couleur entre le wording attendu et le wording trouvé.
 - **Rapport Excel exportable** (`Summary` / `Details` / `KO Only`) avec mise en forme conditionnelle (couleurs par statut/criticité) et diff en rich text.

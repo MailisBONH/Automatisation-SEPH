@@ -4,7 +4,7 @@ import requests
 from requests.auth import HTTPBasicAuth
 from bs4 import BeautifulSoup
 
-from qa.config import DEBUG_MODE
+from qa.config import DEBUG_MODE, LEGAL_MENTION_CLASS_KEYWORDS
 from qa.text_utils import clean_text, clean_template_code, get_type, is_valid, normalize
 
 
@@ -155,9 +155,13 @@ def extract_texts_from_textcontribution(soup: BeautifulSoup, title_to_component:
             component_class = find_component_class(el)
 
 
+            # Ignore les liens individuels des mentions legales/footer : leur
+            # texte est deja couvert par le paragraphe complet qui les
+            # englobe (extrait separement via le fallback texte-brut-du-bloc).
             if (
-                component_class == "audit-component-legal-mention"
-                and el.name.lower() == "a"
+                el.name.lower() == "a"
+                and component_class
+                and any(kw in component_class.lower() for kw in LEGAL_MENTION_CLASS_KEYWORDS)
             ):
                 continue
 
