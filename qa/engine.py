@@ -26,7 +26,11 @@ def run_qa_for_sequence(html_file, excel_file, keyword, mode="wording", include_
 
     include_generic (mode "wording" uniquement) : si True, les wordings de
     l'onglet "composants génériques" (voir load_generic_wordings) sont
-    ajoutés à ceux de la séquence avant le matching.
+    ajoutés à ceux de la séquence avant le matching. Les wordings de
+    l'onglet séquence qui portent la même classe technique qu'un composant
+    générique sont retirés au préalable : c'est l'onglet générique qui fait
+    foi pour ces composants (évite qu'un wording obsolète/incorrect resté
+    dans l'onglet séquence ne pollue le matching).
     """
     if mode == "wording":
         html_texts = load_and_extract_html_texts(html_file)
@@ -34,6 +38,16 @@ def run_qa_for_sequence(html_file, excel_file, keyword, mode="wording", include_
 
         if include_generic:
             generic_sheet, generic_wordings = load_generic_wordings(excel_file)
+            generic_classes = {w["Technical"] for w in generic_wordings if w.get("Technical")}
+
+            overridden = [w for w in excel_wordings if w.get("Technical") in generic_classes]
+            if overridden:
+                print(
+                    f"➖ {len(overridden)} wording(s) de l'onglet séquence ignoré(s) "
+                    "(composant couvert par l'onglet générique)"
+                )
+                excel_wordings = [w for w in excel_wordings if w.get("Technical") not in generic_classes]
+
             print(f"➕ {len(generic_wordings)} wording(s) générique(s) ajoutés depuis l'onglet '{generic_sheet}'")
             excel_wordings = excel_wordings + generic_wordings
 

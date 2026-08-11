@@ -157,6 +157,8 @@ Pour chaque texte extrait du HTML, `qa/wording_qa.py` essaie, dans l'ordre, les 
    - similarité ≥ 85 % → OK,
    - sinon → KO `Wording differs`.
 
+Les étapes 1 et 2 ne verrouillent leur résultat que s'il est **OK** : un candidat de la bonne classe mais textuellement très différent (KO) n'empêche pas d'essayer l'étape suivante, qui peut trouver un meilleur match pour ce même fragment HTML (ex. un fragment court comme `"Unlimited"` qui matche par Split dans une cellule plus longue, alors que le Direct sur la même classe aurait comparé l'intégralité de la cellule et échoué). Le KO de l'étape 1/2 n'est utilisé que si aucune étape suivante ne trouve de OK.
+
 La comparaison texte à texte elle-même (`compare()`) normalise les deux chaînes (`normalize()` dans `qa/text_utils.py` : retrait des tags AEM, placeholders, caractères invisibles) puis classe le résultat :
 
 | Cas | Statut | Error Type |

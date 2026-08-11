@@ -32,22 +32,25 @@ def run_wording_qa(html_texts, excel_wordings):
         criticality = "High"
 
 
-        # A) Matching direct
-        match = find_best_match(item, excel_wordings, set(matched_excel_counts.keys()))
-        if match:
-            idx, status, error, sim = match
+        # A) Matching direct — on ne verrouille ce resultat que s'il est OK.
+        # Un candidat de la bonne classe mais textuellement tres different
+        # (KO) ne doit pas empecher d'essayer l'agregation/le split, qui
+        # peuvent trouver un meilleur match pour ce meme fragment HTML.
+        direct = find_best_match(item, excel_wordings, set(matched_excel_counts.keys()))
+        if direct and direct[1] == "OK":
+            idx, status, error, sim = direct
             results.append(make_row(excel_wordings[idx], item, h_text,
                                      status, error, sim, "Direct"))
             matched_excel_counts[idx] += 1
             i += 1
             continue
 
-        # B) Agregation (N HTML → 1 Excel)
+        # B) Agregation (N HTML → 1 Excel) — meme logique : on ne verrouille
+        # que si le resultat est OK.
         agg = find_aggregated_match(html_texts, i, excel_wordings, matched_excel_counts)
-        if agg:
+        if agg and agg[2] == "OK":
             nb, idx, status, error, sim = agg
             agg_text = " ".join(html_texts[i + k]["text"] for k in range(nb))
-            agg_types = "/".join(dict.fromkeys(html_texts[i+k]["type"] for k in range(nb)))
             results.append(make_row(excel_wordings[idx], item, agg_text,
                                      status, error, sim, f"Agrege ({nb} blocs)"))
             matched_excel_counts[idx] += 1
@@ -63,6 +66,29 @@ def run_wording_qa(html_texts, excel_wordings):
             results.append(make_row(excel_wordings[idx], item, h_text,
                                      "OK", "", sim, "Split (HTML ⊂ Excel)"))
             i += 1
+            continue
+
+        # Ni Direct, ni Agregation, ni Split n'ont trouve de OK : on retombe
+        # sur le meilleur KO deja trouve (Direct en priorite, puis
+        # Agregation) plutot que de l'ignorer et de sauter directement au
+        # closest-match generique.
+        if direct:
+            idx, status, error, sim = direct
+            results.append(make_row(excel_wordings[idx], item, h_text,
+                                     status, error, sim, "Direct"))
+            matched_excel_counts[idx] += 1
+            i += 1
+            continue
+
+        if agg:
+            nb, idx, status, error, sim = agg
+            agg_text = " ".join(html_texts[i + k]["text"] for k in range(nb))
+            results.append(make_row(excel_wordings[idx], item, agg_text,
+                                     status, error, sim, f"Agrege ({nb} blocs)"))
+            matched_excel_counts[idx] += 1
+            for k in range(nb):
+                html_consumed.add(i + k)
+            i += nb
             continue
 
         # D) Aucun match exact — chercher le wording Excel le plus proche
