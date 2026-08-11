@@ -71,12 +71,14 @@ def run_wording_qa(html_texts, excel_wordings):
         # Ni Direct, ni Agregation, ni Split n'ont trouve de OK : on retombe
         # sur le meilleur KO deja trouve (Direct en priorite, puis
         # Agregation) plutot que de l'ignorer et de sauter directement au
-        # closest-match generique.
+        # closest-match generique. On ne marque PAS matched_excel_counts ici
+        # (contrairement au cas OK) : ce KO ne "consomme" pas la cellule
+        # Excel, un autre fragment HTML (plus tard dans la boucle) doit
+        # pouvoir encore la matcher correctement via Direct/Agregation/Split.
         if direct:
             idx, status, error, sim = direct
             results.append(make_row(excel_wordings[idx], item, h_text,
                                      status, error, sim, "Direct"))
-            matched_excel_counts[idx] += 1
             i += 1
             continue
 
@@ -85,7 +87,6 @@ def run_wording_qa(html_texts, excel_wordings):
             agg_text = " ".join(html_texts[i + k]["text"] for k in range(nb))
             results.append(make_row(excel_wordings[idx], item, agg_text,
                                      status, error, sim, f"Agrege ({nb} blocs)"))
-            matched_excel_counts[idx] += 1
             for k in range(nb):
                 html_consumed.add(i + k)
             i += nb
