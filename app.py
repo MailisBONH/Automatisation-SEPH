@@ -5,7 +5,7 @@ import io
 import re
 import uuid
 import contextlib
-from qa.diagnostics import find_duplicate_components, find_unused_excel_classes
+from qa.diagnostics import find_duplicate_components, find_unused_excel_classes, find_wrong_language_wordings
 from qa.engine import run_qa, run_qa_for_sequence
 from qa.excel_loader import list_url_sequences, load_excel_urls, load_excel_wordings, load_generic_wordings
 from qa.html_extraction import load_and_extract_html_texts
@@ -463,6 +463,19 @@ if excel_path and not batch_mode:
                         st.warning(
                             f"⚠️ Composant(s) présents avec plusieurs classes techniques différentes — "
                             f"souvent un bloc dupliqué par erreur (copier-coller) : {details}"
+                        )
+
+                    language_mismatches = find_wrong_language_wordings(combined_wordings)
+                    if language_mismatches:
+                        preview = "; ".join(
+                            f"**{m['Component']}** ({m['detected_lang']}) : \"{str(m['Wording'])[:40]}...\""
+                            for m in language_mismatches[:5]
+                        )
+                        more = f" (+{len(language_mismatches) - 5} autre(s))" if len(language_mismatches) > 5 else ""
+                        st.warning(
+                            f"⚠️ {len(language_mismatches)} wording(s) semblent dans une langue différente "
+                            f"de la langue dominante (`{language_mismatches[0]['expected_lang']}`) — "
+                            f"probablement collés depuis une autre campagne/marché : {preview}{more}"
                         )
 
                     if html_path:

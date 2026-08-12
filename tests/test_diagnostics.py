@@ -1,4 +1,4 @@
-from qa.diagnostics import find_duplicate_components, find_unused_excel_classes
+from qa.diagnostics import find_duplicate_components, find_unused_excel_classes, find_wrong_language_wordings
 
 
 def excel_row(wording="text", technical=None, component="Comp"):
@@ -62,3 +62,48 @@ class TestFindDuplicateComponents:
             excel_row(component="LEGAL NOTICE", technical=None),
         ]
         assert find_duplicate_components(excel_wordings) == []
+
+
+GERMAN_SENTENCES = [
+    "Entdecke Neuheiten und Empfehlungen, die perfekt zu deinem Stil passen.",
+    "Wir haben die besten Angebote für dich ausgewählt, schau sie dir jetzt an.",
+    "Deine Bestellung wird in Kürze versendet, vielen Dank für deine Geduld.",
+    "Sichere dir jetzt deinen Rabatt, bevor das Angebot morgen ausläuft.",
+]
+ITALIAN_SENTENCES = [
+    "Scopri il programma fedeltà e ottieni subito i tuoi vantaggi esclusivi.",
+    "Approfitta delle nostre migliori offerte selezionate apposta per te.",
+]
+
+
+class TestFindWrongLanguageWordings:
+    def test_minority_cluster_is_flagged(self):
+        excel_wordings = [excel_row(wording=s, component="A") for s in GERMAN_SENTENCES]
+        excel_wordings += [excel_row(wording=s, component="B") for s in ITALIAN_SENTENCES]
+
+        mismatches = find_wrong_language_wordings(excel_wordings)
+
+        flagged_texts = {m["Wording"] for m in mismatches}
+        assert flagged_texts == set(ITALIAN_SENTENCES)
+        assert all(m["expected_lang"] == "de" for m in mismatches)
+        assert all(m["detected_lang"] == "it" for m in mismatches)
+
+    def test_all_same_language_is_not_flagged(self):
+        excel_wordings = [excel_row(wording=s, component="A") for s in GERMAN_SENTENCES]
+        assert find_wrong_language_wordings(excel_wordings) == []
+
+    def test_isolated_single_occurrence_is_not_flagged(self):
+        # Only one Italian sentence among many German ones: below
+        # min_cluster_size, treated as noise rather than a real block.
+        excel_wordings = [excel_row(wording=s, component="A") for s in GERMAN_SENTENCES]
+        excel_wordings.append(excel_row(wording=ITALIAN_SENTENCES[0], component="B"))
+
+        assert find_wrong_language_wordings(excel_wordings) == []
+
+    def test_short_texts_are_ignored(self):
+        excel_wordings = [excel_row(wording="Neu", component="A"), excel_row(wording="Hallo", component="B")]
+        assert find_wrong_language_wordings(excel_wordings) == []
+
+    def test_too_few_candidates_returns_empty(self):
+        excel_wordings = [excel_row(wording=GERMAN_SENTENCES[0], component="A")]
+        assert find_wrong_language_wordings(excel_wordings) == []

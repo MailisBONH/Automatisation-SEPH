@@ -3,6 +3,13 @@ Verifications de coherence entre le referentiel Excel et le HTML, destinees
 a etre affichees dans le diagnostic de l'app avant de lancer la QA
 complete (ou en complement du rapport).
 """
+from collections import Counter
+
+from langdetect import DetectorFactory, LangDetectException, detect
+
+# langdetect utilise un tirage aleatoire interne ; on fixe la graine pour
+# avoir un resultat reproductible (important pour les tests).
+DetectorFactory.seed = 0
 
 
 def find_unused_excel_classes(html_texts: list, excel_wordings: list) -> list:
@@ -38,3 +45,52 @@ def find_duplicate_components(excel_wordings: list) -> list:
     return sorted(
         (comp, sorted(classes)) for comp, classes in classes_by_component.items() if len(classes) > 1
     )
+
+
+def find_wrong_language_wordings(excel_wordings: list, min_text_length: int = 30, min_cluster_size: int = 2) -> list:
+    """
+    Detecte les wordings dont la langue semble differente de la langue
+    dominante du referentiel (ex: du texte italien reste dans un onglet
+    allemand, copie-colle depuis une autre campagne/marche).
+
+    - Les textes courts sont ignores (min_text_length) : la detection de
+      langue n'est pas fiable sur quelques mots (ex: "Neu" ou noms de
+      marque courts se font souvent detecter dans une mauvaise langue par
+      coincidence).
+    - Une langue minoritaire n'est signalee que si elle apparait au moins
+      min_cluster_size fois : une detection isolee est le plus souvent un
+      faux positif (mot emprunte, nom propre...), alors qu'un vrai bloc de
+      contenu dans la mauvaise langue se retrouve sur plusieurs lignes.
+
+    Retourne une liste de dicts {Component, Element, Wording, detected_lang,
+    expected_lang}.
+    """
+    candidates = [w for w in excel_wordings if len(str(w.get("Wording", ""))) >= min_text_length]
+    if len(candidates) < 3:
+        return []
+
+    detected = []
+    for w in candidates:
+        try:
+            lang = detect(str(w["Wording"]))
+        except LangDetectException:
+            lang = None
+        detected.append((w, lang))
+
+    lang_counts = Counter(lang for _, lang in detected if lang)
+    if not lang_counts:
+        return []
+
+    dominant_lang, _ = lang_counts.most_common(1)[0]
+
+    return [
+        {
+            "Component": w.get("Component"),
+            "Element": w.get("Element"),
+            "Wording": w.get("Wording"),
+            "detected_lang": lang,
+            "expected_lang": dominant_lang,
+        }
+        for w, lang in detected
+        if lang and lang != dominant_lang and lang_counts[lang] >= min_cluster_size
+    ]
