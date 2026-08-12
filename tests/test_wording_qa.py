@@ -1,5 +1,5 @@
 from qa.text_utils import normalize, normalize_currency
-from qa.wording_qa import run_wording_qa
+from qa.wording_qa import _drop_ko_covered_by_ok, run_wording_qa
 
 
 def excel_row(wording, technical=None, component="Comp", element="Elem"):
@@ -73,6 +73,55 @@ class TestKoFallbackDoesNotStarveSplit:
         )
         assert big_fragment["Status"] == "OK"
         assert big_fragment["Match Type"] == "Split (HTML ⊂ Excel)"
+
+
+class TestDropKoCoveredByOk:
+    def test_ko_fragment_contained_in_ok_html_is_dropped(self):
+        results = [
+            {"Status": "OK", "HTML Wording": "Contact us for more information about our privacy policy"},
+            {"Status": "KO", "HTML Wording": "Contact us", "Excel Wording": "x"},
+        ]
+        filtered = _drop_ko_covered_by_ok(results)
+        assert filtered == [results[0]]
+
+    def test_unrelated_ko_is_kept(self):
+        results = [
+            {"Status": "OK", "HTML Wording": "Contact us for more information"},
+            {"Status": "KO", "HTML Wording": "Totally unrelated text", "Excel Wording": "x"},
+        ]
+        filtered = _drop_ko_covered_by_ok(results)
+        assert results[1] in filtered
+
+    def test_very_short_ko_fragment_is_kept_despite_containment(self):
+        # Below min_length: too easy to coincide by chance, kept as a real KO.
+        results = [
+            {"Status": "OK", "HTML Wording": "The cat sat on the mat today"},
+            {"Status": "KO", "HTML Wording": "cat", "Excel Wording": "x"},
+        ]
+        filtered = _drop_ko_covered_by_ok(results, min_length=5)
+        assert results[1] in filtered
+
+    def test_end_to_end_short_link_covered_by_matched_paragraph_is_dropped(self):
+        excel_wordings = [
+            excel_row(
+                "Contact us at support@example.com for any question about your order",
+                technical="audit-component-footer",
+            )
+        ]
+        html_texts = [
+            html_item("support@example.com", component_class="audit-component-footer"),
+            html_item(
+                "Contact us at support@example.com for any question about your order",
+                component_class="audit-component-footer",
+            ),
+        ]
+
+        results = run_wording_qa(html_texts, excel_wordings)
+
+        assert not any(r.get("HTML Wording") == "support@example.com" for r in results)
+        assert result_for(results, "Contact us at support@example.com for any question about your order")[
+            "Status"
+        ] == "OK"
 
 
 class TestBasicWordingQa:

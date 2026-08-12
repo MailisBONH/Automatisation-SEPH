@@ -186,6 +186,8 @@ La comparaison texte à texte elle-même (`compare()`) normalise les deux chaîn
 
 Chaque wording Excel non couvert par un match HTML est reporté en fin de tableau avec le statut `Not in HTML` (ou `Wording differs` si un texte HTML proche existe), et chaque doublon de KO identique (même paire HTML/Excel) est dédupliqué.
 
+Un dernier filtre (`_drop_ko_covered_by_ok`) supprime les KO dont le texte HTML est déjà entièrement contenu dans le texte HTML d'une autre ligne validée OK — cas fréquent quand un même contenu est extrait à la fois en un bloc complet (qui matche) et en fragments plus courts (qui, comparés seuls à leur propre wording Excel, ne matchent pas) : le fragment court est déjà couvert par le bloc validé, ce n'est pas un écart réel.
+
 ## Comment fonctionne la QA URL
 
 L'onglet Excel de référence est celui dont le nom contient `"UTM"` (configurable via `URL_SHEET_KEYWORD`, voir [Configuration](#configuration)).

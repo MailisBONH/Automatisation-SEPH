@@ -5,6 +5,35 @@ from qa.matching import find_aggregated_match, find_best_match, find_closest_mat
 from qa.text_utils import normalize, normalize_currency
 
 
+def _drop_ko_covered_by_ok(results: list, min_length: int = 5) -> list:
+    """
+    Supprime les lignes KO dont le texte HTML est deja entierement contenu
+    dans le texte HTML d'une autre ligne validee OK. Ce cas se produit quand
+    un meme contenu est extrait a la fois en un seul bloc complet (qui
+    matche correctement) et en fragments plus courts qui, compares
+    individuellement, ne matchent pas leur propre wording Excel : le
+    fragment court est deja couvert par le bloc valide, ce n'est pas un
+    ecart reel a signaler separement.
+    """
+    ok_html_norms = [
+        normalize(r["HTML Wording"]).lower()
+        for r in results
+        if r["Status"] == "OK" and r.get("HTML Wording")
+    ]
+    ok_html_norms = [t for t in ok_html_norms if t]
+
+    filtered = []
+    for r in results:
+        if r["Status"] == "KO":
+            html_norm = normalize(str(r.get("HTML Wording", ""))).lower()
+            if len(html_norm) >= min_length and any(
+                html_norm in ok and html_norm != ok for ok in ok_html_norms
+            ):
+                continue
+        filtered.append(r)
+    return filtered
+
+
 # =========================
 # PIPELINE WORDING
 # =========================
@@ -210,6 +239,10 @@ def run_wording_qa(html_texts, excel_wordings):
                     "Criticality": "Low",
                     "Match Type": "No match"
                 })
+
+    # Supprime les KO dont le texte HTML est deja couvert par un match OK
+    # ailleurs (fragment redondant d'un bloc plus large deja valide).
+    results = _drop_ko_covered_by_ok(results)
 
     # Deduplication des KO : supprimer les doublons HTML+Excel identiques
     # (peut arriver quand un HTML non matche et un Excel non matche pointent l'un vers l'autre)
