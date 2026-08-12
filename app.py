@@ -5,8 +5,10 @@ import io
 import re
 import uuid
 import contextlib
+from qa.diagnostics import find_duplicate_components, find_unused_excel_classes
 from qa.engine import run_qa, run_qa_for_sequence
 from qa.excel_loader import list_url_sequences, load_excel_urls, load_excel_wordings, load_generic_wordings
+from qa.html_extraction import load_and_extract_html_texts
 from qa.report import save_consolidated_report
 
 from datetime import datetime
@@ -336,6 +338,13 @@ if excel_file:
     with open(excel_path, "wb") as f:
         f.write(excel_file.getvalue())
 
+html_path = None
+if html_file:
+    os.makedirs("temp", exist_ok=True)
+    html_path = f"temp/{session_id}_input.html"
+    with open(html_path, "wb") as f:
+        f.write(html_file.getvalue())
+
 sequence_assignments = []
 
 if batch_mode:
@@ -435,6 +444,8 @@ if excel_path and not batch_mode:
                             "le matching sera moins précis pour les lignes sans classe."
                         )
 
+                    combined_wordings = list(diag_wordings)
+
                     if include_generic:
                         try:
                             diag_generic_sheet, diag_generic_wordings = load_generic_wordings(excel_path)
@@ -442,8 +453,31 @@ if excel_path and not batch_mode:
                                 f"✅ Onglet générique trouvé : **{diag_generic_sheet}** — "
                                 f"{len(diag_generic_wordings)} wording(s) génériques seront ajoutés"
                             )
+                            combined_wordings += diag_generic_wordings
                         except ValueError as e:
                             st.error(f"❌ Composants génériques : {e}")
+
+                    duplicates = find_duplicate_components(combined_wordings)
+                    if duplicates:
+                        details = "; ".join(f"**{comp}** ({', '.join(classes)})" for comp, classes in duplicates)
+                        st.warning(
+                            f"⚠️ Composant(s) présents avec plusieurs classes techniques différentes — "
+                            f"souvent un bloc dupliqué par erreur (copier-coller) : {details}"
+                        )
+
+                    if html_path:
+                        try:
+                            diag_html_texts = load_and_extract_html_texts(html_path)
+                            unused_classes = find_unused_excel_classes(diag_html_texts, combined_wordings)
+                            if unused_classes:
+                                st.warning(
+                                    "⚠️ Classe(s) technique(s) déclarée(s) dans l'Excel mais introuvable(s) dans le HTML "
+                                    "(le nom a probablement divergé du vrai template) : "
+                                    + ", ".join(f"`{c}`" for c in unused_classes)
+                                )
+                        except Exception:
+                            pass  # le HTML sera re-analyse (avec message d'erreur clair) au clic sur Comparer
+
                 except ValueError as e:
                     st.error(f"❌ {e}")
 
@@ -543,13 +577,6 @@ if st.button(button_label):
         if aem_url and (not username or not password):
             st.error("Merci de renseigner les identifiants AEM")
             st.stop()
-
-        if html_file:
-            html_path = f"temp/{session_id}_input.html"
-            with open(html_path, "wb") as f:
-                f.write(html_file.read())
-        else:
-            html_path = None
 
         st.info("Analyse en cours... 🔄")
 

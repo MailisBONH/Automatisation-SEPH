@@ -32,7 +32,7 @@ Interface Streamlit + moteur de comparaison Python, avec export du résultat en 
 - **Dashboard Streamlit** : taux de succès global, répartition des erreurs par type (camemberts Plotly), tableau interactif (AgGrid) avec diff mot-à-mot en couleur entre le wording attendu et le wording trouvé.
 - **Rapport Excel exportable** (`Summary` / `Details` / `KO Only`) avec mise en forme conditionnelle (couleurs par statut/criticité) et diff en rich text.
 - **Mode URL** : vérification des liens (`href`) du HTML par rapport à la liste d'URLs trackées du référentiel Excel (correspondance exacte ou fonctionnelle sur les paramètres UTM) — voir [Comment fonctionne la QA URL](#comment-fonctionne-la-qa-url).
-- **Diagnostic à l'upload** : dès que l'Excel est chargé, l'app affiche les onglets détectés, si l'onglet/la colonne attendue est trouvée, et — en mode Wording — le taux de remplissage de `TECHNICAL NAME`, pour repérer un référentiel incomplet avant même de lancer la comparaison.
+- **Diagnostic à l'upload** : dès que l'Excel est chargé, l'app affiche les onglets détectés, si l'onglet/la colonne attendue est trouvée, et — en mode Wording — le taux de remplissage de `TECHNICAL NAME`, les composants dupliqués avec des classes techniques différentes (`qa/diagnostics.find_duplicate_components`), et (si le HTML est aussi uploadé) les classes déclarées dans l'Excel introuvables dans le HTML (`qa/diagnostics.find_unused_excel_classes`) — pour repérer un référentiel incomplet ou désynchronisé du vrai template avant même de lancer la comparaison.
 - **Mode multi-séquences** : traiter plusieurs séquences d'une même campagne (plusieurs fichiers HTML + un seul Excel) en une fois, avec un rapport Excel consolidé et un récapitulatif par séquence — voir [Traiter plusieurs séquences en une fois](#traiter-plusieurs-séquences-en-une-fois).
 - **Composants génériques** (mode Wording) : si le référentiel Wording d'une campagne ne couvre pas les composants communs à toutes les séquences (footer, mentions légales, bloc fidélité...), une case à cocher permet de les fusionner automatiquement depuis un onglet séparé — voir [Composants génériques](#composants-génériques).
 - **Logs de debug dans l'UI** : le détail de l'extraction (auparavant visible seulement dans la console du serveur) est affiché dans un expander repliable après chaque comparaison, et a été réduit à l'essentiel (plus de trace ligne par ligne de chaque texte extrait).
@@ -52,9 +52,11 @@ qa/
 ├── wording_qa.py                Pipeline de QA "wording" (run_wording_qa)
 ├── url_utils.py                  Extraction des href + normalisation fonctionnelle des URLs
 ├── url_qa.py                    Pipeline de QA "url" (run_url_qa)
+├── diagnostics.py                Verifications de coherence Excel/HTML pour le panneau de diagnostic
 └── report.py                   Génération des rapports Excel (save_report, save_consolidated_report)
 temp/                       Fichiers uploadés temporairement, isolés par session (non versionné)
 output/                     Rapports Excel générés (non versionné)
+tests/                      Suite pytest (voir Tests)
 ```
 
 ### Flux d'exécution (`run_qa`)
