@@ -12,6 +12,7 @@ from openpyxl.cell.text import InlineFont
 from openpyxl.cell.rich_text import TextBlock
 
 from qa.config import OUTPUT_DIR
+from qa.history import record_run
 
 
 # =========================
@@ -147,11 +148,13 @@ def _write_results_sheet(ws_target, df_data, header_color, columns):
     ws_target.freeze_panes = "A2"
 
 
-def save_report(results: list, campaign_sheet_name: str):
+def save_report(results: list, campaign_sheet_name: str, mode: str = "wording"):
     df = pd.DataFrame(results)
     total = len(df)
     ok = len(df[df["Status"] == "OK"])
     score = round((ok / total) * 100, 2) if total else 0
+
+    record_run(campaign_sheet_name, mode, total, ok, total - ok, score)
 
     wb = Workbook()
 
@@ -197,7 +200,7 @@ def save_report(results: list, campaign_sheet_name: str):
     return path
 
 
-def save_consolidated_report(results_by_sequence: dict, report_name: str = "Multi-sequences"):
+def save_consolidated_report(results_by_sequence: dict, report_name: str = "Multi-sequences", mode: str = "wording"):
     """
     Genere un rapport Excel unique couvrant plusieurs sequences.
     results_by_sequence : { nom_sequence: [row_dict, ...] }.
@@ -218,6 +221,7 @@ def save_consolidated_report(results_by_sequence: dict, report_name: str = "Mult
         seq_ok = sum(1 for r in rows if r.get("Status") == "OK")
         seq_score = round((seq_ok / seq_total) * 100, 2) if seq_total else 0
         per_sequence_stats.append((seq_name, seq_total, seq_ok, seq_total - seq_ok, seq_score))
+        record_run(seq_name, mode, seq_total, seq_ok, seq_total - seq_ok, seq_score)
 
     df = pd.DataFrame(all_rows, columns=columns) if all_rows else pd.DataFrame(columns=columns)
     total = len(df)

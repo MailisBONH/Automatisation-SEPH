@@ -85,7 +85,7 @@ def run_qa(html_file=None, excel_file=None, keyword="", aem_url=None, username=N
     results, sheet = run_qa_for_sequence(html_file, excel_file, keyword, mode, include_generic)
 
     # 4. Générer le rapport
-    report_path = save_report(results, sheet)
+    report_path = save_report(results, sheet, mode)
 
     # ✅ IMPORTANT : retourner quelque chose
     return results, report_path, sheet

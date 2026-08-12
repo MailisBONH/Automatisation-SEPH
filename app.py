@@ -8,6 +8,7 @@ import contextlib
 from qa.diagnostics import find_duplicate_components, find_unused_excel_classes, find_wrong_language_wordings
 from qa.engine import run_qa, run_qa_for_sequence
 from qa.excel_loader import list_url_sequences, load_excel_urls, load_excel_wordings, load_generic_wordings
+from qa.history import load_history
 from qa.html_extraction import load_and_extract_html_texts
 from qa.report import save_consolidated_report
 
@@ -69,7 +70,7 @@ def run_with_debug_capture(fn, *args, **kwargs):
     return result, buf.getvalue()
 
 
-def render_results_block(results, report_path, title, download_filename):
+def render_results_block(results, report_path, title, download_filename, sheet_name=None):
     """Affiche metriques, graphiques, tableau detaille et bouton de telechargement pour un jeu de resultats."""
 
     st.success(f"✅ {title}")
@@ -104,6 +105,27 @@ def render_results_block(results, report_path, title, download_filename):
         "QA Success Rate",
         f"{success_rate}%"
     )
+
+    if sheet_name:
+        history = load_history(sheet=sheet_name)
+        if len(history) > 1:
+            with st.expander(f"📈 Historique — {sheet_name}", expanded=False):
+                history_df = pd.DataFrame(history)
+                fig_history = px.line(
+                    history_df,
+                    x="timestamp",
+                    y="score",
+                    markers=True,
+                    title="Évolution du score",
+                    labels={"timestamp": "Date", "score": "Score (%)"}
+                )
+                fig_history.update_yaxes(range=[0, 100])
+                st.plotly_chart(fig_history, use_container_width=True)
+                st.dataframe(
+                    history_df[["timestamp", "total", "ok", "ko", "score"]].iloc[::-1],
+                    use_container_width=True,
+                    hide_index=True
+                )
 
     status_df = pd.DataFrame({
         "Status": ["OK", "KO"],
@@ -549,7 +571,7 @@ if st.button(button_label):
 
         if results_by_sequence:
 
-            report_path = save_consolidated_report(results_by_sequence)
+            report_path = save_consolidated_report(results_by_sequence, mode=qa_mode)
 
             today = datetime.now().strftime("%Y-%m-%d")
 
@@ -616,7 +638,8 @@ if st.button(button_label):
                 results,
                 report_path,
                 "Comparaison terminée",
-                f"qa_report_{safe_sheet_name}_{today}.xlsx"
+                f"qa_report_{safe_sheet_name}_{today}.xlsx",
+                sheet_name=sheet_name
             )
 
             with st.expander("🐛 Logs de debug (extraction HTML/Excel)"):

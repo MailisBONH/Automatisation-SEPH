@@ -37,6 +37,7 @@ Interface Streamlit + moteur de comparaison Python, avec export du résultat en 
 - **Composants génériques** (mode Wording) : si le référentiel Wording d'une campagne ne couvre pas les composants communs à toutes les séquences (footer, mentions légales, bloc fidélité...), une case à cocher permet de les fusionner automatiquement depuis un onglet séparé — voir [Composants génériques](#composants-génériques).
 - **Logs de debug dans l'UI** : le détail de l'extraction (auparavant visible seulement dans la console du serveur) est affiché dans un expander repliable après chaque comparaison, et a été réduit à l'essentiel (plus de trace ligne par ligne de chaque texte extrait).
 - **Fichiers temporaires isolés par session** : chaque session de navigateur utilise ses propres fichiers dans `temp/`, deux analyses lancées en parallèle ne s'écrasent plus.
+- **Historique des scores** : chaque run (mode simple ou multi-séquences) est enregistré dans `output/history.jsonl` ; en mode simple, un expander affiche l'évolution du score de la séquence courante au fil des runs précédents (graphique + tableau).
 
 ## Architecture du projet
 
@@ -53,9 +54,10 @@ qa/
 ├── url_utils.py                  Extraction des href + normalisation fonctionnelle des URLs
 ├── url_qa.py                    Pipeline de QA "url" (run_url_qa)
 ├── diagnostics.py                Verifications de coherence Excel/HTML pour le panneau de diagnostic
+├── history.py                   Historique local des scores (record_run, load_history)
 └── report.py                   Génération des rapports Excel (save_report, save_consolidated_report)
 temp/                       Fichiers uploadés temporairement, isolés par session (non versionné)
-output/                     Rapports Excel générés (non versionné)
+output/                     Rapports Excel générés + historique des scores (non versionné)
 tests/                      Suite pytest (voir Tests)
 ```
 
