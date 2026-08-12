@@ -1,0 +1,129 @@
+from qa.matching import compare, find_best_match, find_closest_match, find_split_match
+
+
+def excel_row(wording, technical=None, component="Comp", element="Elem"):
+    from qa.text_utils import normalize, normalize_currency
+
+    return {
+        "Component": component,
+        "Element": element,
+        "Wording": wording,
+        "Technical": technical,
+        "norm": normalize(wording),
+        "curr": normalize_currency(wording),
+    }
+
+
+def html_item(text, component_class=None, tag="p", type_="Paragraph"):
+    return {"text": text, "tag": tag, "type": type_, "component_class": component_class}
+
+
+class TestCompare:
+    def test_exact_match_is_ok(self):
+        status, error, sim, match_type = compare("Discover now", "Discover now")
+        assert status == "OK"
+        assert sim == 100
+
+    def test_case_only_difference_is_ko(self):
+        status, error, sim, match_type = compare("discover now", "Discover Now")
+        assert status == "KO"
+        assert error == "Case Error"
+
+    def test_near_exact_is_typo(self):
+        status, error, sim, match_type = compare("Discover now!", "Discover now.")
+        assert status == "KO"
+        assert error == "Typo"
+
+    def test_very_different_text_is_text_differs(self):
+        status, error, sim, match_type = compare("Discover now", "Buy shoes today")
+        assert status == "KO"
+        assert error == "Text differs"
+
+    def test_both_empty_is_ok(self):
+        status, error, sim, match_type = compare("", "")
+        assert status == "OK"
+
+    def test_one_empty_is_ko(self):
+        status, error, sim, match_type = compare("Discover now", "")
+        assert status == "KO"
+        assert error == "Text differs"
+
+
+class TestFindBestMatch:
+    def test_matches_only_same_technical_class(self):
+        wordings = [
+            excel_row("Discover now", technical="audit-component-a"),
+            excel_row("Discover now", technical="audit-component-b"),
+        ]
+        item = html_item("Discover now", component_class="audit-component-b")
+        result = find_best_match(item, wordings, set())
+        assert result is not None
+        idx, status, error, sim = result
+        assert idx == 1
+        assert status == "OK"
+
+    def test_no_candidate_of_matching_class_returns_none(self):
+        wordings = [excel_row("Discover now", technical="audit-component-a")]
+        item = html_item("Discover now", component_class="audit-component-b")
+        assert find_best_match(item, wordings, set()) is None
+
+
+class TestFindSplitMatch:
+    def test_short_fragment_below_threshold_is_rejected(self):
+        # Regression: "Unlimited" (9 chars) inside a ~27-char cell used to be
+        # accepted as an OK match at a 30% length ratio, with the similarity
+        # reported as a raw 0-1 ratio ("0.33%") instead of a percentage.
+        wordings = [excel_row("Entdecke Sephora Unlimited:", technical="audit-component-loyalty-section")]
+        item = html_item("Unlimited", component_class="audit-component-loyalty-section")
+        assert find_split_match(item, wordings, set()) is None
+
+    def test_large_fragment_above_threshold_is_accepted_with_percentage_similarity(self):
+        wordings = [excel_row("Get a gift before the offer ends", technical="audit-component-x")]
+        # Same text minus a short trailing placeholder -> high length ratio.
+        item = html_item("Get a gift before the offer", component_class="audit-component-x")
+        result = find_split_match(item, wordings, set())
+        assert result is not None
+        idx, status, error, sim = result
+        assert status == "OK"
+        assert 0 < sim <= 100  # a real percentage, not a 0-1 fraction
+
+    def test_rejects_coincidental_match_in_wrong_component(self):
+        # A short fragment that happens to appear inside a cell belonging to
+        # a completely different, known component should not match.
+        wordings = [
+            excel_row(
+                "Clean at Sephora: formulations with carefully selected ingredients across the whole range",
+                technical="audit-component-footer",
+            )
+        ]
+        item = html_item("Clean at", component_class="audit-component-axis")
+        assert find_split_match(item, wordings, set()) is None
+
+    def test_allows_match_when_html_class_unknown(self):
+        # When the HTML side has no detected class (no audit-component-*
+        # wrapper), the class guard must not block a legitimate high-ratio
+        # containment match.
+        wordings = [excel_row("Exclusive offers available all year for members", technical="audit-component-program-benefit")]
+        item = html_item("Exclusive offers available all year for", component_class=None)
+        result = find_split_match(item, wordings, set())
+        assert result is not None
+        assert result[1] == "OK"
+
+    def test_skips_already_matched_excel_index(self):
+        wordings = [excel_row("Get a gift before the offer ends", technical="audit-component-x")]
+        item = html_item("Get a gift before the offer", component_class="audit-component-x")
+        assert find_split_match(item, wordings, {0}) is None
+
+
+class TestFindClosestMatch:
+    def test_high_similarity_same_class_is_accepted(self):
+        wordings = [excel_row("Discover our new arrivals today", technical="audit-component-x")]
+        item = html_item("Discover our new arrival today", component_class="audit-component-x")
+        result = find_closest_match(item, wordings, set())
+        assert result is not None
+        assert result["idx"] == 0
+
+    def test_below_min_sim_returns_none(self):
+        wordings = [excel_row("Completely unrelated content here", technical="audit-component-x")]
+        item = html_item("Totally different words", component_class="audit-component-x")
+        assert find_closest_match(item, wordings, set()) is None

@@ -88,6 +88,15 @@ streamlit run app.py
 
 L'application s'ouvre dans le navigateur (par défaut sur `http://localhost:8501`).
 
+## Tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+La suite couvre les fonctions de normalisation (`qa/text_utils.py`), les stratégies de matching (`qa/matching.py`), la résolution d'onglet/colonne Excel (`qa/excel_loader.py`) et le pipeline complet (`qa/wording_qa.py`), y compris des tests de non-régression pour les bugs de cascade déjà corrigés (verrouillage prématuré sur un KO, starvation du Split par un faux KO de secours).
+
 ## Utilisation
 
 1. **Type de test** : `Wording` ou `URL`.
