@@ -17,6 +17,7 @@ Interface Streamlit + moteur de comparaison Python, avec export du résultat en 
 - [Comment fonctionne le matching](#comment-fonctionne-le-matching)
 - [Comment fonctionne la QA URL](#comment-fonctionne-la-qa-url)
 - [Rapport de sortie](#rapport-de-sortie)
+- [Historique par pays / trigger / séquence](#historique-par-pays--trigger--séquence)
 - [Configuration](#configuration)
 - [Limitations connues / roadmap](#limitations-connues--roadmap)
 
@@ -31,21 +32,25 @@ Interface Streamlit + moteur de comparaison Python, avec export du résultat en 
 - **Matching tolérant** entre HTML et Excel, avec plusieurs stratégies en cascade (direct, agrégation de blocs, sous-phrase, meilleure correspondance approximative) et un traitement dédié aux devises (séparateurs `|`, `/`, `I`).
 - **Dashboard Streamlit** : taux de succès global, répartition des erreurs par type (camemberts Plotly), tableau interactif (AgGrid) avec diff mot-à-mot en couleur entre le wording attendu et le wording trouvé.
 - **Rapport Excel exportable** (`Summary` / `Details` / `KO Only`) avec mise en forme conditionnelle (couleurs par statut/criticité) et diff en rich text.
-- **Mode URL** : vérification des liens (`href`) du HTML par rapport à la liste d'URLs trackées du référentiel Excel (correspondance exacte ou fonctionnelle sur les paramètres UTM) — voir [Comment fonctionne la QA URL](#comment-fonctionne-la-qa-url).
+- **Mode URL** : vérification des liens (`href`) du HTML par rapport à la liste d'URLs trackées du référentiel Excel (correspondance exacte ou fonctionnelle sur les paramètres UTM), avec un rapport dédié — colonnes `Classe attendue (Excel)`, `Classe trouvée (HTML)`, `URL attendue (Excel)`, `URL trouvée (HTML)`, `Status` — voir [Comment fonctionne la QA URL](#comment-fonctionne-la-qa-url).
 - **Diagnostic à l'upload** : dès que l'Excel est chargé, l'app affiche les onglets détectés, si l'onglet/la colonne attendue est trouvée, et — en mode Wording — le taux de remplissage de `TECHNICAL NAME`, les composants dupliqués avec des classes techniques différentes (`qa/diagnostics.find_duplicate_components`), les wordings dont la langue détectée diffère de la langue dominante du référentiel (`qa/diagnostics.find_wrong_language_wordings`, ex. du texte resté dans une autre langue après un copier-coller), et (si le HTML est aussi uploadé) les classes déclarées dans l'Excel introuvables dans le HTML (`qa/diagnostics.find_unused_excel_classes`) — pour repérer un référentiel incomplet ou désynchronisé du vrai template avant même de lancer la comparaison.
+- **Sélection guidée, sans présélection automatique** : les menus déroulants (onglet Excel / séquence) affichent un texte d'invite (`— Sélectionnez —`) plutôt que de présélectionner silencieusement le premier onglet du classeur — évite de lancer une comparaison sur la mauvaise campagne par inattention.
 - **Mode multi-séquences** : traiter plusieurs séquences d'une même campagne (plusieurs fichiers HTML + un seul Excel) en une fois, avec un rapport Excel consolidé et un récapitulatif par séquence — voir [Traiter plusieurs séquences en une fois](#traiter-plusieurs-séquences-en-une-fois).
 - **Composants génériques** (mode Wording) : si le référentiel Wording d'une campagne ne couvre pas les composants communs à toutes les séquences (footer, mentions légales, bloc fidélité...), une case à cocher permet de les fusionner automatiquement depuis un onglet séparé — voir [Composants génériques](#composants-génériques).
 - **Logs de debug dans l'UI** : le détail de l'extraction (auparavant visible seulement dans la console du serveur) est affiché dans un expander repliable après chaque comparaison, et a été réduit à l'essentiel (plus de trace ligne par ligne de chaque texte extrait).
 - **Fichiers temporaires isolés par session** : chaque session de navigateur utilise ses propres fichiers dans `temp/`, deux analyses lancées en parallèle ne s'écrasent plus.
-- **Historique des scores** : chaque run (mode simple ou multi-séquences) est enregistré dans `output/history.jsonl` ; en mode simple, un expander affiche l'évolution du score de la séquence courante au fil des runs précédents (graphique + tableau).
+- **Historique par pays / trigger / séquence** : chaque comparaison est archivée automatiquement (pays et trigger détectés depuis le contenu du classeur) dans une arborescence de dossiers navigable depuis une page dédiée, avec rapport combiné Wording + URL et graphique d'évolution du score — voir [Historique par pays / trigger / séquence](#historique-par-pays--trigger--séquence).
 
 ## Architecture du projet
 
 ```
-app.py                     Interface Streamlit : upload, lancement de la QA, affichage, export
+app.py                     Point d'entrée : navigation multipage (st.navigation) entre home.py et pages/1_Historique.py
+home.py                     Interface Streamlit principale : upload, lancement de la QA, affichage, export, archivage automatique
+pages/
+└── 1_Historique.py          Page Historique : navigation Pays > Trigger > Séquence, rapports + graphique d'évolution
 qa/
 ├── engine.py               Orchestrateur : run_qa_for_sequence() (1 sequence) et run_qa() (+ rapport)
-├── config.py                Constantes de configuration (colonnes Excel, regex, seuils)
+├── config.py                Constantes de configuration (colonnes Excel, regex, seuils, tables pays)
 ├── text_utils.py             Nettoyage et normalisation de texte (clean_text, normalize, normalize_currency)
 ├── html_extraction.py         Extraction du wording depuis le HTML / récupération AEM
 ├── excel_loader.py            Lecture de la feuille Excel référentielle
@@ -53,11 +58,14 @@ qa/
 ├── wording_qa.py                Pipeline de QA "wording" (run_wording_qa)
 ├── url_utils.py                  Extraction des href + normalisation fonctionnelle des URLs
 ├── url_qa.py                    Pipeline de QA "url" (run_url_qa)
-├── diagnostics.py                Verifications de coherence Excel/HTML pour le panneau de diagnostic
-├── history.py                   Historique local des scores (record_run, load_history)
-└── report.py                   Génération des rapports Excel (save_report, save_consolidated_report)
+├── diagnostics.py                 Verifications de coherence Excel/HTML pour le panneau de diagnostic
+├── classification.py               Détection best-effort pays/trigger + normalisation des noms de séquence (FID/LOYAL)
+├── archive.py                       Classement des rapports dans output/<Pays>/<Trigger>/<Séquence>/, rotation par type
+├── combined_report.py                Fusion des derniers rapports Wording + URL d'une séquence en un rapport combiné
+├── history.py                        Historique local des scores (record_run, load_history, build_history_tree...)
+└── report.py                        Génération des rapports Excel (save_report, save_consolidated_report)
 temp/                       Fichiers uploadés temporairement, isolés par session (non versionné)
-output/                     Rapports Excel générés + historique des scores (non versionné)
+output/                     Rapports Excel générés (classés par Pays/Trigger/Séquence) + historique des scores (non versionné)
 tests/                      Suite pytest (voir Tests)
 ```
 
@@ -108,13 +116,14 @@ La suite couvre les fonctions de normalisation (`qa/text_utils.py`), les straté
    - soit uploader un fichier `.html` (export "view-source" AEM ou HTML brut),
    - soit renseigner un **lien AEM** + **identifiant/mot de passe** pour le récupérer automatiquement.
 3. Uploader le **fichier Excel référentiel** (`.xlsx`) : dès qu'il est chargé, le champ suivant devient un **menu déroulant** proposant directement les onglets du classeur (mode Wording) ou les séquences détectées dans l'onglet UTM (mode URL) — plus besoin de taper un mot-clé exact. Tant qu'aucun Excel n'est uploadé, un champ texte "Campaign keyword" fait office de repli.
-4. Choisir l'**onglet Excel** (mode Wording) ou la **séquence** (mode URL, voir [Comment fonctionne la QA URL](#comment-fonctionne-la-qa-url)) dans la liste. En mode URL, si l'onglet UTM ne regroupe aucune séquence (onglet à plat), aucun choix n'est nécessaire.
+4. Choisir l'**onglet Excel** (mode Wording) ou la **séquence** (mode URL, voir [Comment fonctionne la QA URL](#comment-fonctionne-la-qa-url)) dans la liste — le menu affiche `— Sélectionnez —` par défaut (rien n'est présélectionné). En mode URL, si l'onglet UTM ne regroupe aucune séquence (onglet à plat), aucun choix n'est nécessaire.
 5. Cliquer sur **🔍 Comparer**.
 6. Consulter :
    - le taux de succès global et la répartition des types d'erreur,
    - le tableau détaillé (lignes vertes = OK, rouges = KO, diff mot-à-mot en gras rouge sur les KO),
    - télécharger le rapport Excel complet via le bouton **⬇️ Télécharger le rapport Excel**,
    - le détail de l'extraction dans l'expander **🐛 Logs de debug** (utile pour comprendre pourquoi un texte/une URL n'a pas été trouvé).
+7. Le run est **archivé automatiquement** dans l'historique (pays/trigger détectés, une pop-up apparaît seulement si l'un des deux manque) — voir [Historique par pays / trigger / séquence](#historique-par-pays--trigger--séquence).
 
 ## Traiter plusieurs séquences en une fois
 
@@ -214,11 +223,48 @@ Le rapport Excel est généré dans `output/QA_<nom_feuille>_<horodatage>.xlsx` 
 
 - **Summary** : nom de la campagne, date, total, nombre d'OK/KO, score global (coloré vert/orange/rouge selon le score).
 - **Details** : toutes les lignes, KO triés par criticité puis par composant en premier, OK ensuite.
-- **KO Only** : uniquement les écarts, avec le diff mot-à-mot en rouge gras entre `Excel Wording` et `HTML Wording`.
+- **KO Only** : uniquement les écarts, avec le diff mot-à-mot en rouge gras entre les colonnes attendu/trouvé.
 
-Chaque ligne comporte : `Component Name`, `Element`, `Expected Class`, `HTML Class`, `Excel Wording`, `HTML Wording`, `Status`, `Error Type`, `Similarity`, `Criticality`, `Match Type`.
+Les colonnes diffèrent selon le mode (`qa/report.py` : `BASE_COLUMNS` / `URL_COLUMNS`) :
+
+| Mode | Colonnes |
+|---|---|
+| **Wording** | `Component Name`, `Element`, `Expected Class`, `HTML Class`, `Excel Wording`, `HTML Wording`, `Status`, `Error Type`, `Similarity`, `Criticality`, `Match Type` |
+| **URL** | `Classe attendue (Excel)`, `Classe trouvée (HTML)`, `URL attendue (Excel)`, `URL trouvée (HTML)`, `Status` |
 
 En mode multi-séquences, `report.save_consolidated_report` génère un rapport unique `QA_MULTI_..._<horodatage>.xlsx` : les onglets `Details`/`KO Only` ajoutent une colonne `Sequence` (tri par séquence puis criticité), et le `Summary` ajoute un tableau récapitulatif Total/OK/KO/Score par séquence en plus du score global.
+
+## Historique par pays / trigger / séquence
+
+Chaque comparaison (mode simple ou multi-séquences) est **archivée automatiquement**, sans action de l'utilisateur, dans une arborescence `output/<Pays>/<Trigger>/<Séquence>/` navigable depuis une page dédiée.
+
+### Détection automatique (`qa/classification.py`)
+
+Le **pays** et le **trigger** sont déduits du **contenu** du classeur Excel — jamais du nom de fichier, trop peu fiable/cohérent d'une personne ou d'une campagne à l'autre :
+
+- **Pays** : mot-clé de langue trouvé dans le nom de la colonne wording (ex. `"TRANSLATION GERMAN"` → `Germany`, voir `LANGUAGE_TO_COUNTRY`), ou à défaut le domaine des URLs de l'onglet UTM (ex. `sephora.de` → `Germany`, voir `DOMAIN_TO_COUNTRY`).
+- **Trigger** : valeur de la colonne `CAMPAIGN` de l'onglet UTM (ex. `revamp_inac` → `Revamp Inac`), recherché même en mode Wording (le classeur regroupe souvent les deux onglets).
+
+Si l'un des deux n'a pas pu être détecté, une **pop-up** s'ouvre pour le compléter manuellement avant l'archivage (avec une option "Ne pas archiver"). La **séquence**, elle, n'est jamais redemandée : elle est toujours connue de manière fiable par ailleurs (onglet Excel résolu en mode Wording, section UTM résolue en mode URL).
+
+### Wording et URL d'une même séquence, dans le même dossier
+
+Le vocabulaire diffère entre les deux onglets : l'onglet UTM parle de fidélité (`FID` / `NON FID`), l'onglet wording de `LOYAL` / `NON LOYAL`. `qa/classification.normalize_sequence_name` réconcilie les deux (ex. `"SEQ 1 NON FID"` et `"SEQ 1 NON LOYAL"` → même dossier `"SEQ 1 NON LOYAL"`), et `resolve_sequence_alias` complète en recoupant avec les séquences déjà archivées pour ce couple pays/trigger quand l'onglet UTM ne précise pas la fidélité (ex. `"SEQ 2"` sans qualificatif).
+
+### Rotation des rapports (`qa/archive.py`)
+
+Dans chaque dossier de séquence, les rapports sont préfixés par type (`QA_wording_...`, `QA_url_...`, `QA_combined_...`) et seuls les **2 plus récents de chaque type** sont conservés sur disque — les précédents sont supprimés automatiquement. L'historique des scores (`output/history.jsonl`), lui, **n'est jamais purgé** : il garde la trace de tous les runs, même ceux dont le fichier Excel a été supprimé par la rotation.
+
+### Rapport combiné (`qa/combined_report.py`)
+
+Dès que les rapports Wording **et** URL sont disponibles pour une séquence, un rapport combiné (`QA_combined_..._<horodatage>.xlsx`, onglets `Summary`/`Wording`/`URL`) est (re)généré automatiquement, avec son propre score suivi dans l'historique (`mode="combined"`).
+
+### Page Historique
+
+Accessible via le bouton **📈 Historique** en haut à droite de l'outil (page Streamlit séparée, `pages/1_Historique.py`) :
+
+1. Navigation par dossiers **Pays → Trigger → Séquence**.
+2. Dans le dossier final : les rapports disponibles groupés par type (Wording / URL / Combiné), et un graphique d'évolution du **% de OK** depuis le premier test (une courbe par type).
 
 ## Configuration
 
@@ -237,10 +283,14 @@ Les réglages globaux sont centralisés dans [`qa/config.py`](qa/config.py) :
 | `URL_COLUMN_NAME` | Colonne des URLs de référence dans cet onglet | `"<< TRACKED URL >>"` |
 | `GENERIC_SHEET_KEYWORD` | Mot-clé pour repérer l'onglet des composants génériques | `"GENERIC"` |
 | `OUTPUT_DIR` | Dossier de sortie des rapports | `"output"` |
+| `LANGUAGE_TO_COUNTRY` | Mots-clés de langue (colonne wording) → pays, pour la détection automatique | `GERMAN`→Germany, `FRENCH`→France, `DUTCH`/`FLEMISH`→Belgium... |
+| `DOMAIN_TO_COUNTRY` | Suffixes de domaine (URLs de l'onglet UTM) → pays, en repli si la langue n'a rien donné | `de`→Germany, `fr`→France, `be`→Belgium... |
+| `UNCLASSIFIED_LABEL` | Nom de dossier utilisé si pays/trigger/séquence est vide | `"Non classé"` |
 
 ## Limitations connues / roadmap
 
-- **Pas de tests automatisés.**
 - **Mode URL** : ne vérifie que la présence des URLs Excel dans le HTML (comme le script d'origine) — ne détecte pas les `href` présents dans le HTML mais absents du référentiel Excel.
 - **Découpage en séquences de l'onglet UTM** : ne gère qu'un seul niveau de séparateurs. Si un onglet imbrique des sous-catégories à l'intérieur d'une séquence (ex. des séparateurs répétés comme "FOOTER" dans chaque séquence), elles seront traitées comme des séquences distinctes plutôt que comme des sous-groupes.
 - **`temp/` n'est jamais nettoyé automatiquement** : les fichiers y sont désormais isolés par session (pas de risque d'écrasement), mais ils s'accumulent d'une session à l'autre.
+- **Détection pays/trigger heuristique** : reste une proposition (toujours modifiable via la pop-up) — un cas comme "FRENCH" peut désigner France ou Belgique, la détection retient la traduction littérale du mot-clé sans trancher.
+- **Réconciliation des noms de séquence** (`normalize_sequence_name`/`resolve_sequence_alias`) : fiable pour le cas "FID"/"LOYAL" et les variantes avec texte additionnel, mais si une séquence n'a encore jamais été archivée sous aucune des deux formes, un nom ambigu côté UTM (ex. `"SEQ 2"` sans qualificatif) peut créer un dossier distinct jusqu'au premier run qui permet le recoupement.
