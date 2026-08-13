@@ -420,23 +420,6 @@ if mode == "Wording":
 # =========================
 # UPLOAD FILES
 # =========================
-col1, col2, col3 = st.columns(3)
-
-with col1:
-    aem_url = "" if batch_mode else st.text_input("Lien AEM")
-
-with col2:
-    username = "" if batch_mode else st.text_input("Identifiant AEM")
-
-with col3:
-    password = "" if batch_mode else st.text_input("Mot de passe AEM", type="password")
-
-if batch_mode:
-    st.caption(
-        "ℹ️ Le mode multi-séquences ne supporte que l'upload de fichiers HTML "
-        "(pas la récupération AEM par URL)."
-    )
-
 col4, col5 = st.columns(2)
 
 with col4:
@@ -455,7 +438,7 @@ with col5:
         html_file = None
     else:
         html_file = st.file_uploader(
-            "📄 Drag & drop HTML (optionnel)",
+            "📄 Drag & drop HTML",
             type=["html"]
         )
         html_files = None
@@ -525,7 +508,8 @@ else:
             if keyword == NO_SELECTION:
                 keyword = ""
         else:
-            keyword = st.text_input("Campaign keyword", "HugPlan S1 Bronze")
+            keyword = st.text_input("Onglet Excel (campagne)", placeholder="Ex : SEQ 1 NON LOYAL")
+            st.caption("ℹ️ Ajoutez d'abord le fichier Excel ci-dessus pour voir la liste des onglets disponibles.")
 
     else:
         sequence_options = []
@@ -541,11 +525,10 @@ else:
                 keyword = ""
             st.caption("ℹ️ L'onglet UTM lui-même est retrouvé automatiquement (nom contenant \"UTM\").")
         else:
-            keyword = st.text_input("Campaign keyword", "HugPlan S1 Bronze")
+            keyword = st.text_input("Séquence (onglet UTM)", placeholder="Ex : SEQ 1 NON FID")
             st.caption(
-                "ℹ️ En mode URL, l'onglet Excel est retrouvé automatiquement (nom contenant \"UTM\"). "
-                "Ce mot-clé sert à sélectionner la bonne séquence à l'intérieur de cet onglet, s'il en contient plusieurs "
-                "(le menu déroulant apparaîtra une fois l'Excel uploadé, si l'onglet en regroupe plusieurs)."
+                "ℹ️ Ajoutez d'abord le fichier Excel ci-dessus : l'onglet UTM est retrouvé automatiquement "
+                "(nom contenant \"UTM\"), et la liste des séquences qu'il contient apparaîtra ici s'il en regroupe plusieurs."
             )
 
 qa_mode = "wording" if mode == "Wording" else "url"
@@ -734,14 +717,10 @@ if st.button(button_label):
             with st.expander("🐛 Logs de debug (extraction HTML/Excel)"):
                 st.code(debug_buf.getvalue() or "Aucun log.", language=None)
 
-    elif (html_file and excel_file) or (aem_url and excel_file):
+    elif html_file and excel_file:
 
         if not keyword:
             st.error("Merci de sélectionner une campagne/séquence dans la liste déroulante.")
-            st.stop()
-
-        if aem_url and (not username or not password):
-            st.error("Merci de renseigner les identifiants AEM")
             st.stop()
 
         st.info("Analyse en cours... 🔄")
@@ -750,14 +729,10 @@ if st.button(button_label):
         try:
             (results, report_path, sheet_name), debug_logs = run_with_debug_capture(
                 run_qa,
-                html_file=html_path if not aem_url else None,
+                html_file=html_path,
                 excel_file=excel_path,
                 keyword=keyword,
-                aem_url=aem_url if aem_url else None,
-                username=username if aem_url else None,
-                password=password if aem_url else None,
                 mode=qa_mode,
-                aem_temp_path=f"temp/{session_id}_aem_input.html",
                 include_generic=include_generic
             )
 

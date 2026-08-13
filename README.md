@@ -23,7 +23,7 @@ Interface Streamlit + moteur de comparaison Python, avec export du résultat en 
 
 ## Fonctionnalités
 
-- **Deux sources pour le HTML** : upload d'un fichier `.html`, ou récupération directe depuis une URL AEM (authentification Basic Auth).
+- **Upload du fichier HTML** (export "view-source" AEM ou HTML brut).
 - **Extraction automatique du wording** depuis le HTML :
   - lecture des blocs `class="text-contribution"` et `class="audit-generique-title"` (marqueurs AEM),
   - reconstruction du HTML réel si le fichier fourni est une vue "view-source" AEM,
@@ -52,7 +52,7 @@ qa/
 ├── engine.py               Orchestrateur : run_qa_for_sequence() (1 sequence) et run_qa() (+ rapport)
 ├── config.py                Constantes de configuration (colonnes Excel, regex, seuils, tables pays)
 ├── text_utils.py             Nettoyage et normalisation de texte (clean_text, normalize, normalize_currency)
-├── html_extraction.py         Extraction du wording depuis le HTML / récupération AEM
+├── html_extraction.py         Extraction du wording depuis le HTML
 ├── excel_loader.py            Lecture de la feuille Excel référentielle
 ├── matching.py                 compare() + stratégies de matching HTML <-> Excel (mode Wording)
 ├── wording_qa.py                Pipeline de QA "wording" (run_wording_qa)
@@ -71,11 +71,10 @@ tests/                      Suite pytest (voir Tests)
 
 ### Flux d'exécution (`run_qa`)
 
-1. Si une URL AEM est fournie, le HTML est téléchargé (`fetch_html_from_aem`) et sauvegardé dans un fichier temporaire.
-2. `run_qa_for_sequence` exécute l'extraction + le matching pour une sequence, selon le `mode` :
+1. `run_qa_for_sequence` exécute l'extraction + le matching pour une sequence, selon le `mode` :
    - **`wording`** : `html_extraction.load_and_extract_html_texts` parse le HTML et retourne la liste des textes trouvés (`{text, tag, type, component_class}`) ; `excel_loader.load_excel_wordings` sélectionne l'onglet Excel correspondant au `keyword` de campagne et retourne la liste des wordings attendus (`{Component, Element, Wording, Technical, norm, curr}`). Si `include_generic=True`, `excel_loader.load_generic_wordings` charge en plus l'onglet des composants génériques et ses wordings sont ajoutés à la liste avant le matching (voir [Composants génériques](#composants-génériques)). `wording_qa.run_wording_qa` compare le tout au HTML.
    - **`url`** : `html_extraction.load_raw_html` retourne le HTML brut (reconstruit si nécessaire) ; `excel_loader.load_excel_urls` sélectionne l'onglet dont le nom contient `"UTM"` et retourne la liste des URLs trackées attendues ; `url_qa.run_url_qa` compare les deux.
-3. `report.save_report` génère le rapport Excel dans `output/` (même format de sortie pour les deux modes).
+2. `report.save_report` génère le rapport Excel dans `output/` (même format de sortie pour les deux modes).
 
 En mode multi-séquences, l'app appelle directement `run_qa_for_sequence` une fois par (fichier HTML, séquence), sans passer par `run_qa`, puis génère un seul rapport consolidé via `report.save_consolidated_report` (voir [Traiter plusieurs séquences en une fois](#traiter-plusieurs-séquences-en-une-fois)).
 
@@ -112,10 +111,8 @@ La suite couvre les fonctions de normalisation (`qa/text_utils.py`), les straté
 ## Utilisation
 
 1. **Type de test** : `Wording` ou `URL`.
-2. **Source du HTML** :
-   - soit uploader un fichier `.html` (export "view-source" AEM ou HTML brut),
-   - soit renseigner un **lien AEM** + **identifiant/mot de passe** pour le récupérer automatiquement.
-3. Uploader le **fichier Excel référentiel** (`.xlsx`) : dès qu'il est chargé, le champ suivant devient un **menu déroulant** proposant directement les onglets du classeur (mode Wording) ou les séquences détectées dans l'onglet UTM (mode URL) — plus besoin de taper un mot-clé exact. Tant qu'aucun Excel n'est uploadé, un champ texte "Campaign keyword" fait office de repli.
+2. Uploader le **fichier HTML** (export "view-source" AEM ou HTML brut).
+3. Uploader le **fichier Excel référentiel** (`.xlsx`) : dès qu'il est chargé, le champ suivant devient un **menu déroulant** proposant directement les onglets du classeur (mode Wording) ou les séquences détectées dans l'onglet UTM (mode URL) — plus besoin de taper un mot-clé exact. Tant qu'aucun Excel n'est uploadé, un champ texte fait office de repli (**"Onglet Excel (campagne)"** en mode Wording, **"Séquence (onglet UTM)"** en mode URL) avec un message rappelant qu'il faut d'abord ajouter l'Excel pour voir apparaître les suggestions.
 4. Choisir l'**onglet Excel** (mode Wording) ou la **séquence** (mode URL, voir [Comment fonctionne la QA URL](#comment-fonctionne-la-qa-url)) dans la liste — le menu affiche `— Sélectionnez —` par défaut (rien n'est présélectionné). En mode URL, si l'onglet UTM ne regroupe aucune séquence (onglet à plat), aucun choix n'est nécessaire.
 5. Cliquer sur **🔍 Comparer**.
 6. Consulter :
@@ -129,7 +126,7 @@ La suite couvre les fonctions de normalisation (`qa/text_utils.py`), les straté
 
 Une campagne a souvent plusieurs séquences (Seq1, Seq2, Seq3...), chacune avec son propre HTML mais partageant le même classeur Excel référentiel. Le mode multi-séquences évite de relancer l'app pour chacune :
 
-1. Cocher **📦 Traiter plusieurs séquences en une fois**. Le champ Lien AEM disparaît : ce mode ne fonctionne qu'avec des fichiers HTML uploadés (pas de récupération AEM par URL).
+1. Cocher **📦 Traiter plusieurs séquences en une fois**.
 2. Uploader le fichier Excel référentiel (unique) et **plusieurs fichiers HTML** (un par séquence).
 3. Pour chaque fichier HTML, choisir dans la liste déroulante la séquence correspondante — la liste propose les **onglets** du classeur en mode Wording, ou les **séquences détectées dans l'onglet UTM** en mode URL (voir [Comment fonctionne la QA URL](#comment-fonctionne-la-qa-url)). Comme il s'agit d'un choix dans une liste (pas d'un mot-clé tapé), il n'y a pas de risque d'ambiguïté.
 4. Cliquer sur **🔍 Comparer toutes les séquences**.
@@ -148,7 +145,7 @@ Certaines campagnes séparent dans l'Excel les wordings **spécifiques à la sé
 
 ## Format attendu du fichier Excel
 
-- Une feuille par campagne, dont le **nom** contient le `Campaign keyword` saisi dans l'app.
+- Une feuille par campagne, dont le **nom** contient le texte saisi dans le champ **"Onglet Excel (campagne)"** de l'app.
 - **En-têtes sur la 2ᵉ ligne** de la feuille (la 1ʳᵉ ligne est ignorée).
 - Colonnes attendues :
 
@@ -166,7 +163,7 @@ En **mode URL**, l'onglet référentiel est différent :
 
 - Son **nom** doit contenir `"UTM"` (insensible à la casse, peut contenir d'autres mots, ex. `"DS - Antichurn S2 UTM"`) — un seul onglet doit correspondre.
 - Colonnes attendues (en-têtes sur la ligne où figure `<< TRACKED URL >>`, quelle que soit sa position) : une colonne exactement nommée `"URL"`, et la colonne `<< TRACKED URL >>` contenant les URLs trackées (avec paramètres UTM) à retrouver dans le HTML.
-- Si l'onglet regroupe **plusieurs séquences** (ex. `SEQ 1 NON FID` et `SEQ 1 FID` empilées dans le même onglet), chaque séquence commence par une ligne "séparateur" ne contenant que son nom dans la colonne `"URL"` — c'est ce nom que le `Campaign keyword` doit cibler. S'il n'y a pas de séparateur de ce type, tout l'onglet est utilisé sans filtrage.
+- Si l'onglet regroupe **plusieurs séquences** (ex. `SEQ 1 NON FID` et `SEQ 1 FID` empilées dans le même onglet), chaque séquence commence par une ligne "séparateur" ne contenant que son nom dans la colonne `"URL"` — c'est ce nom que le champ **"Séquence (onglet UTM)"** doit cibler. S'il n'y a pas de séparateur de ce type, tout l'onglet est utilisé sans filtrage.
 
 ## Comment fonctionne le matching
 
@@ -203,7 +200,7 @@ Un dernier filtre (`_drop_ko_covered_by_ok`) supprime les KO dont le texte HTML 
 
 L'onglet Excel de référence est celui dont le nom contient `"UTM"` (configurable via `URL_SHEET_KEYWORD`, voir [Configuration](#configuration)).
 
-Cet onglet regroupe souvent plusieurs séquences empilées (une pour chaque variante de campagne : loyal/non-loyal, palier de fidélité...). `qa/excel_loader.load_excel_urls` repère les lignes "séparateur" (une seule cellule non vide, dans la colonne `"URL"`, contenant le nom de la séquence) pour découper l'onglet en sections, puis ne garde que les URLs de la section dont le nom correspond au `Campaign keyword` saisi (recherche insensible à la casse, comme pour la sélection d'onglet). Si aucun séparateur n'est trouvé, l'onglet est traité comme une liste plate et le keyword est ignoré.
+Cet onglet regroupe souvent plusieurs séquences empilées (une pour chaque variante de campagne : loyal/non-loyal, palier de fidélité...). `qa/excel_loader.load_excel_urls` repère les lignes "séparateur" (une seule cellule non vide, dans la colonne `"URL"`, contenant le nom de la séquence) pour découper l'onglet en sections, puis ne garde que les URLs de la section dont le nom correspond au texte saisi dans le champ **"Séquence (onglet UTM)"** (recherche insensible à la casse, comme pour la sélection d'onglet). Si aucun séparateur n'est trouvé, l'onglet est traité comme une liste plate et le mot-clé est ignoré.
 
 Les URLs attendues de la séquence retenue sont lues dans la colonne `<< TRACKED URL >>` (`URL_COLUMN_NAME`). Tous les `href` du HTML sont extraits (`qa/url_utils.extract_hrefs`), puis chaque URL Excel est recherchée parmi eux (`qa/url_qa.run_url_qa`) :
 
