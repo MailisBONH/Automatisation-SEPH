@@ -1,17 +1,18 @@
 import html
 
-from qa.url_utils import extract_hrefs, normalize_url
+from qa.html_extraction import extract_anchor_links
+from qa.url_utils import normalize_url
 
 
 # =========================
 # PIPELINE URL
 # =========================
-def _make_url_row(excel_url, found_href, status, error, criticality, match_type):
+def _make_url_row(expected_class, found_class, excel_url, found_href, status, error, criticality, match_type):
     return {
         "Component Name": "",
         "Element": "",
-        "Expected Class": "",
-        "HTML Class": "",
+        "Expected Class": expected_class,
+        "HTML Class": found_class,
         "Excel Wording": excel_url,
         "HTML Wording": found_href,
         "Status": status,
@@ -23,10 +24,17 @@ def _make_url_row(excel_url, found_href, status, error, criticality, match_type)
     }
 
 
+def _as_entry(excel_entry) -> tuple:
+    """Accepte un dict {"label", "url"} (nouveau format) ou une simple chaine URL (retro-compat)."""
+    if isinstance(excel_entry, dict):
+        return excel_entry.get("url", ""), excel_entry.get("label", "")
+    return str(excel_entry), ""
+
+
 def run_url_qa(raw_html: str, excel_urls: list) -> list:
     """
     Pour chaque URL de reference (colonne UTM de l'Excel), cherche une
-    correspondance parmi les href du HTML :
+    correspondance parmi les liens <a href="..."> du HTML :
     - Exact  : URL identique une fois les entites HTML decodees (&amp; -> &).
       AEM encode systematiquement les hrefs ainsi ; ce n'est pas une
       difference de contenu reelle -> OK
@@ -34,44 +42,53 @@ def run_url_qa(raw_html: str, excel_urls: list) -> list:
       parametres ou pourcent-encodage different) -> KO, criticite moderee
       (le tracking reste correct mais l'URL n'est pas rendue a l'identique)
     - Aucune correspondance -> KO, criticite haute
+
+    excel_urls : liste de dicts {"label": <nom du bloc dans l'onglet UTM,
+    ex "HEADER"/"ALGO">, "url": <URL de reference>}. "label" sert de classe
+    attendue, comparee a la classe (audit-component-xxx) du bloc HTML
+    englobant le lien trouve.
     """
-    hrefs = extract_hrefs(raw_html)
+    links = extract_anchor_links(raw_html)
 
     results = []
 
-    for excel_url in excel_urls:
+    for excel_entry in excel_urls:
+        excel_url, expected_class = _as_entry(excel_entry)
         norm_excel = normalize_url(excel_url)
 
         exact_match = False
         functional_match = False
         found_href = ""
+        found_class = ""
 
-        for href in hrefs:
-            href = href.strip()
+        for link in links:
+            href = link["href"].strip()
             href_unescaped = html.unescape(href)
 
             if excel_url == href_unescaped:
                 exact_match = True
                 functional_match = True
                 found_href = href
+                found_class = link["component_class"]
                 break
 
             if not functional_match and normalize_url(href) == norm_excel:
                 functional_match = True
                 found_href = href
+                found_class = link["component_class"]
 
         if exact_match:
             results.append(_make_url_row(
-                excel_url, found_href, "OK", "", "", "Exact"
+                expected_class, found_class, excel_url, found_href, "OK", "", "", "Exact"
             ))
         elif functional_match:
             results.append(_make_url_row(
-                excel_url, found_href, "KO", "URL differs (ordre/encodage parametres)",
-                "Medium", "Functional match only"
+                expected_class, found_class, excel_url, found_href, "KO",
+                "URL differs (ordre/encodage parametres)", "Medium", "Functional match only"
             ))
         else:
             results.append(_make_url_row(
-                excel_url, "", "KO", "URL not found", "High", "No match"
+                expected_class, "", excel_url, "", "KO", "URL not found", "High", "No match"
             ))
 
     total = len(results)

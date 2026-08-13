@@ -187,7 +187,11 @@ def _find_cell(raw: pd.DataFrame, label: str):
     return None, None
 
 
-def _parse_url_sections(raw: pd.DataFrame, header_row_idx: int, section_col_idx: int, tracked_col_idx: int) -> dict:
+URL_LABEL_COL_IDX = 0  # colonne (la plus a gauche) portant le nom du bloc (HEADER, ALGO, CLEAN...)
+
+
+def _parse_url_sections(raw: pd.DataFrame, header_row_idx: int, section_col_idx: int, tracked_col_idx: int,
+                         label_col_idx: int = URL_LABEL_COL_IDX) -> dict:
     """
     Decoupe les lignes de l'onglet UTM en sequences. Une ligne "separateur"
     (une seule cellule non vide, dans la colonne des labels de sequence)
@@ -195,9 +199,15 @@ def _parse_url_sections(raw: pd.DataFrame, header_row_idx: int, section_col_idx:
     sont rattachees jusqu'au separateur suivant. Les lignes de donnees
     trouvees avant le premier separateur sont rattachees a la sequence "" (cas
     d'un onglet sans decoupage en sequences).
+
+    Chaque URL est associee au nom du bloc auquel elle appartient (colonne
+    label_col_idx, ex: "HEADER", "ALGO"...), retrouve par report vers le bas
+    quand la cellule est vide (meme principe que COMPONENT NAME dans les
+    onglets wording) : utilise ensuite comme "classe attendue" pour la QA URL.
     """
     sections = {"": []}
     current = ""
+    last_label = ""
 
     for r in range(header_row_idx + 1, len(raw)):
         row = raw.iloc[r]
@@ -210,13 +220,18 @@ def _parse_url_sections(raw: pd.DataFrame, header_row_idx: int, section_col_idx:
         if count == 1 and non_null.iloc[section_col_idx]:
             current = str(row.iloc[section_col_idx]).strip()
             sections.setdefault(current, [])
+            last_label = ""
             continue
+
+        label_val = row.iloc[label_col_idx] if label_col_idx < len(row) else None
+        if pd.notna(label_val) and str(label_val).strip():
+            last_label = str(label_val).strip()
 
         value = row.iloc[tracked_col_idx]
         if pd.notna(value):
             url = str(value).strip()
             if url:
-                sections[current].append(url)
+                sections[current].append({"label": last_label, "url": url})
 
     return sections
 
@@ -278,11 +293,19 @@ def load_excel_urls(excel_file: str, keyword: str) -> tuple:
     if section_col_idx is None:
         # Pas de colonne "URL" (label de sequence) : impossible de decouper
         # en sequences, on retourne tout l'onglet sans filtrer.
-        urls = [
-            str(v).strip()
-            for v in raw.iloc[header_row_idx + 1:, tracked_col_idx].dropna()
-            if str(v).strip()
-        ]
+        urls = []
+        last_label = ""
+        for r in range(header_row_idx + 1, len(raw)):
+            row = raw.iloc[r]
+            label_val = row.iloc[URL_LABEL_COL_IDX] if URL_LABEL_COL_IDX < len(row) else None
+            if pd.notna(label_val) and str(label_val).strip():
+                last_label = str(label_val).strip()
+
+            value = row.iloc[tracked_col_idx]
+            if pd.notna(value):
+                url = str(value).strip()
+                if url:
+                    urls.append({"label": last_label, "url": url})
         return sheet, urls
 
     sections = _parse_url_sections(raw, header_row_idx, section_col_idx, tracked_col_idx)

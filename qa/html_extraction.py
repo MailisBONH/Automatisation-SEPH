@@ -274,3 +274,17 @@ def find_component_class(tag):
         parent = parent.parent
 
     return None
+
+
+def extract_anchor_links(raw_html: str) -> list:
+    """
+    Extrait chaque lien <a href="..."> du HTML brut avec la classe du
+    composant englobant (audit-component-xxx, via find_component_class),
+    pour la QA URL (voir qa.url_qa.run_url_qa).
+    """
+    soup = BeautifulSoup(raw_html or "", "html.parser")
+
+    return [
+        {"href": a["href"], "component_class": find_component_class(a) or ""}
+        for a in soup.find_all("a", href=True)
+    ]

@@ -81,14 +81,28 @@ BASE_COLUMNS = [
     "Match Type"
 ]
 
+# Rapport dedie aux URLs : pas de wording/composant, seulement classe +
+# URL attendues (Excel) vs trouvees (HTML), et le statut.
+URL_COLUMNS = ["Expected Class", "HTML Class", "Excel Wording", "HTML Wording", "Status"]
 
-def _write_results_sheet(ws_target, df_data, header_color, columns):
+URL_HEADER_LABELS = {
+    "Expected Class": "Classe attendue (Excel)",
+    "HTML Class": "Classe trouvée (HTML)",
+    "Excel Wording": "URL attendue (Excel)",
+    "HTML Wording": "URL trouvée (HTML)",
+    "Status": "Status",
+    "Sequence": "Séquence",
+}
+
+
+def _write_results_sheet(ws_target, df_data, header_color, columns, header_labels=None):
     status_idx = columns.index("Status")
     excel_idx = columns.index("Excel Wording")
     html_idx = columns.index("HTML Wording")
 
     for c, col in enumerate(columns, 1):
-        cell = ws_target.cell(1, c, col)
+        label = (header_labels or {}).get(col, col)
+        cell = ws_target.cell(1, c, label)
         cell.font = Font(bold=True, color="FFFFFF")
         cell.fill = PatternFill(start_color=header_color, fill_type="solid")
     crit_colors = {"High": "FF0000", "Medium": "FFA500", "Low": "FFD966"}
@@ -156,6 +170,9 @@ def save_report(results: list, campaign_sheet_name: str, mode: str = "wording"):
 
     record_run(campaign_sheet_name, mode, total, ok, total - ok, score)
 
+    columns = URL_COLUMNS if mode == "url" else BASE_COLUMNS
+    header_labels = URL_HEADER_LABELS if mode == "url" else None
+
     wb = Workbook()
 
     # Summary
@@ -182,13 +199,13 @@ def save_report(results: list, campaign_sheet_name: str, mode: str = "wording"):
         df[df["Status"] == "KO"].sort_values(["Criticality", "Component Name"]),
         df[df["Status"] == "OK"].sort_values(["Component Name"])
     ]).reset_index(drop=True)
-    _write_results_sheet(ws2, df_sorted, "4472C4", BASE_COLUMNS)
+    _write_results_sheet(ws2, df_sorted, "4472C4", columns, header_labels)
 
     # KO Only
     ws3 = wb.create_sheet("KO Only")
     df_ko = df[df["Status"] == "KO"].sort_values(
         ["Criticality", "Component Name"]).reset_index(drop=True)
-    _write_results_sheet(ws3, df_ko, "C00000", BASE_COLUMNS)
+    _write_results_sheet(ws3, df_ko, "C00000", columns, header_labels)
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     path = os.path.join(
@@ -207,7 +224,8 @@ def save_consolidated_report(results_by_sequence: dict, report_name: str = "Mult
     Ajoute une colonne "Sequence" aux onglets Details/KO Only, et un tableau
     recapitulatif par sequence (en plus du total global) dans le Summary.
     """
-    columns = ["Sequence"] + BASE_COLUMNS
+    columns = ["Sequence"] + (URL_COLUMNS if mode == "url" else BASE_COLUMNS)
+    header_labels = URL_HEADER_LABELS if mode == "url" else None
 
     all_rows = []
     per_sequence_stats = []
@@ -223,7 +241,10 @@ def save_consolidated_report(results_by_sequence: dict, report_name: str = "Mult
         per_sequence_stats.append((seq_name, seq_total, seq_ok, seq_total - seq_ok, seq_score))
         record_run(seq_name, mode, seq_total, seq_ok, seq_total - seq_ok, seq_score)
 
-    df = pd.DataFrame(all_rows, columns=columns) if all_rows else pd.DataFrame(columns=columns)
+    # df garde TOUS les champs des lignes de resultat (Criticality, Component
+    # Name... utilises pour le tri ci-dessous meme en mode "url"), `columns`
+    # ne sert qu'a restreindre l'affichage/export dans _write_results_sheet.
+    df = pd.DataFrame(all_rows) if all_rows else pd.DataFrame(columns=["Sequence"] + BASE_COLUMNS)
     total = len(df)
     ok = len(df[df["Status"] == "OK"]) if total else 0
     score = round((ok / total) * 100, 2) if total else 0
@@ -274,13 +295,13 @@ def save_consolidated_report(results_by_sequence: dict, report_name: str = "Mult
         df[df["Status"] == "KO"].sort_values(["Sequence", "Criticality", "Component Name"]),
         df[df["Status"] == "OK"].sort_values(["Sequence", "Component Name"])
     ]).reset_index(drop=True) if total else df
-    _write_results_sheet(ws2, df_sorted, "4472C4", columns)
+    _write_results_sheet(ws2, df_sorted, "4472C4", columns, header_labels)
 
     # KO Only
     ws3 = wb.create_sheet("KO Only")
     df_ko = df[df["Status"] == "KO"].sort_values(
         ["Sequence", "Criticality", "Component Name"]).reset_index(drop=True) if total else df
-    _write_results_sheet(ws3, df_ko, "C00000", columns)
+    _write_results_sheet(ws3, df_ko, "C00000", columns, header_labels)
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     safe_name = re.sub(r"[^\w\-]", "_", report_name)

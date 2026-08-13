@@ -70,26 +70,42 @@ def run_with_debug_capture(fn, *args, **kwargs):
     return result, buf.getvalue()
 
 
-def render_results_block(results, report_path, title, download_filename, sheet_name=None):
+URL_COLUMN_RENAME = {
+    "Expected Class": "Classe attendue (Excel)",
+    "HTML Class": "Classe trouvée (HTML)",
+    "Excel Wording": "URL attendue (Excel)",
+    "HTML Wording": "URL trouvée (HTML)",
+    "Sequence": "Séquence",
+}
+
+
+def render_results_block(results, report_path, title, download_filename, sheet_name=None, mode="wording"):
     """Affiche metriques, graphiques, tableau detaille et bouton de telechargement pour un jeu de resultats."""
 
     st.success(f"✅ {title}")
 
     df = pd.DataFrame(results)
 
-    df_display = df.copy()
+    if mode == "url":
+        display_cols = [
+            c for c in ["Sequence", "Expected Class", "HTML Class", "Excel Wording", "HTML Wording", "Status"]
+            if c in df.columns
+        ]
+        df_display = df[display_cols].rename(columns=URL_COLUMN_RENAME)
+    else:
+        df_display = df.copy()
 
-    for idx, row in df_display.iterrows():
+        for idx, row in df_display.iterrows():
 
-        if row["Status"] == "KO":
+            if row["Status"] == "KO":
 
-            excel_diff, html_diff = highlight_differences(
-                row.get("Excel Wording", ""),
-                row.get("HTML Wording", "")
-            )
+                excel_diff, html_diff = highlight_differences(
+                    row.get("Excel Wording", ""),
+                    row.get("HTML Wording", "")
+                )
 
-            df_display.at[idx, "Excel Wording"] = excel_diff
-            df_display.at[idx, "HTML Wording"] = html_diff
+                df_display.at[idx, "Excel Wording"] = excel_diff
+                df_display.at[idx, "HTML Wording"] = html_diff
 
     ok_count = len(df[df["Status"] == "OK"])
     ko_count = len(df[df["Status"] == "KO"])
@@ -224,17 +240,18 @@ def render_results_block(results, report_path, title, download_filename, sheet_n
     }
     """)
 
-    gb.configure_column(
-        "Excel Wording",
-        cellRenderer=html_renderer,
-        width=500
-    )
+    if mode != "url":
+        gb.configure_column(
+            "Excel Wording",
+            cellRenderer=html_renderer,
+            width=500
+        )
 
-    gb.configure_column(
-        "HTML Wording",
-        cellRenderer=html_renderer,
-        width=500
-    )
+        gb.configure_column(
+            "HTML Wording",
+            cellRenderer=html_renderer,
+            width=500
+        )
 
     grid_options = gb.build()
 
@@ -273,6 +290,8 @@ def render_results_block(results, report_path, title, download_filename, sheet_n
             key=f"download_{download_filename}"
         )
 
+
+NO_SELECTION = "— Sélectionnez —"
 
 st.set_page_config(page_title="QA Email Tool", layout="wide")
 
@@ -392,10 +411,17 @@ if batch_mode:
             for f in html_files:
                 choice = st.selectbox(
                     f"Séquence pour **{f.name}**",
-                    sequence_options,
+                    [NO_SELECTION] + sequence_options,
                     key=f"seq_choice_{f.name}"
                 )
-                sequence_assignments.append((f, choice))
+                if choice != NO_SELECTION:
+                    sequence_assignments.append((f, choice))
+
+            unassigned = len(html_files) - len(sequence_assignments)
+            if unassigned:
+                st.warning(
+                    f"⚠️ {unassigned} fichier(s) sans séquence sélectionnée : ils ne seront pas comparés."
+                )
 
 else:
     if mode == "Wording":
@@ -407,7 +433,9 @@ else:
                 st.error(f"❌ Impossible de lire les onglets du fichier Excel : {e}")
 
         if sheet_options:
-            keyword = st.selectbox("Onglet Excel (campagne)", sheet_options)
+            keyword = st.selectbox("Onglet Excel (campagne)", [NO_SELECTION] + sheet_options)
+            if keyword == NO_SELECTION:
+                keyword = ""
         else:
             keyword = st.text_input("Campaign keyword", "HugPlan S1 Bronze")
 
@@ -420,7 +448,9 @@ else:
                 st.error(f"❌ {e}")
 
         if sequence_options:
-            keyword = st.selectbox("Séquence (onglet UTM)", sequence_options)
+            keyword = st.selectbox("Séquence (onglet UTM)", [NO_SELECTION] + sequence_options)
+            if keyword == NO_SELECTION:
+                keyword = ""
             st.caption("ℹ️ L'onglet UTM lui-même est retrouvé automatiquement (nom contenant \"UTM\").")
         else:
             keyword = st.text_input("Campaign keyword", "HugPlan S1 Bronze")
@@ -435,7 +465,10 @@ qa_mode = "wording" if mode == "Wording" else "url"
 # =========================
 # DIAGNOSTIC EXCEL (avant de lancer la QA, hors mode multi-séquences)
 # =========================
-if excel_path and not batch_mode:
+if excel_path and not batch_mode and not keyword:
+    st.info("👆 Sélectionnez une campagne/séquence ci-dessus pour afficher le diagnostic.")
+
+if excel_path and not batch_mode and keyword:
     with st.expander("🔍 Diagnostic du fichier Excel", expanded=True):
         try:
             xls_preview = pd.ExcelFile(excel_path)
@@ -601,13 +634,18 @@ if st.button(button_label):
                 all_rows,
                 report_path,
                 f"Comparaison terminée pour {len(results_by_sequence)} séquence(s)",
-                f"qa_report_multi_{today}.xlsx"
+                f"qa_report_multi_{today}.xlsx",
+                mode=qa_mode
             )
 
         with st.expander("🐛 Logs de debug (extraction HTML/Excel)"):
             st.code(debug_buf.getvalue() or "Aucun log.", language=None)
 
     elif (html_file and excel_file) or (aem_url and excel_file):
+
+        if not keyword:
+            st.error("Merci de sélectionner une campagne/séquence dans la liste déroulante.")
+            st.stop()
 
         if aem_url and (not username or not password):
             st.error("Merci de renseigner les identifiants AEM")
@@ -639,7 +677,8 @@ if st.button(button_label):
                 report_path,
                 "Comparaison terminée",
                 f"qa_report_{safe_sheet_name}_{today}.xlsx",
-                sheet_name=sheet_name
+                sheet_name=sheet_name,
+                mode=qa_mode
             )
 
             with st.expander("🐛 Logs de debug (extraction HTML/Excel)"):
