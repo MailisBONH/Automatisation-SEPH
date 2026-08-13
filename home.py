@@ -261,7 +261,8 @@ def render_results_block(results, report_path, title, download_filename, mode="w
         allow_unsafe_jscode=True,
         custom_css=custom_css,
         height=800,
-        theme="streamlit"
+        theme="streamlit",
+        key=f"grid_{download_filename}"
     )
 
     with open(report_path, "rb") as f:
@@ -273,19 +274,57 @@ def render_results_block(results, report_path, title, download_filename, mode="w
         )
 
 
-def _run_sequences(last_run):
-    """{sequence: rows} pour ce run (une seule entree en mode single)."""
-    if last_run["kind"] == "batch":
-        return last_run["sequences"]
-    return {last_run.get("sequence") or last_run["sheet_name"]: last_run["results"]}
+def _run_items(last_run):
+    """
+    Liste de {mode, sequence, rows, report_path} a archiver pour ce run.
+    report_path=None signifie qu'un rapport individuel doit encore etre
+    genere (cas batch : le rapport consolide ne se decoupe pas par
+    sequence, un rapport par sequence est regenere au moment d'archiver).
+
+    Le kind "combined_test" (mode "Wording + URL") retourne un item par
+    type - c'est ce qui permet a _do_archive de les archiver chacun sous
+    son propre type dans le meme dossier de sequence (une fois reconcilies,
+    voir normalize_sequence_name) et de declencher le rapport combine.
+    """
+    kind = last_run["kind"]
+
+    if kind == "batch":
+        return [
+            {"mode": last_run["mode"], "sequence": seq_name, "rows": rows, "report_path": None}
+            for seq_name, rows in last_run["sequences"].items()
+        ]
+
+    if kind == "combined_test":
+        return [
+            {
+                "mode": "wording", "sequence": last_run["wording_sequence"],
+                "rows": last_run["wording_results"], "report_path": last_run["wording_report_path"]
+            },
+            {
+                "mode": "url", "sequence": last_run["url_sequence"],
+                "rows": last_run["url_results"], "report_path": last_run["url_report_path"]
+            },
+        ]
+
+    return [{
+        "mode": last_run["mode"],
+        "sequence": last_run.get("sequence") or last_run["sheet_name"],
+        "rows": last_run["results"],
+        "report_path": last_run["report_path"],
+    }]
+
+
+def _archive_key(last_run):
+    """Cle session_state identifiant ce run pour l'archivage (idempotence)."""
+    if last_run["kind"] == "combined_test":
+        return f"archived::{last_run['wording_report_path']}::{last_run['url_report_path']}"
+    return f"archived::{last_run['report_path']}"
 
 
 def _do_archive(last_run, country, trigger):
-    """Archive le(s) rapport(s) dans output/<Pays>/<Trigger>/<Sequence>/ (voir
-    qa.archive) et enregistre l'entree d'historique correspondante (voir
-    qa.history.record_run). En mode batch, chaque sequence du run est
-    archivee separement (son propre rapport individuel est regenere pour
-    l'occasion, le rapport consolide ne se decoupant pas par sequence).
+    """Archive chaque item du run (voir _run_items) dans
+    output/<Pays>/<Trigger>/<Sequence>/ (voir qa.archive) et enregistre
+    l'entree d'historique correspondante (voir qa.history.record_run).
 
     Le nom de sequence est normalise (voir qa.classification) avant
     archivage : wording ("SEQ 1 NON LOYAL") et url ("SEQ 1 NON FID") d'une
@@ -294,29 +333,29 @@ def _do_archive(last_run, country, trigger):
     sequence, un rapport combine Wording+URL est (re)genere (voir
     qa.combined_report) et son propre score est aussi archive dans
     l'historique (mode="combined")."""
-    for seq_name, rows in _run_sequences(last_run).items():
-        sequence = resolve_sequence_alias(country, trigger, normalize_sequence_name(seq_name))
+    resolved_sequences = set()
 
-        seq_total = len(rows)
-        seq_ok = sum(1 for r in rows if r["Status"] == "OK")
-        seq_score = round(seq_ok / seq_total * 100, 2) if seq_total else 0
+    for item in _run_items(last_run):
+        sequence = resolve_sequence_alias(country, trigger, normalize_sequence_name(item["sequence"]))
+        resolved_sequences.add(sequence)
 
-        seq_report_path = (
-            save_report(rows, seq_name, mode=last_run["mode"])
-            if last_run["kind"] == "batch"
-            else last_run["report_path"]
-        )
-        archive_report(seq_report_path, country, trigger, sequence, mode=last_run["mode"])
+        rows = item["rows"]
+        total = len(rows)
+        ok = sum(1 for r in rows if r["Status"] == "OK")
+        score = round(ok / total * 100, 2) if total else 0
+
+        report_path = item["report_path"] or save_report(rows, item["sequence"], mode=item["mode"])
+        archive_report(report_path, country, trigger, sequence, mode=item["mode"])
         record_run(
-            last_run.get("sheet_name") or seq_name, last_run["mode"],
-            seq_total, seq_ok, seq_total - seq_ok, seq_score,
+            item["sequence"], item["mode"], total, ok, total - ok, score,
             country=country, trigger=trigger, sequence=sequence
         )
 
+    for sequence in resolved_sequences:
         combined_path, combined_stats = build_combined_report(country, trigger, sequence)
         if combined_stats:
             record_run(
-                last_run.get("sheet_name") or seq_name, "combined",
+                sequence, "combined",
                 combined_stats["total"], combined_stats["ok"], combined_stats["ko"], combined_stats["score"],
                 country=country, trigger=trigger, sequence=sequence
             )
@@ -333,6 +372,8 @@ def _prompt_missing_classification(last_run, guess, sequences):
     country = st.text_input("Pays", value=guess.get("country") or "")
     trigger = st.text_input("Trigger", value=guess.get("trigger") or "")
 
+    archive_key = _archive_key(last_run)
+
     col1, col2 = st.columns(2)
     with col1:
         if st.button("💾 Valider et archiver", use_container_width=True):
@@ -341,13 +382,11 @@ def _prompt_missing_classification(last_run, guess, sequences):
                 st.error("Les deux champs sont obligatoires.")
             else:
                 _do_archive(last_run, country, trigger)
-                st.session_state[f"archived::{last_run['report_path']}"] = {
-                    "country": country, "trigger": trigger
-                }
+                st.session_state[archive_key] = {"country": country, "trigger": trigger}
                 st.rerun()
     with col2:
         if st.button("Ne pas archiver", use_container_width=True):
-            st.session_state[f"archived::{last_run['report_path']}"] = {"skipped": True}
+            st.session_state[archive_key] = {"skipped": True}
             st.rerun()
 
 
@@ -358,15 +397,24 @@ def ensure_archived(last_run):
     du classeur Excel (voir qa.classification), la sequence etant deja
     connue de maniere fiable par ailleurs. Si le pays et/ou le trigger n'ont
     pas pu etre detectes, ouvre une pop-up pour les completer avant
-    d'archiver. Idempotent (ne re-traite pas un report_path deja archive/skip).
+    d'archiver. Idempotent (ne re-traite pas un run deja archive/skip).
     """
-    archive_key = f"archived::{last_run['report_path']}"
+    archive_key = _archive_key(last_run)
     if archive_key in st.session_state:
         return
 
-    sequences = list(_run_sequences(last_run).keys())
-    guess = detect_classification(last_run["excel_path"], sequences[0], last_run["mode"]) if sequences else {}
+    items = _run_items(last_run)
+    if not items:
+        return
+
+    # La detection pays (langue de la colonne wording) ne fonctionne qu'en
+    # mode wording : on privilegie cet item quand il existe (mode combine),
+    # sinon le premier disponible.
+    detection_item = next((i for i in items if i["mode"] == "wording"), items[0])
+    guess = detect_classification(last_run["excel_path"], detection_item["sequence"], detection_item["mode"])
     country, trigger = guess.get("country"), guess.get("trigger")
+
+    sequences = [i["sequence"] for i in items]
 
     if country and trigger:
         _do_archive(last_run, country, trigger)
@@ -396,17 +444,27 @@ session_id = st.session_state["session_id"]
 # =========================
 mode = st.radio(
     "Type de test",
-    ["Wording", "URL"],
+    ["Wording", "URL", "Wording + URL"],
     index=0,  # par défaut wording
     horizontal=True
 )
 
+test_wording = mode in ("Wording", "Wording + URL")
+test_url = mode in ("URL", "Wording + URL")
+
 batch_mode = st.checkbox(
-    "📦 Traiter plusieurs séquences en une fois (même Excel, plusieurs HTML)"
+    "📦 Traiter plusieurs séquences en une fois (même Excel, plusieurs HTML)",
+    disabled=(mode == "Wording + URL")
 )
+if mode == "Wording + URL":
+    batch_mode = False
+    st.caption(
+        "ℹ️ Le mode multi-séquences n'est pas disponible en \"Wording + URL\" pour l'instant "
+        "— traitez une séquence à la fois."
+    )
 
 include_generic = False
-if mode == "Wording":
+if test_wording:
     include_generic = st.checkbox(
         "🧩 Les composants génériques (footer, mentions légales, fidélité...) "
         "sont dans un onglet séparé de l'Excel"
@@ -460,7 +518,6 @@ if html_file:
 sequence_assignments = []
 
 if batch_mode:
-    keyword = ""
 
     if excel_path and html_files:
         sequence_options = []
@@ -495,7 +552,11 @@ if batch_mode:
                 )
 
 else:
-    if mode == "Wording":
+    wording_keyword = ""
+    url_keyword = ""
+    url_ready = not test_url  # pas de test URL: rien a valider de ce cote
+
+    if test_wording:
         sheet_options = []
         if excel_path:
             try:
@@ -504,42 +565,63 @@ else:
                 st.error(f"❌ Impossible de lire les onglets du fichier Excel : {e}")
 
         if sheet_options:
-            keyword = st.selectbox("Onglet Excel (campagne)", [NO_SELECTION] + sheet_options)
-            if keyword == NO_SELECTION:
-                keyword = ""
+            wording_keyword = st.selectbox("Onglet Excel (campagne)", [NO_SELECTION] + sheet_options)
+            if wording_keyword == NO_SELECTION:
+                wording_keyword = ""
         else:
-            keyword = st.text_input("Onglet Excel (campagne)", placeholder="Ex : SEQ 1 NON LOYAL")
+            wording_keyword = st.text_input("Onglet Excel (campagne)", placeholder="Ex : SEQ 1 NON LOYAL")
             st.caption("ℹ️ Ajoutez d'abord le fichier Excel ci-dessus pour voir la liste des onglets disponibles.")
 
-    else:
+    if test_url:
         sequence_options = []
+        excel_read_ok = False
         if excel_path:
             try:
                 sequence_options = list_url_sequences(excel_path)
+                excel_read_ok = True
             except ValueError as e:
                 st.error(f"❌ {e}")
 
         if sequence_options:
-            keyword = st.selectbox("Séquence (onglet UTM)", [NO_SELECTION] + sequence_options)
-            if keyword == NO_SELECTION:
-                keyword = ""
+            # L'onglet UTM regroupe plusieurs sequences empilees : il faut
+            # choisir laquelle tester.
+            url_keyword = st.selectbox("Séquence (onglet UTM)", [NO_SELECTION] + sequence_options)
+            if url_keyword == NO_SELECTION:
+                url_keyword = ""
+            url_ready = bool(url_keyword)
             st.caption("ℹ️ L'onglet UTM lui-même est retrouvé automatiquement (nom contenant \"UTM\").")
+        elif excel_read_ok:
+            # Onglet UTM trouve automatiquement, mais sans decoupage en
+            # sequences (une seule sequence implicite pour tout l'onglet) :
+            # rien a selectionner, keyword vide = tout l'onglet est utilise.
+            url_keyword = ""
+            url_ready = True
+            st.caption(
+                "ℹ️ L'onglet UTM est retrouvé automatiquement (nom contenant \"UTM\") et ne regroupe "
+                "qu'une seule séquence — aucune sélection n'est nécessaire ici."
+            )
         else:
-            keyword = st.text_input("Séquence (onglet UTM)", placeholder="Ex : SEQ 1 NON FID")
+            url_keyword = st.text_input("Séquence (onglet UTM)", placeholder="Ex : SEQ 1 NON FID")
+            url_ready = False
             st.caption(
                 "ℹ️ Ajoutez d'abord le fichier Excel ci-dessus : l'onglet UTM est retrouvé automatiquement "
                 "(nom contenant \"UTM\"), et la liste des séquences qu'il contient apparaîtra ici s'il en regroupe plusieurs."
             )
 
+# En mode multi-sequences (test_wording et test_url ne peuvent pas etre tous
+# les deux vrais dans ce cas, voir plus haut), qa_mode reste le mode unique
+# teste pour toutes les sequences.
 qa_mode = "wording" if mode == "Wording" else "url"
 
 # =========================
 # DIAGNOSTIC EXCEL (avant de lancer la QA, hors mode multi-séquences)
 # =========================
-if excel_path and not batch_mode and not keyword:
+missing_keyword = (test_wording and not wording_keyword) or (test_url and not url_ready)
+
+if excel_path and not batch_mode and missing_keyword:
     st.info("👆 Sélectionnez une campagne/séquence ci-dessus pour afficher le diagnostic.")
 
-if excel_path and not batch_mode and keyword:
+if excel_path and not batch_mode and not missing_keyword:
     with st.expander("🔍 Diagnostic du fichier Excel", expanded=True):
         try:
             xls_preview = pd.ExcelFile(excel_path)
@@ -549,9 +631,9 @@ if excel_path and not batch_mode and keyword:
             xls_preview = None
 
         if xls_preview is not None:
-            if qa_mode == "wording":
+            if test_wording:
                 try:
-                    diag_sheet, diag_wordings = load_excel_wordings(excel_path, keyword)
+                    diag_sheet, diag_wordings = load_excel_wordings(excel_path, wording_keyword)
                     st.success(f"✅ Onglet trouvé : **{diag_sheet}** — {len(diag_wordings)} wordings chargés")
 
                     n_with_class = sum(1 for w in diag_wordings if w.get("Technical"))
@@ -620,9 +702,9 @@ if excel_path and not batch_mode and keyword:
                 except ValueError as e:
                     st.error(f"❌ {e}")
 
-            else:
+            if test_url:
                 try:
-                    diag_sheet, diag_urls = load_excel_urls(excel_path, keyword)
+                    diag_sheet, diag_urls = load_excel_urls(excel_path, url_keyword)
                     st.success(
                         f"✅ Onglet UTM trouvé : **{diag_sheet}** — "
                         f"{len(diag_urls)} URL(s) de référence pour cette séquence"
@@ -719,7 +801,7 @@ if st.button(button_label):
 
     elif html_file and excel_file:
 
-        if not keyword:
+        if (test_wording and not wording_keyword) or (test_url and not url_ready):
             st.error("Merci de sélectionner une campagne/séquence dans la liste déroulante.")
             st.stop()
 
@@ -727,37 +809,85 @@ if st.button(button_label):
 
         # appel backend
         try:
-            (results, report_path, sheet_name), debug_logs = run_with_debug_capture(
-                run_qa,
-                html_file=html_path,
-                excel_file=excel_path,
-                keyword=keyword,
-                mode=qa_mode,
-                include_generic=include_generic
-            )
+            if test_wording and test_url:
+                # Wording + URL : les deux pipelines tournent sur le meme
+                # HTML/Excel (un seul email peut etre teste sur les deux
+                # aspects a la fois), avec chacun son propre onglet/sequence.
+                (wording_results, wording_report_path, wording_sheet_name), wording_logs = run_with_debug_capture(
+                    run_qa,
+                    html_file=html_path,
+                    excel_file=excel_path,
+                    keyword=wording_keyword,
+                    mode="wording",
+                    include_generic=include_generic
+                )
+                (url_results, url_report_path, url_sheet_name), url_logs = run_with_debug_capture(
+                    run_qa,
+                    html_file=html_path,
+                    excel_file=excel_path,
+                    keyword=url_keyword,
+                    mode="url"
+                )
 
-            today = datetime.now().strftime("%Y-%m-%d")
+                today = datetime.now().strftime("%Y-%m-%d")
+                safe_wording_name = re.sub(r"[^\w\-]", "_", wording_sheet_name)
+                safe_url_name = re.sub(r"[^\w\-]", "_", url_sheet_name)
 
-            safe_sheet_name = re.sub(r"[^\w\-]", "_", sheet_name)
+                st.session_state["last_run"] = {
+                    "kind": "combined_test",
+                    "excel_path": excel_path,
+                    "title": "Comparaison terminée (Wording + URL)",
+                    "wording_results": wording_results,
+                    "wording_report_path": wording_report_path,
+                    "wording_sequence": wording_keyword,
+                    "wording_download_filename": f"qa_report_wording_{safe_wording_name}_{today}.xlsx",
+                    "url_results": url_results,
+                    "url_report_path": url_report_path,
+                    # onglet UTM plat (pas de decoupage en sequences, voir
+                    # url_ready) : url_keyword est vide, on reutilise la
+                    # sequence wording (meme sequence testee des deux cotes).
+                    "url_sequence": url_keyword or wording_keyword,
+                    "url_download_filename": f"qa_report_url_{safe_url_name}_{today}.xlsx",
+                    "debug_logs": f"--- Wording ---\n{wording_logs}\n\n--- URL ---\n{url_logs}",
+                }
 
-            st.session_state["last_run"] = {
-                "kind": "single",
-                "mode": qa_mode,
-                "excel_path": excel_path,
-                "title": "Comparaison terminée",
-                "download_filename": f"qa_report_{safe_sheet_name}_{today}.xlsx",
-                "report_path": report_path,
-                "results": results,
-                "sheet_name": sheet_name,
-                # keyword == la sequence choisie par l'utilisateur (onglet UTM
-                # en mode url, ou onglet Excel en mode wording - dans ce cas
-                # identique a sheet_name). En mode url, sheet_name est le nom
-                # de l'onglet UTM (souvent unique, partage par toutes les
-                # sequences) : ce n'est PAS la sequence, il ne faut pas s'en
-                # servir pour le classement par sequence dans l'historique.
-                "sequence": keyword,
-                "debug_logs": debug_logs,
-            }
+            else:
+                qa_mode = "wording" if test_wording else "url"
+                keyword = wording_keyword if test_wording else url_keyword
+
+                (results, report_path, sheet_name), debug_logs = run_with_debug_capture(
+                    run_qa,
+                    html_file=html_path,
+                    excel_file=excel_path,
+                    keyword=keyword,
+                    mode=qa_mode,
+                    include_generic=include_generic
+                )
+
+                today = datetime.now().strftime("%Y-%m-%d")
+
+                safe_sheet_name = re.sub(r"[^\w\-]", "_", sheet_name)
+
+                st.session_state["last_run"] = {
+                    "kind": "single",
+                    "mode": qa_mode,
+                    "excel_path": excel_path,
+                    "title": "Comparaison terminée",
+                    "download_filename": f"qa_report_{safe_sheet_name}_{today}.xlsx",
+                    "report_path": report_path,
+                    "results": results,
+                    "sheet_name": sheet_name,
+                    # keyword == la sequence choisie par l'utilisateur (onglet UTM
+                    # en mode url, ou onglet Excel en mode wording - dans ce cas
+                    # identique a sheet_name). En mode url, sheet_name est le nom
+                    # de l'onglet UTM (souvent unique, partage par toutes les
+                    # sequences) : ce n'est PAS la sequence, il ne faut pas s'en
+                    # servir pour le classement par sequence dans l'historique -
+                    # sauf si keyword est vide (onglet UTM plat, voir url_ready),
+                    # auquel cas c'est le seul nom disponible.
+                    "sequence": keyword or sheet_name,
+                    "debug_logs": debug_logs,
+                }
 
         except ValueError as e:
             st.session_state.pop("last_run", None)
@@ -779,21 +909,60 @@ if last_run:
     if last_run["kind"] == "batch":
         st.subheader("Récapitulatif par séquence")
         st.dataframe(pd.DataFrame(last_run["recap_rows"]), use_container_width=True)
+        render_results_block(
+            last_run["results"],
+            last_run["report_path"],
+            last_run["title"],
+            last_run["download_filename"],
+            mode=last_run["mode"]
+        )
 
-    render_results_block(
-        last_run["results"],
-        last_run["report_path"],
-        last_run["title"],
-        last_run["download_filename"],
-        mode=last_run["mode"]
-    )
+    elif last_run["kind"] == "combined_test":
+        st.success(f"✅ {last_run['title']}")
+
+        wording_total = len(last_run["wording_results"])
+        wording_ok = sum(1 for r in last_run["wording_results"] if r["Status"] == "OK")
+        url_total = len(last_run["url_results"])
+        url_ok = sum(1 for r in last_run["url_results"] if r["Status"] == "OK")
+        combined_total = wording_total + url_total
+        combined_ok = wording_ok + url_ok
+        combined_score = round(combined_ok / combined_total * 100, 1) if combined_total else 0
+
+        st.metric("Score combiné (Wording + URL)", f"{combined_score}%")
+
+        render_results_block(
+            last_run["wording_results"],
+            last_run["wording_report_path"],
+            "📝 Résultats Wording",
+            last_run["wording_download_filename"],
+            mode="wording"
+        )
+
+        st.divider()
+
+        render_results_block(
+            last_run["url_results"],
+            last_run["url_report_path"],
+            "🔗 Résultats URL",
+            last_run["url_download_filename"],
+            mode="url"
+        )
+
+    else:
+        render_results_block(
+            last_run["results"],
+            last_run["report_path"],
+            last_run["title"],
+            last_run["download_filename"],
+            mode=last_run["mode"]
+        )
 
     with st.expander("🐛 Logs de debug (extraction HTML/Excel)"):
         st.code(last_run.get("debug_logs") or "Aucun log.", language=None)
 
     ensure_archived(last_run)
 
-    archived_state = st.session_state.get(f"archived::{last_run['report_path']}")
+    archived_state = st.session_state.get(_archive_key(last_run))
     if archived_state and archived_state.get("skipped"):
         st.caption("ℹ️ Ce rapport n'a pas été archivé dans l'historique.")
     elif archived_state:
