@@ -143,7 +143,15 @@ def _detect_from_utm_tab(excel_file: str) -> dict:
     )
 
     if campaign_col_idx is not None:
-        values = raw.iloc[header_row_idx + 1:, campaign_col_idx].dropna()
+        campaign_values = raw.iloc[header_row_idx + 1:, campaign_col_idx]
+        if tracked_col_idx is not None:
+            # Ne garde que les lignes qui ont aussi une URL trackee renseignee :
+            # exclut la ligne modele "Mandatory" du gabarit (qui n'en a pas),
+            # qui sinon peut fausser le vote majoritaire sur un onglet a peu
+            # de lignes reelles.
+            has_tracked_url = raw.iloc[header_row_idx + 1:, tracked_col_idx].notna()
+            campaign_values = campaign_values[has_tracked_url]
+        values = campaign_values.dropna()
         if len(values):
             try:
                 most_common = values.astype(str).mode().iloc[0]

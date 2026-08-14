@@ -7,6 +7,7 @@ import uuid
 import contextlib
 from qa.archive import archive_report
 from qa.classification import detect_classification, normalize_sequence_name, resolve_sequence_alias
+from qa.cleanup import cleanup_old_temp_files_throttled
 from qa.combined_report import build_combined_report
 from qa.diagnostics import find_duplicate_components, find_unused_excel_classes, find_wrong_language_wordings
 from qa.engine import run_qa, run_qa_for_sequence
@@ -525,6 +526,10 @@ with header_col2:
 if "session_id" not in st.session_state:
     st.session_state["session_id"] = uuid.uuid4().hex[:8]
 session_id = st.session_state["session_id"]
+
+# Purge les fichiers de temp/ plus vieux que 24h (throttle : ne scanne
+# reellement le dossier qu'une fois par heure au plus, voir qa.cleanup).
+cleanup_old_temp_files_throttled()
 
 # =========================
 # MODE (Wording / URL)

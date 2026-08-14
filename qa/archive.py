@@ -71,3 +71,48 @@ def archive_report(report_path: str, country: str, trigger: str, sequence: str, 
             pass
 
     return dest_path
+
+
+def delete_sequence_dir(country: str, trigger: str, sequence: str) -> None:
+    """Supprime le dossier de rapports d'une sequence (fichiers Excel
+    archives). Ne touche pas a l'historique des scores (voir
+    qa.history.delete_classification) : les deux sont a appeler ensemble
+    pour supprimer une sequence entierement depuis la page Historique."""
+    dest_dir = sequence_dir(country, trigger, sequence)
+    if os.path.isdir(dest_dir):
+        shutil.rmtree(dest_dir, ignore_errors=True)
+
+
+def move_sequence_dir(old_country: str, old_trigger: str, old_sequence: str,
+                       new_country: str, new_trigger: str, new_sequence: str) -> None:
+    """Deplace le dossier de rapports d'une sequence vers un nouveau
+    (Pays, Trigger, Sequence) - renommage, ou fusion si le dossier de
+    destination existe deja (auquel cas un fichier de meme nom est suffixe
+    plutot qu'ecrase). Reapplique la rotation par type apres coup, au cas ou
+    la fusion depasserait KEEP_REPORTS pour un type donne."""
+    src_dir = sequence_dir(old_country, old_trigger, old_sequence)
+    if not os.path.isdir(src_dir):
+        return
+
+    dst_dir = sequence_dir(new_country, new_trigger, new_sequence)
+    os.makedirs(dst_dir, exist_ok=True)
+
+    for fname in os.listdir(src_dir):
+        src_file = os.path.join(src_dir, fname)
+        dst_file = os.path.join(dst_dir, fname)
+        if os.path.exists(dst_file):
+            base, ext = os.path.splitext(fname)
+            dst_file = os.path.join(dst_dir, f"{base}_fusionne{ext}")
+        shutil.move(src_file, dst_file)
+
+    try:
+        os.rmdir(src_dir)
+    except OSError:
+        pass
+
+    for mode in ("wording", "url", "combined"):
+        for old_file in list_reports(new_country, new_trigger, new_sequence, mode=mode)[KEEP_REPORTS:]:
+            try:
+                os.remove(old_file)
+            except OSError:
+                pass

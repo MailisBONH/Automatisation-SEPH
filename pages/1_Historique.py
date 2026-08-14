@@ -1,10 +1,12 @@
 """
 Page "Historique" : navigation par dossiers Pays > Trigger > Sequence dans
-les runs archives manuellement depuis la page principale (bouton
-"💾 Enregistrer dans l'historique"). Le dossier final affiche les 2 derniers
-rapports Excel conserves sur disque (voir qa.archive, rotation automatique)
-et l'evolution du pourcentage de bugs depuis le tout premier run archive
-pour cette sequence (voir qa.history, jamais purge).
+les runs archives automatiquement depuis la page principale. Le dossier
+final affiche les 2 derniers rapports Excel conserves sur disque (voir
+qa.archive, rotation automatique) et l'evolution du pourcentage de OK depuis
+le tout premier run archive pour cette sequence (voir qa.history, jamais
+purge). Une vue d'ensemble recapitule toutes les sequences avant la
+navigation par dossiers, et un panneau de gestion permet de corriger une
+mauvaise classification (renommer/fusionner) ou de supprimer une sequence.
 """
 import os
 
@@ -12,13 +14,20 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from qa.archive import list_reports
-from qa.history import build_history_tree, load_sequence_history
+from qa.archive import delete_sequence_dir, list_reports, move_sequence_dir
+from qa.history import (
+    build_history_tree,
+    delete_classification,
+    load_sequence_history,
+    rewrite_classification,
+)
 
 st.set_page_config(page_title="Historique QA", layout="wide")
 
 st.title("📈 Historique QA")
 st.page_link("home.py", label="⬅️ Retour à l'outil QA")
+
+MODE_LABELS = {"wording": "📝 Wording", "url": "🔗 URL", "combined": "🧩 Combiné"}
 
 if "history_nav" not in st.session_state:
     st.session_state["history_nav"] = {"country": None, "trigger": None, "sequence": None}
@@ -30,9 +39,48 @@ tree = build_history_tree()
 if not tree:
     st.info(
         "Aucun rapport archivé pour l'instant. Depuis la page principale, lancez une comparaison "
-        "puis cliquez sur **💾 Enregistrer dans l'historique** pour qu'elle apparaisse ici."
+        "et elle sera archivée automatiquement (une pop-up peut apparaître si le pays/trigger "
+        "n'a pas pu être détecté)."
     )
     st.stop()
+
+
+# =========================
+# VUE D'ENSEMBLE
+# =========================
+def _latest_relevant_entry(entries):
+    """Prefere la derniere entree 'combined' (vue la plus complete d'une
+    sequence) si elle existe, sinon la derniere entree disponible quel que
+    soit son type."""
+    combined = [e for e in entries if e.get("mode") == "combined"]
+    return combined[-1] if combined else entries[-1]
+
+
+def _overview_rows(tree):
+    rows = []
+    for country, triggers in tree.items():
+        for trigger, sequences in triggers.items():
+            for sequence, entries in sequences.items():
+                if not entries:
+                    continue
+                latest = _latest_relevant_entry(entries)
+                rows.append({
+                    "Pays": country,
+                    "Trigger": trigger,
+                    "Séquence": sequence,
+                    "Dernier test": latest["timestamp"],
+                    "Type": MODE_LABELS.get(latest.get("mode"), latest.get("mode")),
+                    "% OK": latest["score"],
+                    "Nb tests": len(entries),
+                })
+    return rows
+
+
+with st.expander("📊 Vue d'ensemble (toutes les séquences)", expanded=nav["sequence"] is None):
+    overview_df = pd.DataFrame(_overview_rows(tree)).sort_values("Dernier test", ascending=False)
+    st.dataframe(overview_df, use_container_width=True, hide_index=True)
+
+st.divider()
 
 # =========================
 # FIL D'ARIANE
@@ -103,8 +151,6 @@ else:
         "dès que les deux sont disponibles, un rapport combiné."
     )
 
-    MODE_LABELS = {"wording": "📝 Wording", "url": "🔗 URL", "combined": "🧩 Combiné"}
-
     st.markdown("**Rapports disponibles (les 2 plus récents par type, les précédents sont supprimés automatiquement) :**")
     any_report = False
     for mode, label in MODE_LABELS.items():
@@ -155,3 +201,53 @@ else:
         )
     else:
         st.caption("Aucun historique de score pour cette séquence.")
+
+    # =========================
+    # GESTION (renommer/fusionner, supprimer)
+    # =========================
+    st.divider()
+    with st.expander("⚙️ Gérer cette séquence"):
+        st.caption(
+            "Corrige une mauvaise détection automatique ou fusionne un doublon "
+            "(ex: une séquence classée sous deux noms différents avant recoupement)."
+        )
+
+        with st.form(f"rename_form_{country}_{trigger}_{sequence}"):
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                new_country = st.text_input("Pays", value=country)
+            with col2:
+                new_trigger = st.text_input("Trigger", value=trigger)
+            with col3:
+                new_sequence = st.text_input("Séquence", value=sequence)
+
+            renamed = st.form_submit_button("💾 Renommer / fusionner")
+
+        if renamed:
+            new_country, new_trigger, new_sequence = new_country.strip(), new_trigger.strip(), new_sequence.strip()
+            if not (new_country and new_trigger and new_sequence):
+                st.error("Les trois champs sont obligatoires.")
+            elif (new_country, new_trigger, new_sequence) == (country, trigger, sequence):
+                st.info("Rien à changer.")
+            else:
+                move_sequence_dir(country, trigger, sequence, new_country, new_trigger, new_sequence)
+                rewrite_classification(country, trigger, sequence, new_country, new_trigger, new_sequence)
+                nav["country"], nav["trigger"], nav["sequence"] = new_country, new_trigger, new_sequence
+                st.success(f"Renommé en **{new_country} / {new_trigger} / {new_sequence}**.")
+                st.rerun()
+
+        st.markdown("---")
+        st.caption(
+            "⚠️ Suppression définitive : les rapports Excel archivés ET l'historique des scores "
+            "de cette séquence seront perdus. Cette action est irréversible."
+        )
+        confirm_delete = st.checkbox(
+            "Je confirme vouloir supprimer cette séquence définitivement",
+            key=f"confirm_delete_{country}_{trigger}_{sequence}"
+        )
+        if st.button("🗑️ Supprimer cette séquence", disabled=not confirm_delete):
+            delete_sequence_dir(country, trigger, sequence)
+            delete_classification(country, trigger, sequence)
+            nav["country"], nav["trigger"], nav["sequence"] = None, None, None
+            st.success("Séquence supprimée.")
+            st.rerun()

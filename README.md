@@ -18,6 +18,7 @@ Interface Streamlit + moteur de comparaison Python, avec export du résultat en 
 - [Comment fonctionne la QA URL](#comment-fonctionne-la-qa-url)
 - [Rapport de sortie](#rapport-de-sortie)
 - [Historique par pays / trigger / séquence](#historique-par-pays--trigger--séquence)
+- [Nettoyage automatique des fichiers temporaires](#nettoyage-automatique-des-fichiers-temporaires)
 - [Configuration](#configuration)
 - [Limitations connues / roadmap](#limitations-connues--roadmap)
 
@@ -63,7 +64,8 @@ qa/
 ├── classification.py               Détection best-effort pays/trigger + normalisation des noms de séquence (FID/LOYAL)
 ├── archive.py                       Classement des rapports dans output/<Pays>/<Trigger>/<Séquence>/, rotation par type
 ├── combined_report.py                Fusion des derniers rapports Wording + URL d'une séquence en un rapport combiné
-├── history.py                        Historique local des scores (record_run, load_history, build_history_tree...)
+├── history.py                        Historique local des scores (record_run, load_history, build_history_tree, rewrite/delete_classification...)
+├── cleanup.py                         Suppression automatique des fichiers de temp/ plus vieux que 24h
 └── report.py                        Génération des rapports Excel (save_report, save_consolidated_report)
 temp/                       Fichiers uploadés temporairement, isolés par session (non versionné)
 output/                     Rapports Excel générés (classés par Pays/Trigger/Séquence) + historique des scores (non versionné)
@@ -107,7 +109,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-La suite couvre les fonctions de normalisation (`qa/text_utils.py`), les stratégies de matching (`qa/matching.py`), la résolution d'onglet/colonne Excel (`qa/excel_loader.py`) et le pipeline complet (`qa/wording_qa.py`), y compris des tests de non-régression pour les bugs de cascade déjà corrigés (verrouillage prématuré sur un KO, starvation du Split par un faux KO de secours).
+La suite couvre les fonctions de normalisation (`qa/text_utils.py`), les stratégies de matching (`qa/matching.py`), la résolution d'onglet/colonne Excel (`qa/excel_loader.py`) et le pipeline complet (`qa/wording_qa.py`), y compris des tests de non-régression pour les bugs de cascade déjà corrigés (verrouillage prématuré sur un KO, starvation du Split par un faux KO de secours). Elle couvre aussi la détection pays/trigger et la réconciliation des noms de séquence (`qa/classification.py`), le classement et la rotation des rapports (`qa/archive.py`), le rapport combiné (`qa/combined_report.py`), l'historique par pays/trigger/séquence — y compris le renommage/fusion et la suppression (`qa/history.py`) — et le nettoyage automatique de `temp/` (`qa/cleanup.py`).
 
 ## Utilisation
 
@@ -266,8 +268,15 @@ Dès que les rapports Wording **et** URL sont disponibles pour une séquence, un
 
 Accessible via le bouton **📈 Historique** en haut à droite de l'outil (page Streamlit séparée, `pages/1_Historique.py`) :
 
-1. Navigation par dossiers **Pays → Trigger → Séquence**.
-2. Dans le dossier final : les rapports disponibles groupés par type (Wording / URL / Combiné), et un graphique d'évolution du **% de OK** depuis le premier test (une courbe par type).
+1. **Vue d'ensemble** en haut de page : un tableau récapitulatif de toutes les séquences archivées (Pays, Trigger, Séquence, date du dernier test, type, % OK, nombre de tests), avant même de naviguer par dossiers — utile pour repérer en un coup d'œil une séquence qui régresse sans avoir à la chercher dans l'arborescence.
+2. Navigation par dossiers **Pays → Trigger → Séquence**.
+3. Dans le dossier final : les rapports disponibles groupés par type (Wording / URL / Combiné), un graphique d'évolution du **% de OK** depuis le premier test (une courbe par type), et un panneau **"⚙️ Gérer cette séquence"** :
+   - **Renommer / fusionner** : corrige une mauvaise détection automatique (pays/trigger) ou fusionne deux séquences classées séparément par erreur — déplace les rapports Excel et réécrit l'historique vers le nouveau (Pays, Trigger, Séquence) en un clic.
+   - **Supprimer** : retire définitivement la séquence (rapports Excel **et** historique des scores) — protégé par une case à cocher de confirmation, le bouton restant désactivé tant qu'elle n'est pas cochée.
+
+## Nettoyage automatique des fichiers temporaires
+
+Les fichiers Excel/HTML uploadés (`temp/`) sont supprimés automatiquement dès qu'ils ont plus de 24h (`qa/cleanup.py`), sans action requise. Pour éviter de rescanner le dossier à chaque interaction (Streamlit réexécute tout le script à chaque clic), le nettoyage réel est limité à une fois par heure au maximum via un fichier marqueur (`temp/.last_cleanup`).
 
 ## Configuration
 
@@ -294,6 +303,6 @@ Les réglages globaux sont centralisés dans [`qa/config.py`](qa/config.py) :
 
 - **Mode URL** : ne vérifie que la présence des URLs Excel dans le HTML (comme le script d'origine) — ne détecte pas les `href` présents dans le HTML mais absents du référentiel Excel.
 - **Découpage en séquences de l'onglet UTM** : ne gère qu'un seul niveau de séparateurs. Si un onglet imbrique des sous-catégories à l'intérieur d'une séquence (ex. des séparateurs répétés comme "FOOTER" dans chaque séquence), elles seront traitées comme des séquences distinctes plutôt que comme des sous-groupes.
-- **`temp/` n'est jamais nettoyé automatiquement** : les fichiers y sont désormais isolés par session (pas de risque d'écrasement), mais ils s'accumulent d'une session à l'autre.
+- **Fusion de séquences depuis la page Historique** : déplace les rapports Excel et réécrit l'historique, mais ne fusionne pas le contenu des fichiers eux-mêmes — si les deux séquences dépassaient déjà `KEEP_REPORTS` fichiers après fusion, la rotation par type est réappliquée (les plus anciens sont supprimés) sans tenir compte de leur pertinence relative.
 - **Détection pays/trigger heuristique** : reste une proposition (toujours modifiable via la pop-up) — un cas comme "FRENCH" peut désigner France ou Belgique, la détection retient la traduction littérale du mot-clé sans trancher.
 - **Réconciliation des noms de séquence** (`normalize_sequence_name`/`resolve_sequence_alias`) : fiable pour le cas "FID"/"LOYAL" et les variantes avec texte additionnel, mais si une séquence n'a encore jamais été archivée sous aucune des deux formes, un nom ambigu côté UTM (ex. `"SEQ 2"` sans qualificatif) peut créer un dossier distinct jusqu'au premier run qui permet le recoupement.
