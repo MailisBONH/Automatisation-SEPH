@@ -33,7 +33,7 @@ Interface Streamlit + moteur de comparaison Python, avec export du résultat en 
 - **Dashboard Streamlit** : taux de succès global, répartition des erreurs par type (camemberts Plotly), tableau interactif (AgGrid) avec diff mot-à-mot en couleur entre le wording attendu et le wording trouvé.
 - **Rapport Excel exportable** (`Summary` / `Details` / `KO Only`) avec mise en forme conditionnelle (couleurs par statut/criticité) et diff en rich text.
 - **Mode URL** : vérification des liens (`href`) du HTML par rapport à la liste d'URLs trackées du référentiel Excel (correspondance exacte ou fonctionnelle sur les paramètres UTM), avec un rapport dédié — colonnes `Classe attendue (Excel)`, `Classe trouvée (HTML)`, `URL attendue (Excel)`, `URL trouvée (HTML)`, `Status` — voir [Comment fonctionne la QA URL](#comment-fonctionne-la-qa-url).
-- **Mode "Wording + URL"** : lance les deux comparaisons en une fois sur le même HTML/Excel (un onglet Wording et une séquence UTM à choisir), avec un score combiné puis le détail des deux, et un rapport combiné archivé automatiquement. Le mode multi-séquences n'est pas disponible dans ce mode.
+- **Mode "Wording + URL"** : lance les deux comparaisons en une fois sur le même HTML/Excel (un onglet Wording et une séquence UTM à choisir), avec un score combiné puis le détail des deux, et un rapport combiné archivé automatiquement. Compatible avec le mode multi-séquences.
 - **Diagnostic à l'upload** : dès que l'Excel est chargé, l'app affiche les onglets détectés, si l'onglet/la colonne attendue est trouvée, et — en mode Wording — le taux de remplissage de `TECHNICAL NAME`, les composants dupliqués avec des classes techniques différentes (`qa/diagnostics.find_duplicate_components`), les wordings dont la langue détectée diffère de la langue dominante du référentiel (`qa/diagnostics.find_wrong_language_wordings`, ex. du texte resté dans une autre langue après un copier-coller), et (si le HTML est aussi uploadé) les classes déclarées dans l'Excel introuvables dans le HTML (`qa/diagnostics.find_unused_excel_classes`) — pour repérer un référentiel incomplet ou désynchronisé du vrai template avant même de lancer la comparaison.
 - **Sélection guidée, sans présélection automatique** : les menus déroulants (onglet Excel / séquence) affichent un texte d'invite (`— Sélectionnez —`) plutôt que de présélectionner silencieusement le premier onglet du classeur — évite de lancer une comparaison sur la mauvaise campagne par inattention.
 - **Mode multi-séquences** : traiter plusieurs séquences d'une même campagne (plusieurs fichiers HTML + un seul Excel) en une fois, avec un rapport Excel consolidé et un récapitulatif par séquence — voir [Traiter plusieurs séquences en une fois](#traiter-plusieurs-séquences-en-une-fois).
@@ -126,17 +126,19 @@ La suite couvre les fonctions de normalisation (`qa/text_utils.py`), les straté
 
 ## Traiter plusieurs séquences en une fois
 
-⚠️ Non disponible en mode "Wording + URL" (le mode multi-séquences n'y est pas encore pris en charge — traitez une séquence à la fois).
-
-Une campagne a souvent plusieurs séquences (Seq1, Seq2, Seq3...), chacune avec son propre HTML mais partageant le même classeur Excel référentiel. Le mode multi-séquences évite de relancer l'app pour chacune :
+Une campagne a souvent plusieurs séquences (Seq1, Seq2, Seq3...), chacune avec son propre HTML mais partageant le même classeur Excel référentiel. Le mode multi-séquences évite de relancer l'app pour chacune, y compris en mode "Wording + URL" :
 
 1. Cocher **📦 Traiter plusieurs séquences en une fois**.
 2. Uploader le fichier Excel référentiel (unique) et **plusieurs fichiers HTML** (un par séquence).
-3. Pour chaque fichier HTML, choisir dans la liste déroulante la séquence correspondante — la liste propose les **onglets** du classeur en mode Wording, ou les **séquences détectées dans l'onglet UTM** en mode URL (voir [Comment fonctionne la QA URL](#comment-fonctionne-la-qa-url)). Comme il s'agit d'un choix dans une liste (pas d'un mot-clé tapé), il n'y a pas de risque d'ambiguïté.
-4. Cliquer sur **🔍 Comparer toutes les séquences**.
-5. Consulter le récapitulatif par séquence (Total/OK/KO/Score), le tableau combiné (colonne `Sequence` ajoutée), et télécharger le **rapport Excel consolidé** unique (`QA_MULTI_..._<horodatage>.xlsx`, voir [Rapport de sortie](#rapport-de-sortie)).
+3. Pour chaque fichier HTML, choisir dans la liste déroulante la séquence correspondante :
+   - En mode Wording ou URL : un seul menu par fichier (l'**onglet** du classeur, ou la **séquence détectée dans l'onglet UTM**, voir [Comment fonctionne la QA URL](#comment-fonctionne-la-qa-url)).
+   - En mode **Wording + URL** : deux menus par fichier (**"Onglet Wording"** et **"Séquence URL"**), car les deux noms ne sont pas forcément identiques (ex. `SEQ 1 NON LOYAL` vs `SEQ 1 NON FID`). Si l'onglet UTM n'a qu'une seule séquence, le second menu ne s'affiche pas et la séquence Wording est réutilisée automatiquement.
 
-Si une séquence échoue (onglet/colonne introuvable), l'erreur est affichée pour ce fichier précis et les autres séquences continuent d'être traitées normalement.
+   Comme il s'agit d'un choix dans une liste (pas d'un mot-clé tapé), il n'y a pas de risque d'ambiguïté.
+4. Cliquer sur **🔍 Comparer toutes les séquences**.
+5. Consulter le récapitulatif par séquence (Total/OK/KO/Score, ou Score Wording + Score URL par fichier en mode combiné), puis le détail : un **expander par séquence** (`📁 <séquence> — X/Y OK (Z%)`), chacun avec son propre tableau — pas de mégatable mélangeant toutes les séquences, impossible de confondre un OK/KO d'une séquence avec celui d'une autre. Télécharger le(s) **rapport(s) Excel consolidé(s)** (`QA_MULTI_..._<horodatage>.xlsx`, voir [Rapport de sortie](#rapport-de-sortie)) — un par mode en "Wording + URL".
+
+Si une séquence échoue (onglet/colonne introuvable), l'erreur est affichée pour ce fichier précis et les autres séquences continuent d'être traitées normalement. Chaque séquence est archivée dans l'historique sous son propre dossier (voir [Historique par pays / trigger / séquence](#historique-par-pays--trigger--séquence)) — pas de mélange entre séquences différentes d'un même run multi-séquences.
 
 ## Composants génériques
 
@@ -295,4 +297,3 @@ Les réglages globaux sont centralisés dans [`qa/config.py`](qa/config.py) :
 - **`temp/` n'est jamais nettoyé automatiquement** : les fichiers y sont désormais isolés par session (pas de risque d'écrasement), mais ils s'accumulent d'une session à l'autre.
 - **Détection pays/trigger heuristique** : reste une proposition (toujours modifiable via la pop-up) — un cas comme "FRENCH" peut désigner France ou Belgique, la détection retient la traduction littérale du mot-clé sans trancher.
 - **Réconciliation des noms de séquence** (`normalize_sequence_name`/`resolve_sequence_alias`) : fiable pour le cas "FID"/"LOYAL" et les variantes avec texte additionnel, mais si une séquence n'a encore jamais été archivée sous aucune des deux formes, un nom ambigu côté UTM (ex. `"SEQ 2"` sans qualificatif) peut créer un dossier distinct jusqu'au premier run qui permet le recoupement.
-- **Mode "Wording + URL"** : pas de support du mode multi-séquences pour l'instant (une séquence à la fois).

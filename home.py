@@ -82,11 +82,10 @@ URL_COLUMN_RENAME = {
 }
 
 
-def render_results_block(results, report_path, title, download_filename, mode="wording"):
-    """Affiche metriques, graphiques, tableau detaille et bouton de telechargement pour un jeu de resultats."""
-
-    st.success(f"✅ {title}")
-
+def _prepare_display_df(results, mode):
+    """df = donnees brutes (pour les metriques/graphiques) ; df_display =
+    version mise en forme pour le tableau (colonnes URL renommees, diff
+    mot-a-mot en gras rouge sur les KO en mode wording)."""
     df = pd.DataFrame(results)
 
     if mode == "url":
@@ -110,8 +109,15 @@ def render_results_block(results, report_path, title, download_filename, mode="w
                 df_display.at[idx, "Excel Wording"] = excel_diff
                 df_display.at[idx, "HTML Wording"] = html_diff
 
-    ok_count = len(df[df["Status"] == "OK"])
-    ko_count = len(df[df["Status"] == "KO"])
+    return df, df_display
+
+
+def _render_summary_and_charts(df):
+    """Metrique de succes + camemberts (statut global, repartition des
+    erreurs) pour un jeu de resultats (df = donnees brutes, colonne Status
+    obligatoire)."""
+    ok_count = len(df[df["Status"] == "OK"]) if len(df) else 0
+    ko_count = len(df[df["Status"] == "KO"]) if len(df) else 0
 
     total = ok_count + ko_count
 
@@ -143,7 +149,7 @@ def render_results_block(results, report_path, title, download_filename, mode="w
         }
     )
 
-    ko_df = df[df["Status"] == "KO"]
+    ko_df = df[df["Status"] == "KO"] if len(df) else df
 
     if len(ko_df) > 0:
 
@@ -180,6 +186,14 @@ def render_results_block(results, report_path, title, download_filename, mode="w
                 fig_errors,
                 use_container_width=True
             )
+
+
+def _render_table(results, mode, key_suffix):
+    """Tableau AgGrid detaille (lignes vertes/rouges, diff mot-a-mot en gras
+    rouge sur les KO en mode wording) pour un jeu de resultats, sans
+    metriques ni bouton de telechargement (voir render_results_block /
+    render_grouped_results pour la vue complete)."""
+    _, df_display = _prepare_display_df(results, mode)
 
     html_renderer = JsCode("""
     class HtmlCellRenderer {
@@ -262,8 +276,18 @@ def render_results_block(results, report_path, title, download_filename, mode="w
         custom_css=custom_css,
         height=800,
         theme="streamlit",
-        key=f"grid_{download_filename}"
+        key=f"grid_{key_suffix}"
     )
+
+
+def render_results_block(results, report_path, title, download_filename, mode="wording"):
+    """Affiche metriques, graphiques, tableau detaille et bouton de telechargement pour un jeu de resultats."""
+
+    st.success(f"✅ {title}")
+
+    df, _ = _prepare_display_df(results, mode)
+    _render_summary_and_charts(df)
+    _render_table(results, mode, key_suffix=download_filename)
 
     with open(report_path, "rb") as f:
         st.download_button(
@@ -272,6 +296,49 @@ def render_results_block(results, report_path, title, download_filename, mode="w
             file_name=download_filename,
             key=f"download_{download_filename}"
         )
+
+
+def render_grouped_results(results_by_sequence, mode, report_path, download_filename, title):
+    """
+    Comme render_results_block, mais pour un run multi-sequences : les
+    metriques/graphiques globaux restent communs a toutes les sequences,
+    mais le tableau detaille de chaque sequence est isole dans son propre
+    expander plutot que fusionne dans un seul grand tableau - impossible de
+    confondre un OK/KO d'une sequence avec celui d'une autre.
+    """
+    st.success(f"✅ {title}")
+
+    all_rows = []
+    for seq, rows in results_by_sequence.items():
+        for r in rows:
+            row = dict(r)
+            row["Sequence"] = seq
+            all_rows.append(row)
+
+    df = pd.DataFrame(all_rows) if all_rows else pd.DataFrame(columns=["Status"])
+    _render_summary_and_charts(df)
+
+    with open(report_path, "rb") as f:
+        st.download_button(
+            "⬇️ Télécharger le rapport Excel consolidé",
+            data=f,
+            file_name=download_filename,
+            key=f"download_{download_filename}"
+        )
+
+    st.markdown("**Détail par séquence :**")
+
+    for seq, rows in results_by_sequence.items():
+        seq_total = len(rows)
+        seq_ok = sum(1 for r in rows if r["Status"] == "OK")
+        seq_score = round(seq_ok / seq_total * 100, 1) if seq_total else 0
+        icon = "✅" if seq_total and seq_ok == seq_total else "⚠️"
+
+        with st.expander(f"{icon} {seq} — {seq_ok}/{seq_total} OK ({seq_score}%)"):
+            if rows:
+                _render_table(rows, mode, key_suffix=f"{download_filename}_{seq}")
+            else:
+                st.caption("Aucun résultat pour cette séquence.")
 
 
 def _run_items(last_run):
@@ -306,6 +373,26 @@ def _run_items(last_run):
             },
         ]
 
+    if kind == "combined_batch":
+        # Deux items par paire (un wording, un url), chacun regenere son
+        # propre rapport individuel a l'archivage (les rapports consolides
+        # ne se decoupent pas par sequence). Une paire dont un cote a echoue
+        # (voir le try/except du bouton Comparer) a des rows vides pour ce
+        # cote : on ne l'archive pas (rien de reel a y mettre).
+        items = []
+        for pair in last_run["pairs"]:
+            if pair["wording_rows"]:
+                items.append({
+                    "mode": "wording", "sequence": pair["wording_sequence"],
+                    "rows": pair["wording_rows"], "report_path": None
+                })
+            if pair["url_rows"]:
+                items.append({
+                    "mode": "url", "sequence": pair["url_sequence"],
+                    "rows": pair["url_rows"], "report_path": None
+                })
+        return items
+
     return [{
         "mode": last_run["mode"],
         "sequence": last_run.get("sequence") or last_run["sheet_name"],
@@ -316,7 +403,7 @@ def _run_items(last_run):
 
 def _archive_key(last_run):
     """Cle session_state identifiant ce run pour l'archivage (idempotence)."""
-    if last_run["kind"] == "combined_test":
+    if last_run["kind"] in ("combined_test", "combined_batch"):
         return f"archived::{last_run['wording_report_path']}::{last_run['url_report_path']}"
     return f"archived::{last_run['report_path']}"
 
@@ -453,15 +540,8 @@ test_wording = mode in ("Wording", "Wording + URL")
 test_url = mode in ("URL", "Wording + URL")
 
 batch_mode = st.checkbox(
-    "📦 Traiter plusieurs séquences en une fois (même Excel, plusieurs HTML)",
-    disabled=(mode == "Wording + URL")
+    "📦 Traiter plusieurs séquences en une fois (même Excel, plusieurs HTML)"
 )
-if mode == "Wording + URL":
-    batch_mode = False
-    st.caption(
-        "ℹ️ Le mode multi-séquences n'est pas disponible en \"Wording + URL\" pour l'instant "
-        "— traitez une séquence à la fois."
-    )
 
 include_generic = False
 if test_wording:
@@ -516,8 +596,72 @@ if html_file:
         f.write(html_file.getvalue())
 
 sequence_assignments = []
+combined_sequence_assignments = []
 
-if batch_mode:
+# Definis ici (et pas seulement dans la branche "else" plus bas) : en mode
+# batch, ces variables ne sont pas utilisees pour choisir une sequence (voir
+# sequence_assignments/combined_sequence_assignments), mais le calcul de
+# missing_keyword plus bas les reference inconditionnellement (test_wording/
+# test_url ne savent pas que le mode batch les rend hors-sujet).
+wording_keyword = ""
+url_keyword = ""
+url_ready = True
+
+if batch_mode and mode == "Wording + URL":
+
+    if excel_path and html_files:
+        wording_sheet_options = []
+        try:
+            wording_sheet_options = pd.ExcelFile(excel_path).sheet_names
+        except Exception as e:
+            st.error(f"❌ Impossible de lire les onglets du fichier Excel : {e}")
+
+        url_sequence_options = []
+        url_tab_ok = False
+        try:
+            url_sequence_options = list_url_sequences(excel_path)
+            url_tab_ok = True
+        except ValueError as e:
+            st.error(f"❌ {e}")
+
+        if wording_sheet_options and url_tab_ok:
+            st.write("**Associe chaque fichier HTML à sa séquence Wording et à sa séquence URL :**")
+
+            if not url_sequence_options:
+                st.caption(
+                    "ℹ️ L'onglet UTM ne regroupe qu'une seule séquence — la séquence Wording "
+                    "est réutilisée automatiquement côté URL, aucun choix supplémentaire n'est nécessaire."
+                )
+
+            for f in html_files:
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    w_choice = st.selectbox(
+                        f"Onglet Wording pour **{f.name}**",
+                        [NO_SELECTION] + wording_sheet_options,
+                        key=f"wseq_{f.name}"
+                    )
+                with col_b:
+                    if url_sequence_options:
+                        u_choice = st.selectbox(
+                            f"Séquence URL pour **{f.name}**",
+                            [NO_SELECTION] + url_sequence_options,
+                            key=f"useq_{f.name}"
+                        )
+                    else:
+                        u_choice = w_choice  # onglet UTM a sequence unique : reutilise la sequence wording
+
+                if w_choice != NO_SELECTION and u_choice != NO_SELECTION:
+                    combined_sequence_assignments.append((f, w_choice, u_choice))
+
+            unassigned = len(html_files) - len(combined_sequence_assignments)
+            if unassigned:
+                st.warning(
+                    f"⚠️ {unassigned} fichier(s) incomplet(s) (séquence Wording et/ou URL manquante) : "
+                    "ils ne seront pas comparés."
+                )
+
+elif batch_mode:
 
     if excel_path and html_files:
         sequence_options = []
@@ -719,7 +863,113 @@ button_label = "🔍 Comparer toutes les séquences" if batch_mode else "🔍 Co
 
 if st.button(button_label):
 
-    if batch_mode:
+    if batch_mode and mode == "Wording + URL":
+
+        if not (excel_path and combined_sequence_assignments):
+            st.error(
+                "Merci d'uploader l'Excel et au moins un fichier HTML, puis d'associer chaque "
+                "fichier à sa séquence Wording et à sa séquence URL."
+            )
+            st.stop()
+
+        st.info("Analyse en cours... 🔄")
+
+        wording_results_by_sequence = {}
+        url_results_by_sequence = {}
+        debug_buf = io.StringIO()
+
+        with contextlib.redirect_stdout(debug_buf):
+            for f, w_seq, u_seq in combined_sequence_assignments:
+
+                batch_html_path = f"temp/{session_id}_{uuid.uuid4().hex[:6]}.html"
+                with open(batch_html_path, "wb") as out:
+                    out.write(f.getvalue())
+
+                print(f"\n{'=' * 20} {w_seq} / {u_seq} ({f.name}) {'=' * 20}")
+
+                try:
+                    w_results, _ = run_qa_for_sequence(
+                        html_file=batch_html_path,
+                        excel_file=excel_path,
+                        keyword=w_seq,
+                        mode="wording",
+                        include_generic=include_generic
+                    )
+                    wording_results_by_sequence[w_seq] = w_results
+                except ValueError as e:
+                    print(f"❌ Wording {w_seq} ({f.name}) : {e}")
+                    st.error(f"❌ Wording {w_seq} ({f.name}) : {e}")
+
+                try:
+                    u_results, _ = run_qa_for_sequence(
+                        html_file=batch_html_path,
+                        excel_file=excel_path,
+                        keyword=u_seq,
+                        mode="url"
+                    )
+                    url_results_by_sequence[u_seq] = u_results
+                except ValueError as e:
+                    print(f"❌ URL {u_seq} ({f.name}) : {e}")
+                    st.error(f"❌ URL {u_seq} ({f.name}) : {e}")
+
+        if wording_results_by_sequence or url_results_by_sequence:
+
+            today = datetime.now().strftime("%Y-%m-%d")
+
+            wording_report_path = (
+                save_consolidated_report(wording_results_by_sequence, mode="wording")
+                if wording_results_by_sequence else None
+            )
+            url_report_path = (
+                save_consolidated_report(url_results_by_sequence, mode="url")
+                if url_results_by_sequence else None
+            )
+
+            pairs = []
+            recap_rows = []
+
+            for f, w_seq, u_seq in combined_sequence_assignments:
+                w_rows = wording_results_by_sequence.get(w_seq, [])
+                u_rows = url_results_by_sequence.get(u_seq, [])
+
+                pairs.append({
+                    "file_name": f.name,
+                    "wording_sequence": w_seq,
+                    "wording_rows": w_rows,
+                    "url_sequence": u_seq,
+                    "url_rows": u_rows,
+                })
+
+                w_total, w_ok = len(w_rows), sum(1 for r in w_rows if r["Status"] == "OK")
+                u_total, u_ok = len(u_rows), sum(1 for r in u_rows if r["Status"] == "OK")
+
+                recap_rows.append({
+                    "Fichier": f.name,
+                    "Séquence Wording": w_seq,
+                    "Score Wording": round(w_ok / w_total * 100, 1) if w_total else 0,
+                    "Séquence URL": u_seq,
+                    "Score URL": round(u_ok / u_total * 100, 1) if u_total else 0,
+                })
+
+            st.session_state["last_run"] = {
+                "kind": "combined_batch",
+                "excel_path": excel_path,
+                "title": f"Comparaison terminée pour {len(pairs)} séquence(s) (Wording + URL)",
+                "pairs": pairs,
+                "recap_rows": recap_rows,
+                "wording_report_path": wording_report_path,
+                "wording_download_filename": f"qa_report_multi_wording_{today}.xlsx",
+                "url_report_path": url_report_path,
+                "url_download_filename": f"qa_report_multi_url_{today}.xlsx",
+                "debug_logs": debug_buf.getvalue(),
+            }
+
+        else:
+            st.session_state.pop("last_run", None)
+            with st.expander("🐛 Logs de debug (extraction HTML/Excel)"):
+                st.code(debug_buf.getvalue() or "Aucun log.", language=None)
+
+    elif batch_mode:
 
         if not (excel_path and sequence_assignments):
             st.error(
@@ -762,7 +1012,6 @@ if st.button(button_label):
             today = datetime.now().strftime("%Y-%m-%d")
 
             recap_rows = []
-            all_rows = []
 
             for seq_name, rows in results_by_sequence.items():
                 seq_total = len(rows)
@@ -775,11 +1024,6 @@ if st.button(button_label):
                     "Score": round(seq_ok / seq_total * 100, 1) if seq_total else 0
                 })
 
-                for r in rows:
-                    row = dict(r)
-                    row["Sequence"] = seq_name
-                    all_rows.append(row)
-
             st.session_state["last_run"] = {
                 "kind": "batch",
                 "mode": qa_mode,
@@ -787,7 +1031,6 @@ if st.button(button_label):
                 "title": f"Comparaison terminée pour {len(results_by_sequence)} séquence(s)",
                 "download_filename": f"qa_report_multi_{today}.xlsx",
                 "report_path": report_path,
-                "results": all_rows,
                 "sheet_name": None,
                 "sequences": results_by_sequence,
                 "recap_rows": recap_rows,
@@ -909,12 +1152,12 @@ if last_run:
     if last_run["kind"] == "batch":
         st.subheader("Récapitulatif par séquence")
         st.dataframe(pd.DataFrame(last_run["recap_rows"]), use_container_width=True)
-        render_results_block(
-            last_run["results"],
+        render_grouped_results(
+            last_run["sequences"],
+            last_run["mode"],
             last_run["report_path"],
-            last_run["title"],
             last_run["download_filename"],
-            mode=last_run["mode"]
+            last_run["title"]
         )
 
     elif last_run["kind"] == "combined_test":
@@ -947,6 +1190,38 @@ if last_run:
             last_run["url_download_filename"],
             mode="url"
         )
+
+    elif last_run["kind"] == "combined_batch":
+        st.subheader("Récapitulatif par séquence")
+        st.dataframe(pd.DataFrame(last_run["recap_rows"]), use_container_width=True)
+
+        wording_by_sequence = {
+            pair["wording_sequence"]: pair["wording_rows"] for pair in last_run["pairs"] if pair["wording_rows"]
+        }
+        url_by_sequence = {
+            pair["url_sequence"]: pair["url_rows"] for pair in last_run["pairs"] if pair["url_rows"]
+        }
+
+        if last_run["wording_report_path"]:
+            render_grouped_results(
+                wording_by_sequence,
+                "wording",
+                last_run["wording_report_path"],
+                last_run["wording_download_filename"],
+                "📝 Résultats Wording (toutes séquences)"
+            )
+
+        if last_run["wording_report_path"] and last_run["url_report_path"]:
+            st.divider()
+
+        if last_run["url_report_path"]:
+            render_grouped_results(
+                url_by_sequence,
+                "url",
+                last_run["url_report_path"],
+                last_run["url_download_filename"],
+                "🔗 Résultats URL (toutes séquences)"
+            )
 
     else:
         render_results_block(
