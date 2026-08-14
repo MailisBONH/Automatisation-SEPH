@@ -5,6 +5,11 @@ import re
 # =========================
 OUTPUT_DIR = "output"
 
+# Duree de conservation de l'historique classe (pays/trigger/sequence), en
+# jours. Voir qa.history.prune_history pour la regle de purge appliquee au
+# dela de cette limite.
+HISTORY_RETENTION_DAYS = 365
+
 WORDING_COLUMN_NAME = "TRANSLATION"       # Mot-clé (insensible à la casse) de la colonne wording dans l'Excel
 CAMPAIGN_KEYWORD = "HugPlan S1 Bronze"    # Mot-clé pour sélectionner l'onglet dans l'Excel
 MIN_TEXT_LENGTH = 3
@@ -102,3 +107,58 @@ DOMAIN_TO_COUNTRY = {
 }
 
 UNCLASSIFIED_LABEL = "Non classé"
+
+# =========================
+# QA - SEUILS DE SIMILARITE ET TYPES DE KO
+# =========================
+# Seuils de similarite (difflib.SequenceMatcher, 0-1), centralises pour que
+# qa/matching.py et qa/wording_qa.py utilisent toujours la meme valeur.
+SIM_NEAR_EXACT = 0.95              # au-dessus : ecart minime (typo/devise quasi-identique)
+SIM_FUZZY = 0.80                   # au-dessus : ecart notable mais reconnaissable
+SIM_CLOSEST_MATCH_ACCEPT = 0.85    # closest-match de la bonne classe au-dessus de ce seuil -> OK
+SIM_CLOSEST_MATCH_MIN = 0.55       # en-dessous, aucun closest-match n'est propose
+
+# Noms des types de KO (colonne "Error Type" des rapports). Chaque nom
+# designe un seul cas precis, pour eviter qu'un meme libelle recouvre des
+# situations de gravite differente (ex: l'ancien "Typo" melangeait 95-99%
+# et 80-95% de similarite ; l'ancien "Wording differs" melangeait une vraie
+# faute de wording et un wording jamais trouve dans le HTML).
+KO_TEXT_MISSING = "Text missing"                                # une des deux chaines est vide, l'autre non
+KO_CASE_MISMATCH = "Case mismatch"                               # memes mots, casse differente
+KO_MINOR_TYPO = "Minor typo"                                     # similarite >= SIM_NEAR_EXACT
+KO_FUZZY_MISMATCH = "Fuzzy mismatch"                             # similarite entre SIM_FUZZY et SIM_NEAR_EXACT
+KO_CURRENCY_FORMAT_MISMATCH = "Currency format mismatch"         # meme montant, presentation/devise differente
+KO_CONTENT_MISMATCH = "Content mismatch"                         # texte substantiellement different
+KO_WRONG_COMPONENT = "Wording in wrong component"                # wording trouve, mais dans une autre classe technique
+KO_WORDING_MISMATCH = "Wording mismatch"                         # bonne classe technique, texte trop different (55-85%)
+KO_WORDING_RELOCATED = "Wording relocated (similar text found)"  # wording Excel introuvable, mais texte proche trouve ailleurs
+KO_UNEXPECTED_WORDING = "Unexpected wording (not in Excel)"      # texte HTML sans aucune correspondance Excel
+KO_MISSING_WORDING = "Missing wording (not in HTML)"             # wording Excel jamais retrouve dans le HTML
+KO_URL_PARAM_MISMATCH = "URL parameter mismatch (order/encoding)"  # meme destination, ordre/encodage different
+KO_URL_NOT_FOUND = "URL not found"                                # aucune correspondance dans le HTML
+
+# Echelle de criticite par type de KO, basee sur la gravite reelle du cas
+# plutot que sur le chemin de code qui l'a produit (avant cette table,
+# "Case mismatch" ressortait en High et "Typo" en Medium, soit l'inverse
+# de la gravite percue par une equipe QA).
+CRITICALITY_BY_ERROR_TYPE = {
+    KO_CASE_MISMATCH: "Low",
+    KO_MINOR_TYPO: "Low",
+    KO_MISSING_WORDING: "Low",
+    KO_FUZZY_MISMATCH: "Medium",
+    KO_CURRENCY_FORMAT_MISMATCH: "Medium",
+    KO_WORDING_MISMATCH: "Medium",
+    KO_WORDING_RELOCATED: "Medium",
+    KO_URL_PARAM_MISMATCH: "Medium",
+    KO_TEXT_MISSING: "High",
+    KO_CONTENT_MISMATCH: "High",
+    KO_WRONG_COMPONENT: "High",
+    KO_UNEXPECTED_WORDING: "High",
+    KO_URL_NOT_FOUND: "High",
+}
+DEFAULT_KO_CRITICALITY = "High"  # filet de securite si un Error Type n'est pas dans la table ci-dessus
+
+# Ordre de gravite (du plus au moins urgent), utilise par qa/report.py pour
+# trier les KO par criticite reelle plutot que par ordre alphabetique
+# ("High" < "Low" < "Medium" alphabetiquement, ce qui n'a pas de sens ici).
+CRITICALITY_ORDER = ["High", "Medium", "Low", ""]

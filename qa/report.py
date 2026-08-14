@@ -11,8 +11,21 @@ from openpyxl.cell.rich_text import CellRichText
 from openpyxl.cell.text import InlineFont
 from openpyxl.cell.rich_text import TextBlock
 
-from qa.config import OUTPUT_DIR
+from qa.config import CRITICALITY_ORDER, OUTPUT_DIR
 from qa.history import record_run
+
+
+def _sort_by_criticality(df: pd.DataFrame, prefix_columns: list = None) -> pd.DataFrame:
+    """Trie un DataFrame de KO par vraie gravite (CRITICALITY_ORDER), apres
+    d'eventuelles colonnes de regroupement (ex: "Sequence"), puis par
+    Component Name. Remplace un tri alphabetique sur Criticality, qui
+    donnerait "High" < "Low" < "Medium"."""
+    crit = pd.Categorical(df["Criticality"], categories=CRITICALITY_ORDER, ordered=True)
+    return (
+        df.assign(_criticality_order=crit)
+          .sort_values((prefix_columns or []) + ["_criticality_order", "Component Name"])
+          .drop(columns="_criticality_order")
+    )
 
 
 # =========================
@@ -196,15 +209,14 @@ def save_report(results: list, campaign_sheet_name: str, mode: str = "wording"):
     # Details
     ws2 = wb.create_sheet("Details")
     df_sorted = pd.concat([
-        df[df["Status"] == "KO"].sort_values(["Criticality", "Component Name"]),
+        _sort_by_criticality(df[df["Status"] == "KO"]),
         df[df["Status"] == "OK"].sort_values(["Component Name"])
     ]).reset_index(drop=True)
     _write_results_sheet(ws2, df_sorted, "4472C4", columns, header_labels)
 
     # KO Only
     ws3 = wb.create_sheet("KO Only")
-    df_ko = df[df["Status"] == "KO"].sort_values(
-        ["Criticality", "Component Name"]).reset_index(drop=True)
+    df_ko = _sort_by_criticality(df[df["Status"] == "KO"]).reset_index(drop=True)
     _write_results_sheet(ws3, df_ko, "C00000", columns, header_labels)
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -292,15 +304,16 @@ def save_consolidated_report(results_by_sequence: dict, report_name: str = "Mult
     # Details
     ws2 = wb.create_sheet("Details")
     df_sorted = pd.concat([
-        df[df["Status"] == "KO"].sort_values(["Sequence", "Criticality", "Component Name"]),
+        _sort_by_criticality(df[df["Status"] == "KO"], prefix_columns=["Sequence"]),
         df[df["Status"] == "OK"].sort_values(["Sequence", "Component Name"])
     ]).reset_index(drop=True) if total else df
     _write_results_sheet(ws2, df_sorted, "4472C4", columns, header_labels)
 
     # KO Only
     ws3 = wb.create_sheet("KO Only")
-    df_ko = df[df["Status"] == "KO"].sort_values(
-        ["Sequence", "Criticality", "Component Name"]).reset_index(drop=True) if total else df
+    df_ko = _sort_by_criticality(
+        df[df["Status"] == "KO"], prefix_columns=["Sequence"]
+    ).reset_index(drop=True) if total else df
     _write_results_sheet(ws3, df_ko, "C00000", columns, header_labels)
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)

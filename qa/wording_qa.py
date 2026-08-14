@@ -1,8 +1,23 @@
-import difflib
 from collections import defaultdict
 
-from qa.matching import find_aggregated_match, find_best_match, find_closest_match, find_split_match, make_row
-from qa.text_utils import normalize, normalize_currency
+from qa.config import (
+    SIM_CLOSEST_MATCH_ACCEPT,
+    KO_WRONG_COMPONENT,
+    KO_WORDING_MISMATCH,
+    KO_WORDING_RELOCATED,
+    KO_UNEXPECTED_WORDING,
+    KO_MISSING_WORDING,
+)
+from qa.matching import (
+    criticality_for,
+    find_aggregated_match,
+    find_best_match,
+    find_closest_html_match,
+    find_closest_match,
+    find_split_match,
+    make_row,
+)
+from qa.text_utils import normalize
 
 
 def _drop_ko_covered_by_ok(results: list, min_length: int = 5) -> list:
@@ -58,7 +73,6 @@ def run_wording_qa(html_texts, excel_wordings):
         expected_class = ""
         found_class = item.get("component_class", "")
         status = "KO"
-        criticality = "High"
 
 
         # A) Matching direct — on ne verrouille ce resultat que s'il est OK.
@@ -127,7 +141,6 @@ def run_wording_qa(html_texts, excel_wordings):
 
             c_idx = closest["idx"]
             c_sim = closest["similarity"]
-            class_match = closest["class_match"]
 
             ex_closest = excel_wordings[c_idx]
 
@@ -138,23 +151,17 @@ def run_wording_qa(html_texts, excel_wordings):
 
             if not class_match:
                 status = "KO"
-                error_type = "Wording in wrong component"
+                error_type = KO_WRONG_COMPONENT
 
-            elif c_sim >= 0.85:
+            elif c_sim >= SIM_CLOSEST_MATCH_ACCEPT:
                 status = "OK"
                 error_type = ""
 
             else:
                 status = "KO"
-                error_type = "Wording differs"
+                error_type = KO_WORDING_MISMATCH
 
-
-            criticality = (
-                ""
-                if status == "OK"
-                else "High"
-            )
-
+            criticality = "" if status == "OK" else criticality_for(error_type)
 
             if status == "OK":
                 match_type = "Closest Match Accepted"
@@ -183,9 +190,9 @@ def run_wording_qa(html_texts, excel_wordings):
                 "Excel Wording": "",
                 "HTML Wording": h_text,
                 "Status": status,
-                "Error Type": "Not in Excel",
+                "Error Type": KO_UNEXPECTED_WORDING,
                 "Similarity": "0%",
-                "Criticality": criticality,
+                "Criticality": criticality_for(KO_UNEXPECTED_WORDING),
                 "Match Type": "No match"
             })
         i += 1
@@ -193,38 +200,20 @@ def run_wording_qa(html_texts, excel_wordings):
     # Excel non couverts : chercher le texte HTML le plus proche pour chaque
     for idx, ex in enumerate(excel_wordings):
         if idx not in matched_excel_counts:
-            # Chercher le texte HTML le plus proche (parmi tous, meme deja consommes)
-            e_norm = ex["norm"]
-            e_curr = ex["curr"]
-            best_h_idx = None
-            best_h_sim = 0.0
-            for hi, html_item in enumerate(html_texts):
-                h_norm = normalize(html_item["text"])
-                h_curr = normalize_currency(html_item["text"])
-                sim = difflib.SequenceMatcher(None, e_norm.lower(), h_norm.lower()).ratio()
-                if len(h_norm) >= 8 and len(e_norm) >= 8:
-                    ratio = min(len(h_norm), len(e_norm)) / max(len(h_norm), len(e_norm))
-                    if ratio >= 0.25 and (h_norm.lower() in e_norm.lower() or
-                                           e_norm.lower() in h_norm.lower()):
-                        sim = max(sim, 0.70)
-                if e_curr and h_curr:
-                    sim2 = difflib.SequenceMatcher(None, e_curr.lower(), h_curr.lower()).ratio()
-                    sim = max(sim, sim2)
-                if sim > best_h_sim:
-                    best_h_sim = sim
-                    best_h_idx = hi
+            closest_html = find_closest_html_match(ex, html_texts)
 
-            if best_h_idx is not None and best_h_sim >= 0.55:
-                closest_html = html_texts[best_h_idx]
+            if closest_html is not None:
+                best_h_idx, best_h_sim = closest_html
+                closest_item = html_texts[best_h_idx]
                 results.append({
                     "Component Name": ex["Component"],
                     "Element": ex["Element"],
                     "Excel Wording": ex["Wording"],
-                    "HTML Wording": closest_html["text"],
+                    "HTML Wording": closest_item["text"],
                     "Status": "KO",
-                    "Error Type": "Wording differs",
+                    "Error Type": KO_WORDING_RELOCATED,
                     "Similarity": f"{round(best_h_sim * 100)}%",
-                    "Criticality": "High",
+                    "Criticality": criticality_for(KO_WORDING_RELOCATED),
                     "Match Type": "Closest match"
                 })
             else:
@@ -234,9 +223,9 @@ def run_wording_qa(html_texts, excel_wordings):
                     "Excel Wording": ex["Wording"],
                     "HTML Wording": "",
                     "Status": "KO",
-                    "Error Type": "Not in HTML",
+                    "Error Type": KO_MISSING_WORDING,
                     "Similarity": "0%",
-                    "Criticality": "Low",
+                    "Criticality": criticality_for(KO_MISSING_WORDING),
                     "Match Type": "No match"
                 })
 

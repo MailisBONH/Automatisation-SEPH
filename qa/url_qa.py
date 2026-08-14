@@ -1,6 +1,8 @@
 import html
 
+from qa.config import KO_URL_PARAM_MISMATCH, KO_URL_NOT_FOUND
 from qa.html_extraction import extract_anchor_links
+from qa.matching import criticality_for
 from qa.url_utils import normalize_url
 
 
@@ -84,11 +86,12 @@ def run_url_qa(raw_html: str, excel_urls: list) -> list:
         elif functional_match:
             results.append(_make_url_row(
                 expected_class, found_class, excel_url, found_href, "KO",
-                "URL differs (ordre/encodage parametres)", "Medium", "Functional match only"
+                KO_URL_PARAM_MISMATCH, criticality_for(KO_URL_PARAM_MISMATCH), "Functional match only"
             ))
         else:
             results.append(_make_url_row(
-                expected_class, "", excel_url, "", "KO", "URL not found", "High", "No match"
+                expected_class, "", excel_url, "", "KO",
+                KO_URL_NOT_FOUND, criticality_for(KO_URL_NOT_FOUND), "No match"
             ))
 
     total = len(results)

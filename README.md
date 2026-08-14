@@ -64,7 +64,7 @@ qa/
 ├── classification.py               Détection best-effort pays/trigger + normalisation des noms de séquence (FID/LOYAL)
 ├── archive.py                       Classement des rapports dans output/<Pays>/<Trigger>/<Séquence>/, rotation par type
 ├── combined_report.py                Fusion des derniers rapports Wording + URL d'une séquence en un rapport combiné
-├── history.py                        Historique local des scores (record_run, load_history, build_history_tree, rewrite/delete_classification...)
+├── history.py                        Historique local des scores (record_run, load_history, build_history_tree, rewrite/delete_classification, prune_history...)
 ├── cleanup.py                         Suppression automatique des fichiers de temp/ plus vieux que 24h
 └── report.py                        Génération des rapports Excel (save_report, save_consolidated_report)
 temp/                       Fichiers uploadés temporairement, isolés par session (non versionné)
@@ -180,27 +180,30 @@ Pour chaque texte extrait du HTML, `qa/wording_qa.py` essaie, dans l'ordre, les 
 1. **Direct** (`find_best_match`) — comparaison 1 pour 1 avec les wordings Excel partageant la même classe technique (`TECHNICAL NAME` ↔ classe CSS `audit-component-*` trouvée autour de l'élément HTML).
 2. **Agrégé** (`find_aggregated_match`) — regroupe 2 à 3 blocs HTML consécutifs (ex. titre + paragraphe) pour matcher une seule cellule Excel, utile quand le découpage HTML est plus fin que le découpage Excel.
 3. **Split** (`find_split_match`) — accepte le cas où le texte HTML est une sous-phrase d'une cellule Excel (typiquement quand un placeholder Excel a été retiré côté HTML, ou qu'un fragment HTML couvre une bonne partie d'une cellule combinée). Deux garde-fous contre les faux positifs : le fragment doit couvrir au moins 40 % de la longueur de la cellule Excel (`min_ratio`), et si le HTML et la cellule ont chacun une classe technique connue, elles doivent correspondre (sinon un fragment court peut coïncider par hasard avec une cellule sans rapport, ex. un mot isolé qui apparaît dans un tout autre paragraphe).
-4. **Closest match** (`find_closest_match`) — en dernier recours, retient le wording Excel le plus proche par similarité (`difflib.SequenceMatcher`, seuil ≥ 55 %) :
+4. **Closest match** (`find_closest_match`) — en dernier recours, retient le wording Excel le plus proche par similarité (`difflib.SequenceMatcher`, seuil ≥ `SIM_CLOSEST_MATCH_MIN` = 55 %) :
    - classe technique différente → KO `Wording in wrong component`,
-   - similarité ≥ 85 % → OK,
-   - sinon → KO `Wording differs`.
+   - similarité ≥ `SIM_CLOSEST_MATCH_ACCEPT` (85 %) → OK,
+   - sinon → KO `Wording mismatch`.
 
 Les étapes 1 et 2 ne verrouillent leur résultat que s'il est **OK** : un candidat de la bonne classe mais textuellement très différent (KO) n'empêche pas d'essayer l'étape suivante, qui peut trouver un meilleur match pour ce même fragment HTML. Le KO de l'étape 1/2 n'est utilisé que si aucune étape suivante ne trouve de OK.
 
-La comparaison texte à texte elle-même (`compare()`) normalise les deux chaînes (`normalize()` dans `qa/text_utils.py` : retrait des tags AEM, placeholders, caractères invisibles) puis classe le résultat :
+La comparaison texte à texte elle-même (`compare()`) normalise les deux chaînes (`normalize()` dans `qa/text_utils.py` : retrait des tags AEM, placeholders, caractères invisibles) puis classe le résultat. Les noms d'`Error Type` et les seuils de similarité sont centralisés dans `qa/config.py` (constantes `KO_*` et `SIM_*`), pour qu'un même seuil ne soit jamais dupliqué à deux endroits :
 
-| Cas | Statut | Error Type |
-|---|---|---|
-| Chaînes vides des deux côtés | OK | — |
-| Une seule chaîne vide | KO | `Text differs` |
-| Égalité stricte après normalisation | OK | — |
-| Égalité en ignorant la casse | KO | `Case Error` |
-| Similarité ≥ 95 % | KO | `Typo` (quasi-exact) |
-| Similarité ≥ 80 % | KO | `Typo` (fuzzy) |
-| Égalité après normalisation des devises | OK | — |
-| Sinon | KO | `Text differs` |
+| Cas | Statut | Error Type | Criticité |
+|---|---|---|---|
+| Chaînes vides des deux côtés | OK | — | — |
+| Une seule chaîne vide | KO | `Text missing` | High |
+| Égalité stricte après normalisation | OK | — | — |
+| Égalité en ignorant la casse | KO | `Case mismatch` | Low |
+| Similarité ≥ 95 % (`SIM_NEAR_EXACT`) | KO | `Minor typo` | Low |
+| Similarité ≥ 80 % (`SIM_FUZZY`) | KO | `Fuzzy mismatch` | Medium |
+| Égalité après normalisation des devises | OK | — | — |
+| Même montant, présentation/devise différente | KO | `Currency format mismatch` | Medium |
+| Sinon | KO | `Content mismatch` | High |
 
-Chaque wording Excel non couvert par un match HTML est reporté en fin de tableau avec le statut `Not in HTML` (ou `Wording differs` si un texte HTML proche existe), et chaque doublon de KO identique (même paire HTML/Excel) est dédupliqué.
+Chaque type de KO a un nom qui désigne un seul cas précis (avant, `Typo` recouvrait à la fois les quasi-exacts et les vagues ressemblances, et `Wording differs` recouvrait à la fois une vraie faute et un wording jamais retrouvé). La `Criticality` suit une échelle de gravité réelle (`CRITICALITY_BY_ERROR_TYPE` dans `qa/config.py`), pas le chemin de code qui a produit le KO.
+
+Chaque wording Excel non couvert par un match HTML est reporté en fin de tableau : `Missing wording (not in HTML)` (Low, souvent un wording conditionnel/variant non attendu dans cette version) si rien de proche n'existe côté HTML, ou `Wording relocated (similar text found)` (Medium) si un texte HTML proche existe ailleurs — ce cas mérite une vérification (doublon, texte mal placé) plutôt qu'une simple correction de faute. Chaque doublon de KO identique (même paire HTML/Excel) est dédupliqué.
 
 Un dernier filtre (`_drop_ko_covered_by_ok`) supprime les KO dont le texte HTML est déjà entièrement contenu dans le texte HTML d'une autre ligne validée OK — cas fréquent quand un même contenu est extrait à la fois en un bloc complet (qui matche) et en fragments plus courts (qui, comparés seuls à leur propre wording Excel, ne matchent pas) : le fragment court est déjà couvert par le bloc validé, ce n'est pas un écart réel.
 
@@ -212,11 +215,11 @@ Cet onglet regroupe souvent plusieurs séquences empilées (une pour chaque vari
 
 Les URLs attendues de la séquence retenue sont lues dans la colonne `<< TRACKED URL >>` (`URL_COLUMN_NAME`). Tous les `href` du HTML sont extraits (`qa/url_utils.extract_hrefs`), puis chaque URL Excel est recherchée parmi eux (`qa/url_qa.run_url_qa`) :
 
-| Cas | Statut | Match Type | Criticité |
-|---|---|---|---|
-| URL identique une fois les entités HTML décodées (`&amp;` → `&`) | OK | `Exact` | — |
-| Même destination et mêmes paramètres UTM, mais ordre ou pourcent-encodage différent | KO | `Functional match only` | Medium |
-| Aucune correspondance trouvée dans le HTML | KO | `No match` | High |
+| Cas | Statut | Error Type | Match Type | Criticité |
+|---|---|---|---|---|
+| URL identique une fois les entités HTML décodées (`&amp;` → `&`) | OK | — | `Exact` | — |
+| Même destination et mêmes paramètres UTM, mais ordre ou pourcent-encodage différent | KO | `URL parameter mismatch (order/encoding)` | `Functional match only` | Medium |
+| Aucune correspondance trouvée dans le HTML | KO | `URL not found` | `No match` | High |
 
 Le décodage des entités HTML est appliqué avant de juger un match "Exact" car AEM encode systématiquement les `href` ainsi (`&amp;` au lieu de `&`) — ce n'est pas une différence de contenu réelle. En revanche, un ordre de paramètres différent ou un encodage `%XX` différent reste considéré comme un écart (`Functional match only`), car l'URL n'est alors pas rendue à l'identique de ce qui a été validé.
 
@@ -258,7 +261,17 @@ Le vocabulaire diffère entre les deux onglets : l'onglet UTM parle de fidélit�
 
 ### Rotation des rapports (`qa/archive.py`)
 
-Dans chaque dossier de séquence, les rapports sont préfixés par type (`QA_wording_...`, `QA_url_...`, `QA_combined_...`) et seuls les **2 plus récents de chaque type** sont conservés sur disque — les précédents sont supprimés automatiquement. L'historique des scores (`output/history.jsonl`), lui, **n'est jamais purgé** : il garde la trace de tous les runs, même ceux dont le fichier Excel a été supprimé par la rotation.
+Dans chaque dossier de séquence, les rapports sont préfixés par type (`QA_wording_...`, `QA_url_...`, `QA_combined_...`) et seuls les **2 plus récents de chaque type** sont conservés sur disque — les précédents sont supprimés automatiquement. L'historique des scores (`output/history.jsonl`) suit sa propre règle de rétention, voir [Rétention de l'historique](#rétention-de-lhistorique) ci-dessous.
+
+### Rétention de l'historique (`qa/history.prune_history`)
+
+À chaque run, l'historique classé (pays/trigger/séquence) est automatiquement purgé au-delà de `HISTORY_RETENTION_DAYS` (365 jours, voir `qa/config.py`), séquence par séquence, sans jamais perdre le point de comparaison le plus utile :
+
+- **2 entrées ou plus dans les 365 derniers jours** : toutes les entrées récentes sont conservées, les plus anciennes sont supprimées.
+- **exactement 1 entrée récente** : elle est conservée, ainsi que la dernière entrée juste avant elle (même si elle a plus d'un an) — pour garder un point de comparaison avant/après.
+- **aucune entrée récente** (séquence pas testée depuis plus d'un an) : seules les **2 dernières entrées** sont conservées, quelle que soit leur date.
+
+Les entrées non classées (runs sans archivage manuel, qui alimentent seulement le mini-graphique affiché juste après une comparaison) et les lignes corrompues ne sont jamais concernées par cette purge.
 
 ### Rapport combiné (`qa/combined_report.py`)
 

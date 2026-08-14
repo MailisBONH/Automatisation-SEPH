@@ -27,17 +27,24 @@ class TestCompare:
     def test_case_only_difference_is_ko(self):
         status, error, sim, match_type = compare("discover now", "Discover Now")
         assert status == "KO"
-        assert error == "Case Error"
+        assert error == "Case mismatch"
 
-    def test_near_exact_is_typo(self):
+    def test_near_exact_is_minor_typo(self):
+        # >=95% similarity (single extra letter on a longer string).
+        status, error, sim, match_type = compare("Discover now and saves", "Discover now and save")
+        assert status == "KO"
+        assert error == "Minor typo"
+
+    def test_fuzzy_is_fuzzy_mismatch(self):
+        # 80-95% similarity (noticeable but recognizable difference).
         status, error, sim, match_type = compare("Discover now!", "Discover now.")
         assert status == "KO"
-        assert error == "Typo"
+        assert error == "Fuzzy mismatch"
 
-    def test_very_different_text_is_text_differs(self):
+    def test_very_different_text_is_content_mismatch(self):
         status, error, sim, match_type = compare("Discover now", "Buy shoes today")
         assert status == "KO"
-        assert error == "Text differs"
+        assert error == "Content mismatch"
 
     def test_both_empty_is_ok(self):
         status, error, sim, match_type = compare("", "")
@@ -46,7 +53,7 @@ class TestCompare:
     def test_one_empty_is_ko(self):
         status, error, sim, match_type = compare("Discover now", "")
         assert status == "KO"
-        assert error == "Text differs"
+        assert error == "Text missing"
 
 
 class TestFindBestMatch:

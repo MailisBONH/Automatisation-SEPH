@@ -1,7 +1,25 @@
 import difflib
 
-from qa.config import MIN_TEXT_LENGTH
+from qa.config import (
+    MIN_TEXT_LENGTH,
+    SIM_NEAR_EXACT,
+    SIM_FUZZY,
+    SIM_CLOSEST_MATCH_MIN,
+    KO_TEXT_MISSING,
+    KO_CASE_MISMATCH,
+    KO_MINOR_TYPO,
+    KO_FUZZY_MISMATCH,
+    KO_CURRENCY_FORMAT_MISMATCH,
+    KO_CONTENT_MISMATCH,
+    CRITICALITY_BY_ERROR_TYPE,
+    DEFAULT_KO_CRITICALITY,
+)
 from qa.text_utils import normalize, normalize_currency
+
+
+def criticality_for(error_type: str) -> str:
+    """Criticite associee a un type de KO (voir CRITICALITY_BY_ERROR_TYPE)."""
+    return CRITICALITY_BY_ERROR_TYPE.get(error_type, DEFAULT_KO_CRITICALITY)
 
 
 # =========================
@@ -23,7 +41,7 @@ def compare(html_text: str, excel_text: str) -> tuple:
         return ("OK", None, 100, "Empty")
 
     if not h or not e:
-        return ("KO", "Text differs", 0, "Empty mismatch")
+        return ("KO", KO_TEXT_MISSING, 0, "Empty mismatch")
 
     # -----------------------------
     # Exact match uniquement
@@ -35,7 +53,7 @@ def compare(html_text: str, excel_text: str) -> tuple:
     # Différence de casse uniquement
     # -----------------------------
     if h.lower() == e.lower():
-        return ("KO", "Case Error", 99, "Case diff")
+        return ("KO", KO_CASE_MISMATCH, 99, "Case diff")
 
     # -----------------------------
     # Similarité principale
@@ -48,13 +66,11 @@ def compare(html_text: str, excel_text: str) -> tuple:
 
     similarity = round(sim * 100)
 
-    # Très proche = Typo
-    if sim >= 0.95:
-        return ("KO", "Typo", similarity, "Near exact")
+    if sim >= SIM_NEAR_EXACT:
+        return ("KO", KO_MINOR_TYPO, similarity, "Near exact")
 
-    # Proche = Typo
-    if sim >= 0.80:
-        return ("KO", "Typo", similarity, "Fuzzy")
+    if sim >= SIM_FUZZY:
+        return ("KO", KO_FUZZY_MISMATCH, similarity, "Fuzzy")
 
     # -----------------------------
     # Cas spécifique devises
@@ -75,15 +91,15 @@ def compare(html_text: str, excel_text: str) -> tuple:
 
         similarity2 = round(sim2 * 100)
 
-        if sim2 >= 0.95:
-            return ("KO", "Typo", similarity2, "Currency typo")
+        if sim2 >= SIM_NEAR_EXACT:
+            return ("KO", KO_CURRENCY_FORMAT_MISMATCH, similarity2, "Currency format")
 
     # -----------------------------
     # Tout le reste
     # -----------------------------
     return (
         "KO",
-        "Text differs",
+        KO_CONTENT_MISMATCH,
         similarity,
         "No match"
     )
@@ -207,12 +223,37 @@ def find_split_match(html_item: dict, excel_wordings: list, matched_excel_idx: s
     return None
 
 
+def _similarity_with_boosts(a_norm: str, a_curr: str, b_norm: str, b_curr: str) -> float:
+    """
+    Similarite normalisee (0-1) entre deux textes deja normalises, avec deux
+    ajustements pour reduire les faux negatifs (utilise par find_closest_match
+    et find_closest_html_match, pour eviter de dupliquer cette logique) :
+    - containment partiel : si l'un contient l'autre et qu'ils sont de
+      longueur comparable (ratio >= 0.25), la similarite est remontee a 0.70 ;
+    - fallback devise : si les deux textes ont une forme "devise" normalisee
+      (normalize_currency), on retient la meilleure des deux similarites.
+    """
+    sim = difflib.SequenceMatcher(None, a_norm.lower(), b_norm.lower()).ratio()
+
+    if len(a_norm) >= 8 and len(b_norm) >= 8:
+        ratio = min(len(a_norm), len(b_norm)) / max(len(a_norm), len(b_norm))
+        if ratio >= 0.25 and (a_norm.lower() in b_norm.lower() or
+                               b_norm.lower() in a_norm.lower()):
+            sim = max(sim, 0.70)
+
+    if a_curr and b_curr:
+        sim2 = difflib.SequenceMatcher(None, a_curr.lower(), b_curr.lower()).ratio()
+        sim = max(sim, sim2)
+
+    return sim
+
+
 def find_closest_match(html_item: dict, excel_wordings: list, matched_excel_idx: set,
-                       min_sim: float = 0.55):
+                       min_sim: float = SIM_CLOSEST_MATCH_MIN):
     """
     Cherche le wording Excel le plus similaire au texte HTML, meme en dessous du
-    seuil OK. Utilise pour les KO 'Wording differs' afin d'afficher le wording
-    attendu en face du wording HTML incorrect.
+    seuil OK. Utilise pour les KO 'Wording mismatch'/'Wording in wrong component'
+    afin d'afficher le wording attendu en face du wording HTML incorrect.
 
     - Cherche d'abord via normalize() standard
     - Puis via normalize_currency() en fallback
@@ -240,24 +281,12 @@ def find_closest_match(html_item: dict, excel_wordings: list, matched_excel_idx:
                 continue
 
 
-        # On inclut les cellules deja matchees : le "Not in HTML" peut pointer
-        # vers une cellule deja matchee par un autre element HTML.
+        # On inclut les cellules deja matchees : le "Missing wording" peut
+        # pointer vers une cellule deja matchee par un autre element HTML.
         e_norm = ex["norm"]
         e_curr = ex["curr"]
 
-        sim = difflib.SequenceMatcher(None, h_norm.lower(), e_norm.lower()).ratio()
-
-        # Containment partiel (meme ratio relache)
-        if len(h_norm) >= 8 and len(e_norm) >= 8:
-            ratio = min(len(h_norm), len(e_norm)) / max(len(h_norm), len(e_norm))
-            if ratio >= 0.25 and (h_norm.lower() in e_norm.lower() or
-                                   e_norm.lower() in h_norm.lower()):
-                sim = max(sim, 0.70)
-
-        # Fallback devise
-        if e_curr and h_curr:
-            sim2 = difflib.SequenceMatcher(None, h_curr.lower(), e_curr.lower()).ratio()
-            sim = max(sim, sim2)
+        sim = _similarity_with_boosts(h_norm, h_curr, e_norm, e_curr)
 
         if sim > best_sim:
             best_sim = sim
@@ -273,8 +302,40 @@ def find_closest_match(html_item: dict, excel_wordings: list, matched_excel_idx:
     return None
 
 
+def find_closest_html_match(excel_wording: dict, html_texts: list,
+                             min_sim: float = SIM_CLOSEST_MATCH_MIN):
+    """
+    Symetrique de find_closest_match : pour un wording Excel non couvert par
+    aucun match HTML, cherche le texte HTML le plus proche par similarite
+    (tous les textes HTML sont consideres, meme deja consommes par un autre
+    match), pour afficher un candidat plausible dans le rapport meme si le
+    vrai wording attendu est absent. Retourne (idx dans html_texts, sim
+    0-1) ou None si rien n'atteint min_sim.
+    """
+    e_norm = excel_wording["norm"]
+    e_curr = excel_wording["curr"]
+
+    best_idx = None
+    best_sim = 0.0
+
+    for idx, html_item in enumerate(html_texts):
+        h_norm = normalize(html_item["text"])
+        h_curr = normalize_currency(html_item["text"])
+
+        sim = _similarity_with_boosts(e_norm, e_curr, h_norm, h_curr)
+
+        if sim > best_sim:
+            best_sim = sim
+            best_idx = idx
+
+    if best_idx is not None and best_sim >= min_sim:
+        return best_idx, best_sim
+
+    return None
+
+
 def make_row(ex, html_item, html_text, status, error, sim, match_type):
-    crit = "" if status == "OK" else ("Medium" if error == "Typo" else "High")
+    crit = "" if status == "OK" else criticality_for(error)
     expected_class = ex.get("Technical")
     found_class = html_item.get("component_class")
 
