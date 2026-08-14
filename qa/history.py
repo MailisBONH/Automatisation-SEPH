@@ -5,11 +5,16 @@ ligne) dans output/history.jsonl - non versionne, comme le reste de output/.
 """
 import json
 import os
-from datetime import datetime
+from collections import defaultdict
+from datetime import datetime, timedelta
 
-from qa.config import OUTPUT_DIR
+from qa.config import HISTORY_RETENTION_DAYS, OUTPUT_DIR
 
 HISTORY_PATH = os.path.join(OUTPUT_DIR, "history.jsonl")
+
+
+def _parse_timestamp(timestamp: str) -> datetime:
+    return datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
 
 
 def record_run(sheet: str, mode: str, total: int, ok: int, ko: int, score: float,
@@ -46,6 +51,11 @@ def record_run(sheet: str, mode: str, total: int, ok: int, ko: int, score: float
             os.makedirs(directory, exist_ok=True)
         with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError:
+        return
+
+    try:
+        prune_history(path=path)
     except OSError:
         pass
 
@@ -153,6 +163,69 @@ def rewrite_classification(old_country: str, old_trigger: str, old_sequence: str
         return entry
 
     _rewrite_entries(path, transform)
+
+
+def prune_history(path: str = HISTORY_PATH, retention_days: int = HISTORY_RETENTION_DAYS,
+                   now: datetime = None) -> None:
+    """
+    Purge l'historique classe (pays+trigger+sequence), sequence par
+    sequence independamment, sans jamais perdre le point de comparaison le
+    plus utile :
+    - >= 2 entrees des `retention_days` derniers jours : on garde toutes
+      les entrees recentes, on supprime les plus vieilles.
+    - exactement 1 entree recente : on la garde, plus la derniere entree
+      juste avant elle (meme si elle a plus de `retention_days` jours),
+      pour toujours garder un point de comparaison avant/apres.
+    - aucune entree recente (sequence pas testee depuis plus de
+      `retention_days` jours) : on garde seulement les 2 dernieres entrees
+      au total, peu importe leur date.
+    Les entrees non classees et les lignes non-JSON sont toujours
+    conservees telles quelles (comme pour rewrite_classification /
+    delete_classification). Appelee automatiquement par record_run, mais
+    peut aussi etre invoquee directement (ex: nettoyage manuel).
+    """
+    if not os.path.exists(path):
+        return
+
+    now = now or datetime.now()
+    cutoff = now - timedelta(days=retention_days)
+
+    with open(path, encoding="utf-8") as f:
+        raw_lines = [line.strip() for line in f if line.strip()]
+
+    parsed = []
+    for raw_line in raw_lines:
+        try:
+            parsed.append((raw_line, json.loads(raw_line)))
+        except json.JSONDecodeError:
+            parsed.append((raw_line, None))
+
+    groups = defaultdict(list)
+    for i, (_, entry) in enumerate(parsed):
+        if entry and entry.get("country") and entry.get("trigger") and entry.get("sequence"):
+            groups[(entry["country"], entry["trigger"], entry["sequence"])].append(i)
+
+    drop = set()
+    for indices in groups.values():
+        indices.sort(key=lambda i: parsed[i][1]["timestamp"])
+        recent = [i for i in indices if _parse_timestamp(parsed[i][1]["timestamp"]) >= cutoff]
+
+        if len(recent) >= 2:
+            keep = set(recent)
+        elif len(recent) == 1:
+            pos = indices.index(recent[0])
+            keep = set(indices[max(0, pos - 1):pos + 1])
+        else:
+            keep = set(indices[-2:])
+
+        drop.update(set(indices) - keep)
+
+    if not drop:
+        return
+
+    kept_lines = [raw_line for i, (raw_line, _) in enumerate(parsed) if i not in drop]
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(kept_lines) + ("\n" if kept_lines else ""))
 
 
 def delete_classification(country: str, trigger: str, sequence: str, path: str = HISTORY_PATH) -> None:

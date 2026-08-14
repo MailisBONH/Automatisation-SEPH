@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 
 from qa.history import (
     build_history_tree,
@@ -6,6 +7,7 @@ from qa.history import (
     load_classified_history,
     load_history,
     load_sequence_history,
+    prune_history,
     record_run,
     rewrite_classification,
 )
@@ -214,3 +216,118 @@ class TestRewriteAndDeleteClassification:
     def test_delete_on_missing_file_is_a_no_op(self, tmp_path):
         path = str(tmp_path / "does_not_exist.jsonl")
         delete_classification("Germany", "T", "SEQ 1", path=path)  # ne doit pas lever
+
+
+class TestPruneHistory:
+    NOW = datetime(2026, 8, 14)
+
+    def _entry(self, timestamp, sequence="SEQ 1", country="Germany", trigger="T"):
+        return {
+            "timestamp": timestamp, "sheet": sequence, "mode": "wording",
+            "total": 10, "ok": 10, "ko": 0, "score": 100.0,
+            "country": country, "trigger": trigger, "sequence": sequence,
+        }
+
+    def _write(self, path, entries):
+        with open(path, "w", encoding="utf-8") as f:
+            for e in entries:
+                f.write(json.dumps(e) + "\n")
+
+    def test_keeps_all_recent_entries_and_drops_old_ones(self, tmp_path):
+        path = str(tmp_path / "history.jsonl")
+        self._write(path, [
+            self._entry("2020-01-01 00:00:00"),
+            self._entry("2020-06-01 00:00:00"),
+            self._entry("2026-01-01 00:00:00"),
+            self._entry("2026-06-01 00:00:00"),
+        ])
+
+        prune_history(path=path, now=self.NOW)
+
+        remaining = load_history(path=path)
+        assert [e["timestamp"] for e in remaining] == ["2026-01-01 00:00:00", "2026-06-01 00:00:00"]
+
+    def test_keeps_previous_entry_when_only_one_is_recent(self, tmp_path):
+        path = str(tmp_path / "history.jsonl")
+        self._write(path, [
+            self._entry("2018-01-01 00:00:00"),
+            self._entry("2020-01-01 00:00:00"),
+            self._entry("2026-06-01 00:00:00"),
+        ])
+
+        prune_history(path=path, now=self.NOW)
+
+        remaining = load_history(path=path)
+        assert [e["timestamp"] for e in remaining] == ["2020-01-01 00:00:00", "2026-06-01 00:00:00"]
+
+    def test_keeps_last_two_entries_when_sequence_is_dormant(self, tmp_path):
+        path = str(tmp_path / "history.jsonl")
+        self._write(path, [
+            self._entry("2015-01-01 00:00:00"),
+            self._entry("2018-01-01 00:00:00"),
+            self._entry("2020-01-01 00:00:00"),
+        ])
+
+        prune_history(path=path, now=self.NOW)
+
+        remaining = load_history(path=path)
+        assert [e["timestamp"] for e in remaining] == ["2018-01-01 00:00:00", "2020-01-01 00:00:00"]
+
+    def test_sequences_are_pruned_independently(self, tmp_path):
+        path = str(tmp_path / "history.jsonl")
+        self._write(path, [
+            self._entry("2015-01-01 00:00:00", sequence="SEQ 1"),
+            self._entry("2015-06-01 00:00:00", sequence="SEQ 1"),
+            self._entry("2015-01-01 00:00:00", sequence="SEQ 2"),
+            self._entry("2026-01-01 00:00:00", sequence="SEQ 2"),
+            self._entry("2026-06-01 00:00:00", sequence="SEQ 2"),
+        ])
+
+        prune_history(path=path, now=self.NOW)
+
+        remaining = load_history(path=path)
+        seq1 = [e["timestamp"] for e in remaining if e["sequence"] == "SEQ 1"]
+        seq2 = [e["timestamp"] for e in remaining if e["sequence"] == "SEQ 2"]
+        assert seq1 == ["2015-01-01 00:00:00", "2015-06-01 00:00:00"]  # dormante -> 2 dernieres
+        assert seq2 == ["2026-01-01 00:00:00", "2026-06-01 00:00:00"]  # 2 recentes -> la vieille est droppee
+
+    def test_preserves_unclassified_and_corrupt_lines(self, tmp_path):
+        path = tmp_path / "history.jsonl"
+        path.write_text(
+            "not valid json\n"
+            + json.dumps({"sheet": "raw", "mode": "wording", "total": 1, "ok": 1, "ko": 0,
+                          "score": 100.0, "timestamp": "2015-01-01 00:00:00"}) + "\n"
+            + json.dumps(self._entry("2015-01-01 00:00:00")) + "\n"
+            + json.dumps(self._entry("2015-06-01 00:00:00")) + "\n",
+            encoding="utf-8"
+        )
+
+        prune_history(path=str(path), now=self.NOW)
+
+        remaining = path.read_text(encoding="utf-8").splitlines()
+        assert "not valid json" in remaining
+        assert any('"sheet": "raw"' in line for line in remaining)
+        # Sequence classee, 0 entree recente -> les 2 dernieres (donc les deux) sont gardees.
+        assert sum(1 for line in remaining if '"sequence": "SEQ 1"' in line) == 2
+
+    def test_missing_file_is_a_no_op(self, tmp_path):
+        path = str(tmp_path / "does_not_exist.jsonl")
+        prune_history(path=path, now=self.NOW)  # ne doit pas lever
+
+    def test_record_run_prunes_automatically(self, tmp_path):
+        path = str(tmp_path / "history.jsonl")
+        self._write(path, [
+            self._entry("2015-01-01 00:00:00"),
+            self._entry("2015-06-01 00:00:00"),
+            self._entry("2016-01-01 00:00:00"),
+        ])
+
+        record_run("SEQ 1", "wording", 10, 10, 0, 100.0, path=path,
+                   country="Germany", trigger="T", sequence="SEQ 1")
+
+        remaining = load_sequence_history("Germany", "T", "SEQ 1", path=path)
+        # Avant ce run, la sequence etait dormante. Ce nouveau run devient
+        # l'unique entree recente -> on la garde plus la derniere d'avant
+        # (2016-01-01), les deux plus vieilles sont supprimees.
+        assert len(remaining) == 2
+        assert remaining[0]["timestamp"] == "2016-01-01 00:00:00"
