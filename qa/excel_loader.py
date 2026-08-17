@@ -12,7 +12,7 @@ from qa.config import (
     URL_SHEET_KEYWORD,
     WORDING_COLUMN_NAME,
 )
-from qa.text_utils import normalize, normalize_currency
+from qa.text_utils import expand_conditional_variants, normalize, normalize_currency
 
 
 # =========================
@@ -127,13 +127,24 @@ def _parse_wording_rows(df: pd.DataFrame, wording_column: str) -> list:
         if pd.notna(technical):
             technical = str(technical).strip()
 
+        # Une cellule wording peut contenir un bloc conditionnel AEM (copie
+        # depuis le HTML pour traduction) : norm_variants/curr_variants
+        # portent une entree par branche possible (voir
+        # expand_conditional_variants), norm/curr restent la 1ere variante
+        # pour compat avec tout code qui ne lit que ces champs simples.
+        variants = expand_conditional_variants(wording)
+        norm_variants = [normalize(v) for v in variants]
+        curr_variants = [normalize_currency(v) for v in variants]
+
         wordings.append({
             "Component": comp,
             "Element": elem,
             "Wording": wording,
             "Technical": technical,
-            "norm": normalize(wording),
-            "curr": normalize_currency(wording)
+            "norm": norm_variants[0],
+            "curr": curr_variants[0],
+            "norm_variants": norm_variants,
+            "curr_variants": curr_variants,
         })
 
     return wordings

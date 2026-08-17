@@ -2,6 +2,7 @@ from collections import defaultdict
 
 from qa.config import (
     SIM_CLOSEST_MATCH_ACCEPT,
+    SIM_SHARED_BRANCH_EXACT,
     KO_WRONG_COMPONENT,
     KO_WORDING_MISMATCH,
     KO_WORDING_RELOCATED,
@@ -17,7 +18,7 @@ from qa.matching import (
     find_split_match,
     make_row,
 )
-from qa.text_utils import normalize
+from qa.text_utils import clean_display_text, normalize
 
 
 def _drop_ko_covered_by_ok(results: list, min_length: int = 5) -> list:
@@ -82,8 +83,9 @@ def run_wording_qa(html_texts, excel_wordings):
         direct = find_best_match(item, excel_wordings, set(matched_excel_counts.keys()))
         if direct and direct[1] == "OK":
             idx, status, error, sim = direct
-            results.append(make_row(excel_wordings[idx], item, h_text,
-                                     status, error, sim, "Direct"))
+            row = make_row(excel_wordings[idx], item, h_text, status, error, sim, "Direct")
+            row["_html_order"] = i
+            results.append(row)
             matched_excel_counts[idx] += 1
             i += 1
             continue
@@ -94,8 +96,9 @@ def run_wording_qa(html_texts, excel_wordings):
         if agg and agg[2] == "OK":
             nb, idx, status, error, sim = agg
             agg_text = " ".join(html_texts[i + k]["text"] for k in range(nb))
-            results.append(make_row(excel_wordings[idx], item, agg_text,
-                                     status, error, sim, f"Agrege ({nb} blocs)"))
+            row = make_row(excel_wordings[idx], item, agg_text, status, error, sim, f"Agrege ({nb} blocs)")
+            row["_html_order"] = i
+            results.append(row)
             matched_excel_counts[idx] += 1
             for k in range(nb):
                 html_consumed.add(i + k)
@@ -106,8 +109,9 @@ def run_wording_qa(html_texts, excel_wordings):
         split = find_split_match(item, excel_wordings, matched_excel_counts)
         if split:
             idx, status, error, sim = split
-            results.append(make_row(excel_wordings[idx], item, h_text,
-                                     "OK", "", sim, "Split (HTML ⊂ Excel)"))
+            row = make_row(excel_wordings[idx], item, h_text, "OK", "", sim, "Split (HTML ⊂ Excel)")
+            row["_html_order"] = i
+            results.append(row)
             i += 1
             continue
 
@@ -120,16 +124,18 @@ def run_wording_qa(html_texts, excel_wordings):
         # pouvoir encore la matcher correctement via Direct/Agregation/Split.
         if direct:
             idx, status, error, sim = direct
-            results.append(make_row(excel_wordings[idx], item, h_text,
-                                     status, error, sim, "Direct"))
+            row = make_row(excel_wordings[idx], item, h_text, status, error, sim, "Direct")
+            row["_html_order"] = i
+            results.append(row)
             i += 1
             continue
 
         if agg:
             nb, idx, status, error, sim = agg
             agg_text = " ".join(html_texts[i + k]["text"] for k in range(nb))
-            results.append(make_row(excel_wordings[idx], item, agg_text,
-                                     status, error, sim, f"Agrege ({nb} blocs)"))
+            row = make_row(excel_wordings[idx], item, agg_text, status, error, sim, f"Agrege ({nb} blocs)")
+            row["_html_order"] = i
+            results.append(row)
             for k in range(nb):
                 html_consumed.add(i + k)
             i += nb
@@ -173,13 +179,14 @@ def run_wording_qa(html_texts, excel_wordings):
                 "Element": ex_closest["Element"],
                 "Expected Class": expected_class,
                 "HTML Class": found_class,
-                "Excel Wording": ex_closest["Wording"],
-                "HTML Wording": h_text,
+                "Excel Wording": clean_display_text(ex_closest["Wording"], h_text),
+                "HTML Wording": clean_display_text(h_text, ex_closest["Wording"]),
                 "Status": status,
                 "Error Type": error_type,
                 "Similarity": f"{round(c_sim * 100)}%",
                 "Criticality": criticality,
-                "Match Type": match_type
+                "Match Type": match_type,
+                "_html_order": i
             })
         else:
             results.append({
@@ -188,14 +195,27 @@ def run_wording_qa(html_texts, excel_wordings):
                 "Expected Class": expected_class or "",
                 "HTML Class": found_class or "",
                 "Excel Wording": "",
-                "HTML Wording": h_text,
+                "HTML Wording": clean_display_text(h_text),
                 "Status": status,
                 "Error Type": KO_UNEXPECTED_WORDING,
                 "Similarity": "0%",
                 "Criticality": criticality_for(KO_UNEXPECTED_WORDING),
-                "Match Type": "No match"
+                "Match Type": "No match",
+                "_html_order": i
             })
         i += 1
+
+    # Une meme cellule Excel peut deja avoir un KO "best-effort" pose par le
+    # bloc A/D ci-dessus (voir commentaire plus haut : ce KO ne marque pas
+    # matched_excel_counts, pour laisser une chance a un fragment HTML
+    # ulterieur). Si le fragment le plus proche trouve ci-dessous est
+    # EXACTEMENT ce meme KO deja rapporte, on ne le repromeut pas en OK : le
+    # KO existant reflete deja un vrai ecart (ex: ponctuation) sur ce texte
+    # precis, pas une simple branche if/else non consommee.
+    ko_pairs = {
+        (r.get("Excel Wording"), r.get("HTML Wording"))
+        for r in results if r["Status"] == "KO"
+    }
 
     # Excel non couverts : chercher le texte HTML le plus proche pour chaque
     for idx, ex in enumerate(excel_wordings):
@@ -205,28 +225,74 @@ def run_wording_qa(html_texts, excel_wordings):
             if closest_html is not None:
                 best_h_idx, best_h_sim = closest_html
                 closest_item = html_texts[best_h_idx]
+                excel_display = clean_display_text(ex["Wording"], closest_item["text"])
+                html_display = clean_display_text(closest_item["text"], ex["Wording"])
+
+                # Cas d'un Excel qui modelise les 2 branches d'un meme
+                # <% if %>...<% } else { %>...<% } %> en 2 lignes separees,
+                # alors qu'un seul fragment HTML "partage" (meme classe
+                # technique) satisfait les deux : la branche non
+                # "consommee" en premier existe bel et bien, litteralement,
+                # dans ce fragment - ce n'est pas un ecart reel. Seuil
+                # volontairement quasi-parfait (SIM_SHARED_BRANCH_EXACT, pas
+                # SIM_CLOSEST_MATCH_ACCEPT) : un match seulement "tres bon"
+                # (ex: 98% a cause d'une ponctuation en trop) reflete un vrai
+                # ecart sur CETTE branche precise, qui ne doit pas etre
+                # masque juste parce qu'une branche soeur a bien matche.
+                same_class = (
+                    bool(ex.get("Technical"))
+                    and closest_item.get("component_class") == ex.get("Technical")
+                )
+
+                if (
+                    same_class
+                    and best_h_sim >= SIM_SHARED_BRANCH_EXACT
+                    and (excel_display, html_display) not in ko_pairs
+                ):
+                    results.append({
+                        "Component Name": ex["Component"],
+                        "Element": ex["Element"],
+                        "Expected Class": ex.get("Technical"),
+                        "HTML Class": closest_item.get("component_class"),
+                        "Excel Wording": excel_display,
+                        "HTML Wording": html_display,
+                        "Status": "OK",
+                        "Error Type": "",
+                        "Similarity": f"{round(best_h_sim * 100)}%",
+                        "Criticality": "",
+                        "Match Type": "Shared conditional branch",
+                        "_html_order": best_h_idx
+                    })
+                    continue
+
                 results.append({
                     "Component Name": ex["Component"],
                     "Element": ex["Element"],
-                    "Excel Wording": ex["Wording"],
-                    "HTML Wording": closest_item["text"],
+                    "Expected Class": ex.get("Technical"),
+                    "HTML Class": closest_item.get("component_class"),
+                    "Excel Wording": excel_display,
+                    "HTML Wording": html_display,
                     "Status": "KO",
                     "Error Type": KO_WORDING_RELOCATED,
                     "Similarity": f"{round(best_h_sim * 100)}%",
                     "Criticality": criticality_for(KO_WORDING_RELOCATED),
-                    "Match Type": "Closest match"
+                    "Match Type": "Closest match",
+                    "_html_order": best_h_idx
                 })
             else:
                 results.append({
                     "Component Name": ex["Component"],
                     "Element": ex["Element"],
-                    "Excel Wording": ex["Wording"],
+                    "Expected Class": ex.get("Technical"),
+                    "HTML Class": "",
+                    "Excel Wording": clean_display_text(ex["Wording"]),
                     "HTML Wording": "",
                     "Status": "KO",
                     "Error Type": KO_MISSING_WORDING,
                     "Similarity": "0%",
                     "Criticality": criticality_for(KO_MISSING_WORDING),
-                    "Match Type": "No match"
+                    "Match Type": "No match",
+                    "_html_order": len(html_texts)
                 })
 
     # Supprime les KO dont le texte HTML est deja couvert par un match OK

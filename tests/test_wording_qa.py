@@ -1,15 +1,18 @@
-from qa.text_utils import normalize, normalize_currency
+from qa.text_utils import expand_conditional_variants, normalize, normalize_currency
 from qa.wording_qa import _drop_ko_covered_by_ok, run_wording_qa
 
 
 def excel_row(wording, technical=None, component="Comp", element="Elem"):
+    variants = expand_conditional_variants(wording)
     return {
         "Component": component,
         "Element": element,
         "Wording": wording,
         "Technical": technical,
-        "norm": normalize(wording),
-        "curr": normalize_currency(wording),
+        "norm": normalize(variants[0]),
+        "curr": normalize_currency(variants[0]),
+        "norm_variants": [normalize(v) for v in variants],
+        "curr_variants": [normalize_currency(v) for v in variants],
     }
 
 
@@ -122,6 +125,115 @@ class TestDropKoCoveredByOk:
         assert result_for(results, "Contact us at support@example.com for any question about your order")[
             "Status"
         ] == "OK"
+
+
+class TestConditionalBranchesDisplayAndMatching:
+    """
+    Regression : un wording HTML avec un bloc AEM <% if %>...<% } else { %>
+    ...<% } %> doit matcher correctement (peu importe la branche affichee au
+    rendu), et le rapport ne doit jamais montrer de code AEM brut (variables
+    <%= %>, syntaxe <% if %>) dans les colonnes Excel/HTML Wording.
+    """
+
+    def test_matched_row_never_shows_raw_aem_code(self):
+        html_texts = [html_item(
+            "<% if(n>1 ) { %>Dir fehlen noch <%=n%> Punkte<% } else { %>Dir fehlt noch <%=n%> Punkt<% } %> für dein Upgrade",
+            component_class="audit-component-loyalty",
+        )]
+        excel_wordings = [excel_row(
+            "Dir fehlen noch [XX] Punkte für dein Upgrade", technical="audit-component-loyalty"
+        )]
+
+        results = run_wording_qa(html_texts, excel_wordings)
+
+        assert len(results) == 1
+        assert results[0]["Status"] == "OK"
+        assert "<%" not in results[0]["HTML Wording"]
+        assert "<%" not in results[0]["Excel Wording"]
+        assert results[0]["HTML Wording"] == "Dir fehlen noch Punkte für dein Upgrade"
+
+    def test_excel_modeled_as_two_rows_both_resolve_ok_via_shared_fragment(self):
+        # L'Excel modelise les 2 branches d'un meme if/else en 2 lignes
+        # separees (courant pour faciliter la traduction), alors qu'un seul
+        # fragment HTML "partage" satisfait les deux : la branche non
+        # "consommee" en premier (ici le singulier) ne doit pas ressortir en
+        # KO, son texte existe bel et bien dans le fragment deja valide.
+        html_texts = [html_item(
+            "<% if(n>1 ) { %>Deine offenen Geschenke<% } else { %>Dein offenes Geschenk<% } %>",
+            component_class="audit-component-loyalty",
+        )]
+        excel_wordings = [
+            excel_row("Deine offenen Geschenke", technical="audit-component-loyalty"),
+            excel_row("Dein offenes Geschenk", technical="audit-component-loyalty"),
+        ]
+
+        results = run_wording_qa(html_texts, excel_wordings)
+
+        assert len(results) == 2
+        assert all(r["Status"] == "OK" for r in results)
+        singular = next(r for r in results if r["Excel Wording"] == "Dein offenes Geschenk")
+        assert singular["Match Type"] == "Shared conditional branch"
+
+    def test_real_mismatch_affecting_both_branches_is_not_masked_by_sibling_promotion(self):
+        # Regression : un ":" en trop cote HTML (absent de l'Excel) affecte
+        # LES DEUX branches -> les deux doivent rester KO. Le seuil de
+        # promotion "branche soeur" doit etre volontairement quasi-parfait
+        # (SIM_SHARED_BRANCH_EXACT) : un 98% de similarite reflete un vrai
+        # ecart, pas juste une branche non consommee, meme pour la branche
+        # qui n'a pas ete evaluee en premier par le matching direct.
+        html_texts = [html_item(
+            "<% if(n>1 ) { %>Deine offenen Geschenke<% } else { %>Dein offenes Geschenk<% } %>:",
+            component_class="audit-component-loyalty",
+        )]
+        excel_wordings = [
+            excel_row("Deine offenen Geschenke", technical="audit-component-loyalty"),
+            excel_row("Dein offenes Geschenk", technical="audit-component-loyalty"),
+        ]
+
+        results = run_wording_qa(html_texts, excel_wordings)
+
+        plural_rows = [r for r in results if r["Excel Wording"] == "Deine offenen Geschenke"]
+        assert len(plural_rows) == 1
+        assert plural_rows[0]["Status"] == "KO"
+
+        singular_rows = [r for r in results if r["Excel Wording"] == "Dein offenes Geschenk"]
+        assert len(singular_rows) == 1
+        assert singular_rows[0]["Status"] == "KO"
+
+    def test_shared_branch_promotion_requires_near_perfect_match(self):
+        # Le seuil de promotion est SIM_SHARED_BRANCH_EXACT (quasi 100%), pas
+        # SIM_CLOSEST_MATCH_ACCEPT (85%) : une branche "assez proche" mais
+        # pas exacte doit rester KO, pas etre masquee par la logique
+        # "branche soeur".
+        html_texts = [html_item(
+            "<% if(n>1 ) { %>Deine offenen Geschenke<% } else { %>Dein offenes Geschenk ungefahr<% } %>",
+            component_class="audit-component-loyalty",
+        )]
+        excel_wordings = [
+            excel_row("Deine offenen Geschenke", technical="audit-component-loyalty"),
+            excel_row("Dein offenes Geschenk", technical="audit-component-loyalty"),
+        ]
+
+        results = run_wording_qa(html_texts, excel_wordings)
+
+        singular_rows = [r for r in results if r["Excel Wording"] == "Dein offenes Geschenk"]
+        assert len(singular_rows) == 1
+        assert singular_rows[0]["Status"] == "KO"
+
+    def test_sibling_promotion_requires_matching_technical_class(self):
+        # Un wording "orphelin" ne doit pas etre repromu en OK juste parce
+        # qu'un texte similaire existe ailleurs dans une AUTRE classe.
+        html_texts = [
+            html_item("Dein offenes Geschenk", component_class="audit-component-footer"),
+        ]
+        excel_wordings = [
+            excel_row("Dein offenes Geschenk", technical="audit-component-loyalty"),
+        ]
+
+        results = run_wording_qa(html_texts, excel_wordings)
+
+        loyalty_row = next(r for r in results if r["Excel Wording"] == "Dein offenes Geschenk")
+        assert loyalty_row["Status"] == "KO"
 
 
 class TestBasicWordingQa:

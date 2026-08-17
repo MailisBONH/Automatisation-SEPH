@@ -4,8 +4,8 @@ import requests
 from requests.auth import HTTPBasicAuth
 from bs4 import BeautifulSoup
 
-from qa.config import DEBUG_MODE, LEGAL_MENTION_CLASS_KEYWORDS
-from qa.text_utils import clean_text, clean_template_code, get_type, is_valid, normalize
+from qa.config import DEBUG_MODE, LEGAL_MENTION_CLASS_KEYWORDS, MIN_TEXT_LENGTH
+from qa.text_utils import clean_text, clean_text_preserving_conditionals, get_type, is_valid, normalize
 
 
 # =========================
@@ -21,7 +21,7 @@ def extract_real_html_from_viewsource(raw: str) -> str:
     L'ancienne approche fragmentait les attributs HTML sur plusieurs lignes,
     empêchant BeautifulSoup de trouver class="text-contribution".
     """
-    soup = BeautifulSoup(raw, "html.parser")
+    soup = BeautifulSoup(raw, "lxml")
     cells = soup.find_all("td", class_="line-content")
 
     if not cells:
@@ -110,6 +110,26 @@ def build_title_to_component_map(soup: BeautifulSoup) -> dict:
     return title_to_component
 
 
+_EXTRACTABLE_TAGS = ("h1", "h2", "h3", "p", "span", "a", "b", "strong", "em", "i", "small", "li")
+# Tags de pure emphase visuelle (gras/italique/petit texte) : jamais une
+# entree Excel distincte en pratique, a la difference d'un <h3> imbrique
+# dans un <a> (titre + CTA = 2 roles semantiques differents, cf. plus bas).
+_INLINE_EMPHASIS_TAGS = {"b", "strong", "em", "i", "small"}
+
+
+def _has_extractable_ancestor_within(el, boundary) -> bool:
+    """Vrai si el a un ancetre parmi _EXTRACTABLE_TAGS strictement entre lui
+    et boundary (exclu) - borne la remontee au bloc text-contribution
+    courant, pour ne jamais matcher un ancetre sans rapport plus haut dans
+    la page (ex: un lien englobant tout un composant)."""
+    parent = el.parent
+    while parent is not None and parent is not boundary:
+        if getattr(parent, "name", None) and parent.name.lower() in _EXTRACTABLE_TAGS:
+            return True
+        parent = parent.parent
+    return False
+
+
 def extract_texts_from_textcontribution(soup: BeautifulSoup, title_to_component: dict) -> list:
     """
     Extraction depuis les <div class="text-contribution">.
@@ -118,8 +138,15 @@ def extract_texts_from_textcontribution(soup: BeautifulSoup, title_to_component:
     L'ancienne logique eliminait les elements enfants inclus dans un parent plus long
     (ex: <h3> inclus dans le texte du <a> parent). Cela causait des pertes
     d'elements qui sont pourtant des entrees distinctes dans l'Excel.
-    On conserve maintenant TOUS les elements dans leur ordre d'apparition.
-    Seule la deduplication par texte exact est maintenue (evite vrais doublons).
+    On conserve maintenant TOUS les elements dans leur ordre d'apparition,
+    SAUF les tags de pure emphase (_INLINE_EMPHASIS_TAGS) imbriques dans un
+    autre element deja extractible (ex: <b> a l'interieur d'un <p>) : leur
+    contenu est deja entierement couvert par le texte complet de cet
+    ancetre, les extraire separement ne fait que dupliquer la comparaison
+    contre le meme wording Excel (ou, pire, faire matcher a tort ce court
+    fragment isole contre une cellule Excel totalement sans rapport).
+    Seule la deduplication par texte exact est maintenue par ailleurs (evite
+    vrais doublons).
     """
     results = []
     seen = set()
@@ -131,18 +158,25 @@ def extract_texts_from_textcontribution(soup: BeautifulSoup, title_to_component:
 
     for block in blocks:
 
+        block_child_texts = []
 
         for el in block.find_all(True):
-            if el.name.lower() not in {
-                "h1", "h2", "h3", "p", "span", "a",
-                "b", "strong", "em", "i", "small", "li"
-            }:
+            if el.name.lower() not in _EXTRACTABLE_TAGS:
                 continue
 
-            text = el.get_text(" ", strip=True)
-            text = clean_text(text)
+            if el.name.lower() in _INLINE_EMPHASIS_TAGS and _has_extractable_ancestor_within(el, block):
+                continue
 
-            if not text or not is_valid(text):
+            raw_text = el.get_text(" ", strip=True)
+            # Le texte stocke/compare garde les blocs <% if %> intacts (voir
+            # expand_conditional_variants dans qa/matching.py) ; la
+            # verification de validite, elle, se fait sur la version
+            # completement nettoyee (sinon un fragment "Dir fehlen noch
+            # <% if... %>" serait juge trop "technique" et rejete).
+            text = clean_text_preserving_conditionals(raw_text)
+            check_text = clean_text(raw_text)
+
+            if not check_text or not is_valid(check_text):
                 continue
             # Ignore les liens AEM techniques
             if text.strip().lower() == "edit":
@@ -174,15 +208,32 @@ def extract_texts_from_textcontribution(soup: BeautifulSoup, title_to_component:
             }
             results.append(item)
             seen.add(text)
+            block_child_texts.append(text)
 
-        # Fallback : texte nu du bloc
-        block_text = block.get_text(" ", strip=True)
-        block_text = clean_text(block_text)
+        # Fallback : texte nu du bloc. Ne contribue que si son contenu n'est
+        # pas deja entierement couvert par les elements du bloc extraits
+        # ci-dessus (ex: 2 <p> voisins, chacun deja son propre item ; leur
+        # simple concatenation ne doit pas redevenir un 3e "wording" a
+        # comparer, ce qui produirait un doublon du meme ecart).
+        raw_block_text = block.get_text(" ", strip=True)
+        block_text = clean_text_preserving_conditionals(raw_block_text)
+        block_check_text = clean_text(raw_block_text)
 
         if block_text.strip().lower() == "edit":
             continue
 
-        if block_text and is_valid(block_text) and block_text not in seen:
+        remaining = normalize(block_text)
+        for child_text in block_child_texts:
+            remaining = remaining.replace(normalize(child_text), " ")
+        remaining = " ".join(remaining.split())
+        fully_covered_by_children = len(remaining) < MIN_TEXT_LENGTH
+
+        if (
+            block_text
+            and is_valid(block_check_text)
+            and block_text not in seen
+            and not fully_covered_by_children
+        ):
             item = {
                 "text": block_text,
                 "tag": "div",
@@ -200,9 +251,11 @@ def extract_texts_from_textcontribution(soup: BeautifulSoup, title_to_component:
             if el.name.lower() not in {"h1", "h2", "h3", "p", "span", "b", "strong"}:
                 continue
 
-            text = clean_text(el.get_text(" ", strip=True))
+            raw_title_text = el.get_text(" ", strip=True)
+            text = clean_text_preserving_conditionals(raw_title_text)
+            check_text = clean_text(raw_title_text)
 
-            if not text or not is_valid(text):
+            if not check_text or not is_valid(check_text):
                 continue
             if text in seen:
                 continue
@@ -245,10 +298,22 @@ def load_raw_html(html_path: str) -> str:
 
 
 def load_and_extract_html_texts(html_path: str) -> list:
+    # Pas de nettoyage AEM avant le parsing : BeautifulSoup traite les blocs
+    # <% if %>/<%= %> comme du texte litteral (ce ne sont pas des tags HTML
+    # valides), donc les stripper ici detruirait la structure if/else avant
+    # meme que le DOM existe - avant expand_conditional_variants ait sa
+    # chance de la voir a la comparaison (voir qa/matching.py).
+    #
+    # Parser "lxml" (pas "html.parser") : implemente les regles de fermeture
+    # implicite du HTML5 (ex: un <p> imbrique dans un autre <p> referme
+    # automatiquement le premier, comme le ferait un vrai navigateur/AEM).
+    # "html.parser" garde la structure litteralement telle qu'ecrite dans le
+    # HTML source, meme invalide - un <p>A<p>B</p></p> y devient un <p>
+    # contenant un autre <p>, dont le get_text() combine A et B en un seul
+    # texte fantome qui ne correspond a rien de reellement rendu.
     raw = load_raw_html(html_path)
-    cleaned = clean_template_code(raw)
 
-    soup = BeautifulSoup(cleaned, "html.parser")
+    soup = BeautifulSoup(raw, "lxml")
 
 
     for tag in soup(["script", "style", "meta", "link", "head"]):
@@ -282,7 +347,7 @@ def extract_anchor_links(raw_html: str) -> list:
     composant englobant (audit-component-xxx, via find_component_class),
     pour la QA URL (voir qa.url_qa.run_url_qa).
     """
-    soup = BeautifulSoup(raw_html or "", "html.parser")
+    soup = BeautifulSoup(raw_html or "", "lxml")
 
     return [
         {"href": a["href"], "component_class": find_component_class(a) or ""}

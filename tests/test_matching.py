@@ -2,15 +2,18 @@ from qa.matching import compare, find_best_match, find_closest_match, find_split
 
 
 def excel_row(wording, technical=None, component="Comp", element="Elem"):
-    from qa.text_utils import normalize, normalize_currency
+    from qa.text_utils import expand_conditional_variants, normalize, normalize_currency
 
+    variants = expand_conditional_variants(wording)
     return {
         "Component": component,
         "Element": element,
         "Wording": wording,
         "Technical": technical,
-        "norm": normalize(wording),
-        "curr": normalize_currency(wording),
+        "norm": normalize(variants[0]),
+        "curr": normalize_currency(variants[0]),
+        "norm_variants": [normalize(v) for v in variants],
+        "curr_variants": [normalize_currency(v) for v in variants],
     }
 
 
@@ -54,6 +57,49 @@ class TestCompare:
         status, error, sim, match_type = compare("Discover now", "")
         assert status == "KO"
         assert error == "Text missing"
+
+
+class TestCompareWithConditionals:
+    """
+    Regression : le rendu final d'un bloc AEM <% if %>...<% } else { %>...<% } %>
+    n'affiche jamais qu'une seule branche a la fois. Avant, normalize()
+    concatenait les deux branches en une phrase incoherente ("Dir fehlen
+    noch PunkteDir fehlt noch Punkt...") qui ne matchait ni l'une ni
+    l'autre. compare() doit maintenant reconnaitre un match sur N'IMPORTE
+    LAQUELLE des branches possibles.
+    """
+
+    HTML_UPGRADE_TEXT = (
+        "<% if(recipient.counter.upgrade.upgraderemainingpoints>1 ) { %>"
+        "Dir fehlen noch <%=recipient.counter.upgrade.upgraderemainingpoints%> Punkte"
+        "<% } else { %>"
+        "Dir fehlt noch <%=recipient.counter.upgrade.upgraderemainingpoints%> Punkt"
+        "<% } %> für dein Gold Upgrade"
+    )
+
+    def test_matches_excel_wording_containing_only_the_plural_branch(self):
+        status, error, sim, match_type = compare(
+            self.HTML_UPGRADE_TEXT, "Dir fehlen noch [X] Punkte für dein Gold Upgrade"
+        )
+        assert status == "OK"
+
+    def test_matches_excel_wording_containing_only_the_singular_branch(self):
+        status, error, sim, match_type = compare(
+            self.HTML_UPGRADE_TEXT, "Dir fehlt noch [X] Punkt für dein Gold Upgrade"
+        )
+        assert status == "OK"
+
+    def test_matches_excel_wording_that_also_contains_the_raw_conditional(self):
+        # Le cas ou l'Excel a ete rempli en copiant le if/else brut du HTML
+        # (traduit dans chaque branche) doit aussi matcher.
+        html = "<% if(n>1){%>Deine offenen Geschenke<%}else{%>Dein offenes Geschenk<%}%>"
+        excel = "<% if(n>1){%>Deine offenen Geschenke<%}else{%>Dein offenes Geschenk<%}%>"
+        status, error, sim, match_type = compare(html, excel)
+        assert status == "OK"
+
+    def test_still_ko_when_neither_branch_matches(self):
+        status, error, sim, match_type = compare(self.HTML_UPGRADE_TEXT, "Something else entirely")
+        assert status == "KO"
 
 
 class TestFindBestMatch:
@@ -134,3 +180,15 @@ class TestFindClosestMatch:
         wordings = [excel_row("Completely unrelated content here", technical="audit-component-x")]
         item = html_item("Totally different words", component_class="audit-component-x")
         assert find_closest_match(item, wordings, set()) is None
+
+    def test_matches_the_closest_branch_of_a_conditional_excel_wording(self):
+        # Le wording Excel contient le if/else brut (traduit dans chaque
+        # branche) ; le HTML ne montre que la branche singulier au rendu.
+        wordings = [excel_row(
+            "<% if(n>1){%>Deine offenen Geschenke sind toll<%}else{%>Dein offenes Geschenk ist toll<%}%>",
+            technical="audit-component-x",
+        )]
+        item = html_item("Dein offenes Geschenk ist toll", component_class="audit-component-x")
+        result = find_closest_match(item, wordings, set())
+        assert result is not None
+        assert result["similarity"] >= 0.99

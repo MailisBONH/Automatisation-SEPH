@@ -5,6 +5,7 @@ from qa.config import (
     SIM_NEAR_EXACT,
     SIM_FUZZY,
     SIM_CLOSEST_MATCH_MIN,
+    SIM_CLOSEST_MATCH_ACCEPT,
     KO_TEXT_MISSING,
     KO_CASE_MISMATCH,
     KO_MINOR_TYPO,
@@ -14,7 +15,7 @@ from qa.config import (
     CRITICALITY_BY_ERROR_TYPE,
     DEFAULT_KO_CRITICALITY,
 )
-from qa.text_utils import normalize, normalize_currency
+from qa.text_utils import clean_display_text, expand_conditional_variants, normalize, normalize_currency
 
 
 def criticality_for(error_type: str) -> str:
@@ -29,8 +30,29 @@ def compare(html_text: str, excel_text: str) -> tuple:
     """
     Retour :
     (Status, ErrorType, Similarity, MatchType)
-    """
 
+    Si l'un des deux textes contient un bloc conditionnel AEM
+    (<% if(...) { %>...<% } else { %>...<% } %>), chaque branche possible
+    est comparee independamment (voir expand_conditional_variants) : un
+    match sur N'IMPORTE QUELLE combinaison de branches compte comme un
+    match, puisque le rendu final n'affiche qu'une seule branche a la fois.
+    Retourne la premiere combinaison OK trouvee, sinon la plus similaire.
+    """
+    html_variants = expand_conditional_variants(html_text)
+    excel_variants = expand_conditional_variants(excel_text)
+
+    best = None
+    for hv in html_variants:
+        for ev in excel_variants:
+            result = _compare_single(hv, ev)
+            if result[0] == "OK":
+                return result
+            if best is None or result[2] > best[2]:
+                best = result
+    return best
+
+
+def _compare_single(html_text: str, excel_text: str) -> tuple:
     h = normalize(html_text)
     e = normalize(excel_text)
 
@@ -208,17 +230,20 @@ def find_split_match(html_item: dict, excel_wordings: list, matched_excel_idx: s
     for idx, ex in enumerate(excel_wordings):
         if idx in matched_excel_idx:
             continue
-        e_norm = ex["norm"]
-        if not e_norm:
-            continue
 
         expected_class = ex.get("Technical")
         if found_class and expected_class and found_class != expected_class:
             continue
 
-        ratio = len(h_norm) / len(e_norm) if len(e_norm) > 0 else 0
-        if h_norm.lower() in e_norm.lower() and ratio >= min_ratio:
-            return (idx, "OK", "", round(ratio * 100))
+        # Une cellule Excel avec bloc conditionnel a plusieurs variantes
+        # (une par branche, voir expand_conditional_variants) : n'importe
+        # laquelle suffit a valider le split match.
+        for e_norm in ex["norm_variants"]:
+            if not e_norm:
+                continue
+            ratio = len(h_norm) / len(e_norm)
+            if h_norm.lower() in e_norm.lower() and ratio >= min_ratio:
+                return (idx, "OK", "", round(ratio * 100))
 
     return None
 
@@ -248,6 +273,27 @@ def _similarity_with_boosts(a_norm: str, a_curr: str, b_norm: str, b_curr: str) 
     return sim
 
 
+def _best_similarity_to_excel(html_text: str, excel_entry: dict) -> float:
+    """
+    Meilleure similarite entre un texte HTML (avec ses eventuelles variantes
+    if/else, voir expand_conditional_variants) et un wording Excel (avec les
+    siennes, precalculees dans excel_entry['norm_variants']/['curr_variants']
+    par excel_loader). Essaie toutes les combinaisons de branches des deux
+    cotes et retient la meilleure : le rendu final n'affiche qu'une seule
+    branche a la fois de chaque cote, donc la meilleure correspondance
+    possible est le signal pertinent, pas la moyenne ou la 1ere variante.
+    """
+    best = 0.0
+    for h_raw in expand_conditional_variants(html_text):
+        h_norm = normalize(h_raw)
+        h_curr = normalize_currency(h_raw)
+        for e_norm, e_curr in zip(excel_entry["norm_variants"], excel_entry["curr_variants"]):
+            sim = _similarity_with_boosts(h_norm, h_curr, e_norm, e_curr)
+            if sim > best:
+                best = sim
+    return best
+
+
 def find_closest_match(html_item: dict, excel_wordings: list, matched_excel_idx: set,
                        min_sim: float = SIM_CLOSEST_MATCH_MIN):
     """
@@ -264,7 +310,6 @@ def find_closest_match(html_item: dict, excel_wordings: list, matched_excel_idx:
     found_class = html_item.get("component_class")
 
     h_norm = normalize(h_text)
-    h_curr = normalize_currency(h_text)
     if not h_norm:
         return None
 
@@ -283,10 +328,7 @@ def find_closest_match(html_item: dict, excel_wordings: list, matched_excel_idx:
 
         # On inclut les cellules deja matchees : le "Missing wording" peut
         # pointer vers une cellule deja matchee par un autre element HTML.
-        e_norm = ex["norm"]
-        e_curr = ex["curr"]
-
-        sim = _similarity_with_boosts(h_norm, h_curr, e_norm, e_curr)
+        sim = _best_similarity_to_excel(h_text, ex)
 
         if sim > best_sim:
             best_sim = sim
@@ -312,17 +354,11 @@ def find_closest_html_match(excel_wording: dict, html_texts: list,
     vrai wording attendu est absent. Retourne (idx dans html_texts, sim
     0-1) ou None si rien n'atteint min_sim.
     """
-    e_norm = excel_wording["norm"]
-    e_curr = excel_wording["curr"]
-
     best_idx = None
     best_sim = 0.0
 
     for idx, html_item in enumerate(html_texts):
-        h_norm = normalize(html_item["text"])
-        h_curr = normalize_currency(html_item["text"])
-
-        sim = _similarity_with_boosts(e_norm, e_curr, h_norm, h_curr)
+        sim = _best_similarity_to_excel(html_item["text"], excel_wording)
 
         if sim > best_sim:
             best_sim = sim
@@ -344,8 +380,8 @@ def make_row(ex, html_item, html_text, status, error, sim, match_type):
         "Element": ex["Element"],
         "Expected Class": expected_class,
         "HTML Class": found_class,
-        "Excel Wording": ex["Wording"],
-        "HTML Wording": html_text,
+        "Excel Wording": clean_display_text(ex["Wording"], html_text),
+        "HTML Wording": clean_display_text(html_text, ex["Wording"]),
         "Status": status,
         "Error Type": error,
         "Similarity": f"{round(sim, 2)}%",

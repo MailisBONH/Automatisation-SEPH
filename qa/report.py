@@ -17,15 +17,40 @@ from qa.history import record_run
 
 def _sort_by_criticality(df: pd.DataFrame, prefix_columns: list = None) -> pd.DataFrame:
     """Trie un DataFrame de KO par vraie gravite (CRITICALITY_ORDER), apres
-    d'eventuelles colonnes de regroupement (ex: "Sequence"), puis par
-    Component Name. Remplace un tri alphabetique sur Criticality, qui
-    donnerait "High" < "Low" < "Medium"."""
+    d'eventuelles colonnes de regroupement (ex: "Sequence"), puis par ordre
+    d'apparition dans le HTML (_html_order, voir qa.wording_qa) si
+    disponible - Component Name ne sert plus que de tie-break final. Un tri
+    par Component Name alphabetique en position dominante placerait par
+    exemple "LEGAL NOTICE" avant "LOYALTY SECTION" (E < O) meme quand la
+    section loyalty apparait bien avant les mentions legales sur la page.
+    Remplace aussi un tri alphabetique sur Criticality, qui donnerait
+    "High" < "Low" < "Medium"."""
     crit = pd.Categorical(df["Criticality"], categories=CRITICALITY_ORDER, ordered=True)
+    sort_cols = (prefix_columns or []) + ["_criticality_order"]
+    if "_html_order" in df.columns:
+        sort_cols.append("_html_order")
+    sort_cols.append("Component Name")
     return (
         df.assign(_criticality_order=crit)
-          .sort_values((prefix_columns or []) + ["_criticality_order", "Component Name"])
+          .sort_values(sort_cols)
           .drop(columns="_criticality_order")
     )
+
+
+def sort_results_by_html_order(df: pd.DataFrame, prefix_columns: list = None) -> pd.DataFrame:
+    """Trie un DataFrame (KO et OK confondus) par ordre d'apparition dans le
+    HTML (_html_order, voir qa.wording_qa) si disponible, Component Name ne
+    servant que de tie-break final. Utilisee pour l'onglet Details :
+    contrairement a l'onglet KO Only (qui priorise la criticite pour le
+    triage, voir _sort_by_criticality), Details doit suivre le fil de la
+    page. Trier KO et OK separement (tous les KO d'abord, puis tous les OK)
+    eclaterait un meme composant en 2 endroits du rapport des qu'il a au
+    moins un KO et un OK ailleurs sur la page."""
+    sort_cols = list(prefix_columns or [])
+    if "_html_order" in df.columns:
+        sort_cols.append("_html_order")
+    sort_cols.append("Component Name")
+    return df.sort_values(sort_cols)
 
 
 # =========================
@@ -208,10 +233,7 @@ def save_report(results: list, campaign_sheet_name: str, mode: str = "wording"):
 
     # Details
     ws2 = wb.create_sheet("Details")
-    df_sorted = pd.concat([
-        _sort_by_criticality(df[df["Status"] == "KO"]),
-        df[df["Status"] == "OK"].sort_values(["Component Name"])
-    ]).reset_index(drop=True)
+    df_sorted = sort_results_by_html_order(df).reset_index(drop=True)
     _write_results_sheet(ws2, df_sorted, "4472C4", columns, header_labels)
 
     # KO Only
@@ -303,10 +325,7 @@ def save_consolidated_report(results_by_sequence: dict, report_name: str = "Mult
 
     # Details
     ws2 = wb.create_sheet("Details")
-    df_sorted = pd.concat([
-        _sort_by_criticality(df[df["Status"] == "KO"], prefix_columns=["Sequence"]),
-        df[df["Status"] == "OK"].sort_values(["Sequence", "Component Name"])
-    ]).reset_index(drop=True) if total else df
+    df_sorted = sort_results_by_html_order(df, prefix_columns=["Sequence"]).reset_index(drop=True) if total else df
     _write_results_sheet(ws2, df_sorted, "4472C4", columns, header_labels)
 
     # KO Only

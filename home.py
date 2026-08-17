@@ -14,7 +14,7 @@ from qa.engine import run_qa, run_qa_for_sequence
 from qa.excel_loader import list_url_sequences, load_excel_urls, load_excel_wordings, load_generic_wordings
 from qa.history import record_run
 from qa.html_extraction import load_and_extract_html_texts
-from qa.report import save_consolidated_report, save_report
+from qa.report import save_consolidated_report, save_report, sort_results_by_html_order
 
 from datetime import datetime
 
@@ -86,8 +86,19 @@ URL_COLUMN_RENAME = {
 def _prepare_display_df(results, mode):
     """df = donnees brutes (pour les metriques/graphiques) ; df_display =
     version mise en forme pour le tableau (colonnes URL renommees, diff
-    mot-a-mot en gras rouge sur les KO en mode wording)."""
+    mot-a-mot en gras rouge sur les KO en mode wording).
+
+    Trie par ordre d'apparition dans le HTML (voir qa.report), comme le
+    rapport Excel telecharge : sans ca, l'apercu Streamlit affiche les
+    resultats dans leur ordre de production interne (tous les KO/matchs
+    directs d'abord, les wordings "retrouves apres coup" comme les branches
+    if/else soeurs ou les mentions manquantes tout a la fin), qui n'a aucun
+    rapport avec l'ordre reel de la page.
+    """
     df = pd.DataFrame(results)
+    if "_html_order" in df.columns:
+        df = sort_results_by_html_order(df).reset_index(drop=True)
+        df = df.drop(columns="_html_order")
 
     if mode == "url":
         display_cols = [

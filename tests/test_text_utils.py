@@ -1,4 +1,4 @@
-from qa.text_utils import clean_text, is_valid, normalize, normalize_currency
+from qa.text_utils import clean_text, expand_conditional_variants, is_valid, normalize, normalize_currency
 
 
 class TestNormalize:
@@ -35,6 +35,67 @@ class TestNormalize:
 
     def test_collapses_whitespace(self):
         assert normalize("  a   b\n\nc  ") == "a b c"
+
+
+class TestExpandConditionalVariants:
+    def test_text_without_conditional_returns_single_variant(self):
+        assert expand_conditional_variants("Discover now") == ["Discover now"]
+
+    def test_none_returns_single_empty_variant(self):
+        assert expand_conditional_variants(None) == [""]
+
+    def test_if_else_produces_one_variant_per_branch(self):
+        raw = "<% if(n>1){%>Dir fehlen noch Punkte<%}else{%>Dir fehlt noch Punkt<%}%> für dein Upgrade"
+        variants = expand_conditional_variants(raw)
+        assert variants == [
+            "Dir fehlen noch Punkte für dein Upgrade",
+            "Dir fehlt noch Punkt für dein Upgrade",
+        ]
+
+    def test_if_without_else_produces_included_and_removed_variants(self):
+        raw = "Hello<% if(n>0){%> beautiful<%}%> world"
+        variants = expand_conditional_variants(raw)
+        assert variants == ["Hello beautiful world", "Hello world"]
+
+    def test_nested_variable_placeholder_is_kept_inside_branch(self):
+        # La variable <%=...%> a l'interieur d'une branche doit rester dans
+        # la variante brute (elle sera nettoyee ensuite par normalize()).
+        raw = "<% if(n>1){%>Noch <%=n%> Punkte<%}else{%>Noch <%=n%> Punkt<%}%>"
+        variants = expand_conditional_variants(raw)
+        assert variants == ["Noch <%=n%> Punkte", "Noch <%=n%> Punkt"]
+
+    def test_sequential_conditionals_produce_cartesian_product(self):
+        raw = "<%=n%><% if(n>=1000){%> Punkte<%}else{%> / 1000 Punkte<%}%><% if(m>1){%> Geschenke<%}else{%> Geschenk<%}%>"
+        variants = expand_conditional_variants(raw)
+        assert len(variants) == 4
+        assert "<%=n%> Punkte Geschenke" in variants
+        assert "<%=n%> / 1000 Punkte Geschenk" in variants
+
+    def test_condition_with_nested_parentheses_is_still_resolved(self):
+        # Regression : [^)]* dans la condition s'arretait a la 1ere ")"
+        # rencontree, donc une condition avec des parentheses imbriquees
+        # (parenthesage supplementaire, appel de fonction...) faisait
+        # completement echouer la detection du bloc if/else - silencieusement,
+        # sans erreur, juste aucune expansion.
+        raw = "<% if((n)>1){%>Dir fehlen noch Punkte<%}else{%>Dir fehlt noch Punkt<%}%>"
+        assert expand_conditional_variants(raw) == ["Dir fehlen noch Punkte", "Dir fehlt noch Punkt"]
+
+    def test_condition_with_function_call_is_still_resolved(self):
+        raw = "<% if(recipient.getPoints(true)>1){%>Dir fehlen noch Punkte<%}else{%>Dir fehlt noch Punkt<%}%>"
+        assert expand_conditional_variants(raw) == ["Dir fehlen noch Punkte", "Dir fehlt noch Punkt"]
+
+    def test_nested_parens_do_not_swallow_a_later_sequential_conditional(self):
+        raw = "<% if((n)>=1000){%> Punkte<%}else{%> / 1000 Punkte<%}%><% if((m)>1){%> Geschenke<%}else{%> Geschenk<%}%>"
+        variants = expand_conditional_variants(raw)
+        assert len(variants) == 4
+        assert " Punkte Geschenke" in variants
+        assert " / 1000 Punkte Geschenk" in variants
+
+    def test_variants_are_deduplicated(self):
+        # Les deux branches sont identiques une fois le texte hors-condition
+        # retire : une seule variante doit rester.
+        raw = "<% if(n>1){%>same<%}else{%>same<%}%>"
+        assert expand_conditional_variants(raw) == ["same"]
 
 
 class TestNormalizeCurrency:

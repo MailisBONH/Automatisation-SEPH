@@ -25,12 +25,13 @@ Interface Streamlit + moteur de comparaison Python, avec export du résultat en 
 ## Fonctionnalités
 
 - **Upload du fichier HTML** (export "view-source" AEM ou HTML brut).
-- **Extraction automatique du wording** depuis le HTML :
+- **Extraction automatique du wording** depuis le HTML (parsée avec `lxml`, qui referme implicitement les tags mal formés comme le ferait un vrai navigateur — ex. un `<p>` imbriqué dans un `<p>`) :
   - lecture des blocs `class="text-contribution"` et `class="audit-generique-title"` (marqueurs AEM),
   - reconstruction du HTML réel si le fichier fourni est une vue "view-source" AEM,
-  - nettoyage des artefacts techniques : directives `<% %>` / `<%= %>`, variables `${...}`, placeholders `[xxx]`, caractères invisibles (LRM/RLM), entités HTML,
+  - nettoyage des artefacts techniques pour l'affichage : variables `${...}`, placeholders `[xxx]`, caractères invisibles (LRM/RLM), entités HTML — les blocs AEM `<% %>` / `<%= %>` sont conservés jusqu'à la comparaison (voir "Blocs conditionnels AEM" plus bas) puis nettoyés uniquement à l'affichage,
+  - les tags de pure emphase (`<b>`, `<strong>`, `<em>`, `<i>`, `<small>`) imbriqués dans un élément déjà extrait (ex. dans un `<p>`), et le texte brut d'un bloc quand il n'apporte rien de plus que ses enfants déjà extraits, ne sont pas dupliqués en entrées séparées,
   - les liens (`<a>`) individuels à l'intérieur d'un composant de mentions légales/footer (classe contenant `"legal"` ou `"footer"`, voir `LEGAL_MENTION_CLASS_KEYWORDS`) sont ignorés : leur texte est déjà couvert par le paragraphe complet qui les englobe.
-- **Matching tolérant** entre HTML et Excel, avec plusieurs stratégies en cascade (direct, agrégation de blocs, sous-phrase, meilleure correspondance approximative) et un traitement dédié aux devises (séparateurs `|`, `/`, `I`).
+- **Matching tolérant** entre HTML et Excel, avec plusieurs stratégies en cascade (direct, agrégation de blocs, sous-phrase, meilleure correspondance approximative), un traitement dédié aux devises (séparateurs `|`, `/`, `I`), et la résolution des blocs conditionnels AEM (`<% if %>...<% } else { %>...<% } %>`, voir "Blocs conditionnels AEM" plus bas).
 - **Dashboard Streamlit** : taux de succès global, répartition des erreurs par type (camemberts Plotly), tableau interactif (AgGrid) avec diff mot-à-mot en couleur entre le wording attendu et le wording trouvé.
 - **Rapport Excel exportable** (`Summary` / `Details` / `KO Only`) avec mise en forme conditionnelle (couleurs par statut/criticité) et diff en rich text.
 - **Mode URL** : vérification des liens (`href`) du HTML par rapport à la liste d'URLs trackées du référentiel Excel (correspondance exacte ou fonctionnelle sur les paramètres UTM), avec un rapport dédié — colonnes `Classe attendue (Excel)`, `Classe trouvée (HTML)`, `URL attendue (Excel)`, `URL trouvée (HTML)`, `Status` — voir [Comment fonctionne la QA URL](#comment-fonctionne-la-qa-url).
@@ -53,8 +54,8 @@ pages/
 qa/
 ├── engine.py               Orchestrateur : run_qa_for_sequence() (1 sequence) et run_qa() (+ rapport)
 ├── config.py                Constantes de configuration (colonnes Excel, regex, seuils, tables pays)
-├── text_utils.py             Nettoyage et normalisation de texte (clean_text, normalize, normalize_currency)
-├── html_extraction.py         Extraction du wording depuis le HTML
+├── text_utils.py             Nettoyage/normalisation de texte (clean_text, normalize, normalize_currency, expand_conditional_variants, clean_display_text)
+├── html_extraction.py         Extraction du wording depuis le HTML (parser lxml)
 ├── excel_loader.py            Lecture de la feuille Excel référentielle
 ├── matching.py                 compare() + stratégies de matching HTML <-> Excel (mode Wording)
 ├── wording_qa.py                Pipeline de QA "wording" (run_wording_qa)
@@ -66,7 +67,7 @@ qa/
 ├── combined_report.py                Fusion des derniers rapports Wording + URL d'une séquence en un rapport combiné
 ├── history.py                        Historique local des scores (record_run, load_history, build_history_tree, rewrite/delete_classification, prune_history...)
 ├── cleanup.py                         Suppression automatique des fichiers de temp/ plus vieux que 24h
-└── report.py                        Génération des rapports Excel (save_report, save_consolidated_report)
+└── report.py                        Génération des rapports Excel (save_report, save_consolidated_report, sort_results_by_html_order réutilisée par home.py pour l'aperçu)
 temp/                       Fichiers uploadés temporairement, isolés par session (non versionné)
 output/                     Rapports Excel générés (classés par Pays/Trigger/Séquence) + historique des scores (non versionné)
 tests/                      Suite pytest (voir Tests)
@@ -109,7 +110,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-La suite couvre les fonctions de normalisation (`qa/text_utils.py`), les stratégies de matching (`qa/matching.py`), la résolution d'onglet/colonne Excel (`qa/excel_loader.py`) et le pipeline complet (`qa/wording_qa.py`), y compris des tests de non-régression pour les bugs de cascade déjà corrigés (verrouillage prématuré sur un KO, starvation du Split par un faux KO de secours). Elle couvre aussi la détection pays/trigger et la réconciliation des noms de séquence (`qa/classification.py`), le classement et la rotation des rapports (`qa/archive.py`), le rapport combiné (`qa/combined_report.py`), l'historique par pays/trigger/séquence — y compris le renommage/fusion et la suppression (`qa/history.py`) — et le nettoyage automatique de `temp/` (`qa/cleanup.py`).
+La suite couvre les fonctions de normalisation et le dépliage des blocs conditionnels AEM (`qa/text_utils.py`), l'extraction HTML — parsing `lxml`, dédoublonnage des tags d'emphase imbriqués et du fallback bloc (`qa/html_extraction.py`) —, les stratégies de matching (`qa/matching.py`) et le pipeline complet (`qa/wording_qa.py`), y compris des tests de non-régression pour les bugs de cascade déjà corrigés (verrouillage prématuré sur un KO, starvation du Split par un faux KO de secours, branches if/else "sœurs" non consommées, promotion OK qui masquerait un vrai écart). Elle couvre aussi la résolution d'onglet/colonne Excel (`qa/excel_loader.py`), la détection pays/trigger et la réconciliation des noms de séquence (`qa/classification.py`), le classement et la rotation des rapports (`qa/archive.py`), le rapport combiné (`qa/combined_report.py`), l'historique par pays/trigger/séquence — y compris le renommage/fusion et la suppression (`qa/history.py`) — et le nettoyage automatique de `temp/` (`qa/cleanup.py`).
 
 ## Utilisation
 
@@ -203,7 +204,15 @@ La comparaison texte à texte elle-même (`compare()`) normalise les deux chaîn
 
 Chaque type de KO a un nom qui désigne un seul cas précis (avant, `Typo` recouvrait à la fois les quasi-exacts et les vagues ressemblances, et `Wording differs` recouvrait à la fois une vraie faute et un wording jamais retrouvé). La `Criticality` suit une échelle de gravité réelle (`CRITICALITY_BY_ERROR_TYPE` dans `qa/config.py`), pas le chemin de code qui a produit le KO.
 
-Chaque wording Excel non couvert par un match HTML est reporté en fin de tableau : `Missing wording (not in HTML)` (Low, souvent un wording conditionnel/variant non attendu dans cette version) si rien de proche n'existe côté HTML, ou `Wording relocated (similar text found)` (Medium) si un texte HTML proche existe ailleurs — ce cas mérite une vérification (doublon, texte mal placé) plutôt qu'une simple correction de faute. Chaque doublon de KO identique (même paire HTML/Excel) est dédupliqué.
+### Blocs conditionnels AEM (`<% if %> ... <% } else { %> ... <% } %>`)
+
+Certains wordings (typiquement la section loyalty) contiennent un bloc conditionnel qui affiche l'une ou l'autre de deux phrases selon une donnée destinataire (ex. singulier/pluriel sur un nombre de points). Le rendu final n'affiche jamais qu'**une seule branche à la fois**, mais le HTML source (et parfois la cellule Excel, si elle a été remplie en copiant le if/else brut du gabarit) contient les deux.
+
+`qa.text_utils.expand_conditional_variants()` déplie chaque bloc conditionnel détecté en une variante de texte par branche (avec gestion des conditions successives/imbriquées dans un même fragment et des parenthèses imbriquées dans la condition, jusqu'à 8 combinaisons), au lieu de laisser `normalize()` concaténer les deux branches en une phrase incohérente. `compare()`, `find_split_match`, `find_closest_match` et `find_closest_html_match` essaient alors toutes les combinaisons de branches possibles côté HTML **et** côté Excel, et retiennent le meilleur résultat (un match sur n'importe laquelle des branches compte comme un match) — que l'Excel contienne la syntaxe conditionnelle brute ou une seule phrase représentative. Le texte affiché dans le rapport (`clean_display_text()`) ne montre jamais le code AEM brut : la branche la plus proche du wording comparé est choisie pour l'affichage, variables `<%= %>` retirées.
+
+**Excel qui modélise les 2 branches en 2 lignes séparées** (courant pour faciliter la traduction, plutôt que de coller le if/else brut dans la cellule) : un seul fragment HTML "partagé" peut alors satisfaire les deux lignes Excel, mais un seul matching direct ne "consomme" que l'une d'elles. Pour la branche non consommée en premier, `run_wording_qa` cherche parmi les fragments HTML déjà exploités si l'un correspond, avec la même classe technique, quasi-parfaitement (`SIM_SHARED_BRANCH_EXACT`, volontairement beaucoup plus strict que le seuil de closest-match habituel) — si oui, la ligne est validée OK (`Match Type` = `Shared conditional branch`) plutôt que signalée à tort comme wording introuvable. Le seuil est volontairement quasi-parfait : un match seulement "très bon" (proche de 95-98 %) reflète un vrai écart sur cette branche précise (ex. une ponctuation en trop), qui ne doit pas être masqué juste parce que la branche sœur a bien matché.
+
+Chaque wording Excel non couvert par un match HTML (et non récupéré via le mécanisme ci-dessus) est reporté en fin de tableau : `Missing wording (not in HTML)` (Low, souvent un wording conditionnel/variant non attendu dans cette version) si rien de proche n'existe côté HTML, ou `Wording relocated (similar text found)` (Medium) si un texte HTML proche existe ailleurs sans que la classe technique corresponde ou sans atteindre le seuil quasi-parfait — ce cas mérite une vérification (doublon, texte mal placé) plutôt qu'une simple correction de faute. Chaque doublon de KO identique (même paire HTML/Excel) est dédupliqué, de même qu'une promotion OK qui coïnciderait avec un KO déjà posé sur exactement le même texte (un vrai écart affectant les deux branches reste KO pour les deux, voir tests `TestConditionalBranchesDisplayAndMatching`).
 
 Un dernier filtre (`_drop_ko_covered_by_ok`) supprime les KO dont le texte HTML est déjà entièrement contenu dans le texte HTML d'une autre ligne validée OK — cas fréquent quand un même contenu est extrait à la fois en un bloc complet (qui matche) et en fragments plus courts (qui, comparés seuls à leur propre wording Excel, ne matchent pas) : le fragment court est déjà couvert par le bloc validé, ce n'est pas un écart réel.
 
@@ -230,8 +239,8 @@ La normalisation fonctionnelle (`qa/url_utils.normalize_url`) décode les entit�
 Le rapport Excel est généré dans `output/QA_<nom_feuille>_<horodatage>.xlsx` (dossier non versionné, créé automatiquement) et contient 3 onglets :
 
 - **Summary** : nom de la campagne, date, total, nombre d'OK/KO, score global (coloré vert/orange/rouge selon le score).
-- **Details** : toutes les lignes, KO triés par criticité puis par composant en premier, OK ensuite.
-- **KO Only** : uniquement les écarts, avec le diff mot-à-mot en rouge gras entre les colonnes attendu/trouvé.
+- **Details** : toutes les lignes (KO et OK confondus), triées par ordre d'apparition dans le HTML (`sort_results_by_html_order` dans `qa/report.py`) — un composant qui a à la fois des OK et des KO reste groupé à sa vraie place dans la page, plutôt que d'éclater ses KO dans un bloc "tous les KO" séparé de ses OK. C'est le même tri qui alimente le tableau affiché dans l'app (`home.py`), pour que l'aperçu et le rapport téléchargé se correspondent toujours.
+- **KO Only** : uniquement les écarts, triés par **criticité** (le plus grave en premier, pas l'ordre de la page — ce sheet sert au triage) puis par ordre d'apparition dans le HTML, avec le diff mot-à-mot en rouge gras entre les colonnes attendu/trouvé.
 
 Les colonnes diffèrent selon le mode (`qa/report.py` : `BASE_COLUMNS` / `URL_COLUMNS`) :
 
@@ -240,7 +249,7 @@ Les colonnes diffèrent selon le mode (`qa/report.py` : `BASE_COLUMNS` / `URL_CO
 | **Wording** | `Component Name`, `Element`, `Expected Class`, `HTML Class`, `Excel Wording`, `HTML Wording`, `Status`, `Error Type`, `Similarity`, `Criticality`, `Match Type` |
 | **URL** | `Classe attendue (Excel)`, `Classe trouvée (HTML)`, `URL attendue (Excel)`, `URL trouvée (HTML)`, `Status` |
 
-En mode multi-séquences, `report.save_consolidated_report` génère un rapport unique `QA_MULTI_..._<horodatage>.xlsx` : les onglets `Details`/`KO Only` ajoutent une colonne `Sequence` (tri par séquence puis criticité), et le `Summary` ajoute un tableau récapitulatif Total/OK/KO/Score par séquence en plus du score global.
+En mode multi-séquences, `report.save_consolidated_report` génère un rapport unique `QA_MULTI_..._<horodatage>.xlsx` : les onglets `Details`/`KO Only` ajoutent une colonne `Sequence` (tri par séquence, puis même logique que ci-dessus au sein de chaque séquence), et le `Summary` ajoute un tableau récapitulatif Total/OK/KO/Score par séquence en plus du score global.
 
 ## Historique par pays / trigger / séquence
 
@@ -314,6 +323,7 @@ Les réglages globaux sont centralisés dans [`qa/config.py`](qa/config.py) :
 
 ## Limitations connues / roadmap
 
+- **Blocs conditionnels AEM multi-éléments** : `expand_conditional_variants` résout un `<% if %>` contenu dans un seul fragment de texte (ex. une phrase dans un `<p>`). Un conditionnel qui englobe plusieurs balises entières (ex. `<% if(...) { %>` avant un titre, `<% } %>` après plusieurs paragraphes suivants) n'est pas interprété comme tel : chaque élément à l'intérieur reste extrait normalement, indépendamment de la condition qui les entoure.
 - **Mode URL** : ne vérifie que la présence des URLs Excel dans le HTML (comme le script d'origine) — ne détecte pas les `href` présents dans le HTML mais absents du référentiel Excel.
 - **Découpage en séquences de l'onglet UTM** : ne gère qu'un seul niveau de séparateurs. Si un onglet imbrique des sous-catégories à l'intérieur d'une séquence (ex. des séparateurs répétés comme "FOOTER" dans chaque séquence), elles seront traitées comme des séquences distinctes plutôt que comme des sous-groupes.
 - **Fusion de séquences depuis la page Historique** : déplace les rapports Excel et réécrit l'historique, mais ne fusionne pas le contenu des fichiers eux-mêmes — si les deux séquences dépassaient déjà `KEEP_REPORTS` fichiers après fusion, la rotation par type est réappliquée (les plus anciens sont supprimés) sans tenir compte de leur pertinence relative.

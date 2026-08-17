@@ -117,6 +117,9 @@ SIM_NEAR_EXACT = 0.95              # au-dessus : ecart minime (typo/devise quasi
 SIM_FUZZY = 0.80                   # au-dessus : ecart notable mais reconnaissable
 SIM_CLOSEST_MATCH_ACCEPT = 0.85    # closest-match de la bonne classe au-dessus de ce seuil -> OK
 SIM_CLOSEST_MATCH_MIN = 0.55       # en-dessous, aucun closest-match n'est propose
+SIM_SHARED_BRANCH_EXACT = 0.995    # branche if/else "soeur" : n'accepte qu'un match quasi-parfait,
+                                    # sinon un vrai ecart (ex: ponctuation) sur cette branche precise
+                                    # serait masque a tort (voir run_wording_qa)
 
 # Noms des types de KO (colonne "Error Type" des rapports). Chaque nom
 # designe un seul cas precis, pour eviter qu'un meme libelle recouvre des
