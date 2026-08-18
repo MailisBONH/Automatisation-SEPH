@@ -5,10 +5,14 @@ from qa.excel_loader import (
     find_column,
     find_sheet,
     find_sibling_sequence_sheet,
+    find_sibling_url_section,
+    list_url_sequence_choices,
     list_wording_sheet_choices,
+    load_excel_urls,
     load_excel_wordings,
     load_generic_wordings,
     load_sibling_sequence_wordings,
+    load_sibling_url_section,
 )
 
 
@@ -31,6 +35,29 @@ def make_wording_workbook(tmp_path, sheets: dict, filename="wording.xlsx"):
         for sheet_name, data_rows in sheets.items():
             rows = [["", "", "", ""], header_row] + data_rows
             pd.DataFrame(rows).to_excel(writer, sheet_name=sheet_name, index=False, header=False)
+    return str(path)
+
+
+def make_utm_workbook(tmp_path, sections: dict, filename="utm.xlsx", sheet_name="UTM TRIGGER"):
+    """
+    sections: {section_name: [url1, url2, ...]} - un onglet UTM avec
+    plusieurs sequences empilees, chacune demarree par une ligne
+    "separateur" (une seule cellule non vide, dans la colonne "URL" - voir
+    qa.excel_loader._parse_url_sections).
+    """
+    path = tmp_path / filename
+    rows = [
+        [None, "!! CHECK !!", None, None, None, None, None, None],
+        [None, "URL", "SOURCE", "MEDIUM", "CAMPAIGN", "SEQUENCE", "VERSION", "<< TRACKED URL >>"],
+        [None, "Insert url here", "Mandatory", "Mandatory", "TRIGGER", "SEQ", "VERSION", None],
+    ]
+    for name, urls in sections.items():
+        rows.append([None, name, None, None, None, None, None, None])
+        for url in urls:
+            rows.append(["HEADER", "https://example.com/", "trigger", "email", "revamp_inac", "seq1", "", url])
+
+    with pd.ExcelWriter(path) as writer:
+        pd.DataFrame(rows).to_excel(writer, sheet_name=sheet_name, index=False, header=False)
     return str(path)
 
 
@@ -214,3 +241,98 @@ class TestListWordingSheetChoices:
             "SEQ 1": [["Header", "Title", "Hallo", "audit-component-header"]],
         })
         assert list_wording_sheet_choices(path) == [("SEQ 1", "SEQ 1")]
+
+
+class TestLoadExcelUrlsReturnsResolvedSectionName:
+    def test_returns_the_exact_matched_section_name(self, tmp_path):
+        path = make_utm_workbook(tmp_path, {
+            "SEQ 1 FID": ["https://example.com/fid"],
+            "SEQ 1 NON FID": ["https://example.com/non-fid"],
+        })
+        sheet, section_name, urls = load_excel_urls(path, "NON FID")
+        assert section_name == "SEQ 1 NON FID"
+        assert [u["url"] for u in urls] == ["https://example.com/non-fid"]
+
+    def test_flat_tab_without_sections_returns_empty_section_name(self, tmp_path):
+        path = make_utm_workbook(tmp_path, {"": ["https://example.com/a"]})
+        sheet, section_name, urls = load_excel_urls(path, "anything")
+        assert section_name == ""
+
+
+class TestFindSiblingUrlSection:
+    """
+    Symetrique de TestFindSiblingSequenceSheet (voir plus haut), mais pour
+    des sections d'un meme onglet UTM plutot que des onglets separes.
+    """
+
+    def test_finds_sibling_with_opposite_fid_status(self, tmp_path):
+        path = make_utm_workbook(tmp_path, {
+            "SEQ 1 FID": ["https://example.com/fid"],
+            "SEQ 1 NON FID": ["https://example.com/non-fid"],
+        })
+        assert find_sibling_url_section(path, "SEQ 1 FID") == "SEQ 1 NON FID"
+        assert find_sibling_url_section(path, "SEQ 1 NON FID") == "SEQ 1 FID"
+
+    def test_no_sibling_when_only_one_section_exists(self, tmp_path):
+        path = make_utm_workbook(tmp_path, {"SEQ 1 FID": ["https://example.com/fid"]})
+        assert find_sibling_url_section(path, "SEQ 1 FID") is None
+
+    def test_no_sibling_for_unrelated_sequence_number(self, tmp_path):
+        path = make_utm_workbook(tmp_path, {
+            "SEQ 1 FID": ["https://example.com/a"],
+            "SEQ 2 NON FID": ["https://example.com/b"],
+        })
+        assert find_sibling_url_section(path, "SEQ 1 FID") is None
+
+    def test_ambiguous_multiple_candidates_returns_none(self, tmp_path):
+        path = make_utm_workbook(tmp_path, {
+            "SEQ 1 FID": ["https://example.com/a"],
+            "SEQ 1 NON FID": ["https://example.com/b"],
+            "SEQ 1 WELCOME BACK NON FID": ["https://example.com/c"],
+        })
+        assert find_sibling_url_section(path, "SEQ 1 FID") is None
+
+
+class TestLoadSiblingUrlSection:
+    def test_returns_none_and_empty_list_when_no_sibling(self, tmp_path):
+        path = make_utm_workbook(tmp_path, {"SEQ 1 FID": ["https://example.com/fid"]})
+        sibling_name, urls = load_sibling_url_section(path, "SEQ 1 FID")
+        assert sibling_name is None
+        assert urls == []
+
+    def test_loads_the_sibling_section_urls(self, tmp_path):
+        path = make_utm_workbook(tmp_path, {
+            "SEQ 1 FID": ["https://example.com/fid"],
+            "SEQ 1 NON FID": ["https://example.com/non-fid"],
+        })
+        sibling_name, urls = load_sibling_url_section(path, "SEQ 1 FID")
+        assert sibling_name == "SEQ 1 NON FID"
+        assert [u["url"] for u in urls] == ["https://example.com/non-fid"]
+
+
+class TestListUrlSequenceChoices:
+    """
+    Le menu de selection d'une sequence URL (home.py) ne doit proposer
+    qu'UN SEUL onglet d'une paire FID/NON FID "soeur", comme pour le menu
+    Wording (voir TestListWordingSheetChoices).
+    """
+
+    def test_merges_fid_non_fid_pair_into_a_single_labeled_choice(self, tmp_path):
+        path = make_utm_workbook(tmp_path, {
+            "SEQ 1 FID": ["https://example.com/fid"],
+            "SEQ 1 NON FID": ["https://example.com/non-fid"],
+        })
+        choices = list_url_sequence_choices(path)
+
+        assert len(choices) == 1
+        name, label = choices[0]
+        assert name == "SEQ 1 FID"
+        assert "SEQ 1 NON FID" in label
+
+    def test_section_without_sibling_is_listed_with_its_own_name_as_label(self, tmp_path):
+        path = make_utm_workbook(tmp_path, {"SEQ 1 FID": ["https://example.com/fid"]})
+        assert list_url_sequence_choices(path) == [("SEQ 1 FID", "SEQ 1 FID")]
+
+    def test_flat_tab_without_sections_returns_empty_list(self, tmp_path):
+        path = make_utm_workbook(tmp_path, {"": ["https://example.com/a"]})
+        assert list_url_sequence_choices(path) == []

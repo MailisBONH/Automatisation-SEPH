@@ -6,6 +6,7 @@ from qa.excel_loader import (
     load_excel_wordings,
     load_generic_wordings,
     load_sibling_sequence_wordings,
+    load_sibling_url_section,
 )
 from qa.html_extraction import (
     fetch_html_from_aem,
@@ -15,6 +16,7 @@ from qa.html_extraction import (
 )
 from qa.report import save_report
 from qa.url_qa import run_url_qa
+from qa.url_utils import normalize_url
 from qa.wording_qa import run_wording_qa
 
 
@@ -101,7 +103,35 @@ def run_qa_for_sequence(html_file, excel_file, keyword, mode="wording", include_
 
     elif mode == "url":
         raw_html = load_raw_html(html_file)
-        sheet, excel_urls = load_excel_urls(excel_file, keyword)
+        sheet, section_name, excel_urls = load_excel_urls(excel_file, keyword)
+
+        # Onglet UTM "frere" FID/NON FID (toujours actif, comme pour le
+        # wording) : la meme raison s'applique - le HTML teste peut rendre
+        # l'un ou l'autre lien/destination selon l'audience du destinataire
+        # via la meme condition AEM que le wording, donc tester contre une
+        # seule des deux sections ferait ressortir a tort l'URL de l'autre
+        # audience comme introuvable.
+        if section_name:
+            sibling_section, sibling_urls = load_sibling_url_section(excel_file, section_name)
+            if sibling_section:
+                existing_keys = {(normalize_url(u["url"]), u.get("label")) for u in excel_urls}
+                new_sibling_urls = [
+                    u for u in sibling_urls
+                    if (normalize_url(u["url"]), u.get("label")) not in existing_keys
+                ]
+                skipped = len(sibling_urls) - len(new_sibling_urls)
+                if skipped:
+                    print(
+                        f"➖ {skipped} URL(s) de la section frère '{sibling_section}' ignorée(s) "
+                        "(identiques à la section testée, rien de spécifique à l'audience)"
+                    )
+                if new_sibling_urls:
+                    print(
+                        f"🔀 Section frère '{sibling_section}' détectée (même séquence, audience "
+                        f"opposée) : {len(new_sibling_urls)} URL(s) réellement différente(s) fusionnée(s)."
+                    )
+                excel_urls = excel_urls + new_sibling_urls
+
         results = run_url_qa(raw_html, excel_urls)
 
     else:

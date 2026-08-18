@@ -426,6 +426,11 @@ def load_excel_urls(excel_file: str, keyword: str) -> tuple:
     correspond a keyword (recherche insensible a la casse). Si l'onglet ne
     contient aucun decoupage en sequences, keyword est ignore et toutes les
     URLs sont retournees.
+
+    Retourne (sheet, section_name, urls) : section_name est le nom EXACT de
+    la section resolue (utilise par qa.engine pour retrouver sa section
+    "soeur" FID/NON FID, voir find_sibling_url_section), ou "" si l'onglet
+    ne comporte pas de decoupage en sequences.
     """
     sheet, raw, header_row_idx, tracked_col_idx, section_col_idx = _locate_url_sheet_layout(excel_file)
 
@@ -448,14 +453,14 @@ def load_excel_urls(excel_file: str, keyword: str) -> tuple:
                 url = str(value).strip()
                 if url:
                     urls.append({"label": last_label, "url": url})
-        return sheet, urls
+        return sheet, "", urls
 
     sections = _parse_url_sections(raw, header_row_idx, section_col_idx, tracked_col_idx)
     named_sections = {name: urls for name, urls in sections.items() if name and urls}
 
     if not named_sections:
         # Onglet sans decoupage en sequences : tout est dans la section "".
-        return sheet, sections[""]
+        return sheet, "", sections[""]
 
     matches = [name for name in named_sections if keyword.lower() in name.lower()]
 
@@ -473,4 +478,93 @@ def load_excel_urls(excel_file: str, keyword: str) -> tuple:
             "Merci de préciser davantage le mot-clé."
         )
 
-    return sheet, named_sections[matches[0]]
+    return sheet, matches[0], named_sections[matches[0]]
+
+
+def find_sibling_url_section(excel_file: str, section_name: str) -> str:
+    """
+    Symetrique de find_sibling_sequence_sheet, mais pour les sections
+    nommees d'un MEME onglet UTM (voir _parse_url_sections) plutot que des
+    onglets Excel separes : pour une section deja resolue (ex: "SEQ 1 NON
+    FID"), cherche la section "soeur" de la meme sequence mais l'audience
+    opposee (FID <-> NON FID, LOYAL <-> NON LOYAL) - meme HTML, le lien
+    (et sa destination/ses parametres UTM) pouvant basculer de l'un a
+    l'autre selon l'audience exactement comme le wording (voir
+    find_sibling_sequence_sheet).
+
+    Retourne le nom de la section soeur, ou None si section_name n'a pas de
+    numero de sequence/mot-cle fidelite reconnaissable, si aucune autre
+    section ne correspond, ou si PLUSIEURS correspondent (ambigu).
+    """
+    match = SEQ_NUMBER_PATTERN.search(section_name.upper())
+    status = _loyalty_status(section_name)
+    if not match or not status:
+        return None
+
+    seq_num = int(match.group(1))
+    target_status = "loyal" if status == "non_loyal" else "non_loyal"
+
+    candidates = []
+    for candidate in list_url_sequences(excel_file):
+        if candidate == section_name:
+            continue
+        candidate_match = SEQ_NUMBER_PATTERN.search(candidate.upper())
+        if not candidate_match or int(candidate_match.group(1)) != seq_num:
+            continue
+        if _loyalty_status(candidate) == target_status:
+            candidates.append(candidate)
+
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
+
+
+def load_sibling_url_section(excel_file: str, section_name: str) -> tuple:
+    """
+    Charge les URLs de la section "soeur" FID/NON FID de section_name (voir
+    find_sibling_url_section), meme structure de retour que load_excel_urls
+    (sans le sheet). Retourne (None, []) si aucune section soeur n'a ete
+    trouvee.
+    """
+    sibling_name = find_sibling_url_section(excel_file, section_name)
+    if not sibling_name:
+        return None, []
+
+    _, raw, header_row_idx, tracked_col_idx, section_col_idx = _locate_url_sheet_layout(excel_file)
+    if header_row_idx is None or section_col_idx is None:
+        return None, []
+
+    sections = _parse_url_sections(raw, header_row_idx, section_col_idx, tracked_col_idx)
+    return sibling_name, sections.get(sibling_name, [])
+
+
+def list_url_sequence_choices(excel_file: str) -> list:
+    """
+    Liste les sequences a proposer dans le menu de selection URL (voir
+    home.py), en ne proposant qu'UN SEUL des deux noms d'une paire FID/NON
+    FID (ou LOYAL/NON LOYAL) "soeur" au sein de l'onglet UTM (voir
+    find_sibling_url_section) - la seconde est fusionnee automatiquement
+    des qu'on teste la premiere (voir load_sibling_url_section dans
+    qa.engine), la proposer separement ferait croire a 2 tests distincts
+    pour ce qui est en realite le meme HTML.
+
+    Retourne une liste de tuples (section_name, display_label), dans le
+    meme ordre que list_url_sequences (liste vide si l'onglet UTM ne
+    comporte pas de decoupage en sequences - meme cas que list_url_sequences).
+    """
+    all_sections = list_url_sequences(excel_file)
+
+    choices = []
+    hidden_siblings = set()
+    for section in all_sections:
+        if section in hidden_siblings:
+            continue
+
+        sibling = find_sibling_url_section(excel_file, section)
+        if sibling and sibling in all_sections:
+            hidden_siblings.add(sibling)
+            choices.append((section, f"{section} (regroupé avec {sibling})"))
+        else:
+            choices.append((section, section))
+
+    return choices

@@ -12,7 +12,7 @@ from qa.combined_report import build_combined_report
 from qa.diagnostics import find_duplicate_components, find_unused_excel_classes, find_wrong_language_wordings
 from qa.engine import run_qa, run_qa_for_sequence
 from qa.excel_loader import (
-    list_url_sequences,
+    list_url_sequence_choices,
     list_wording_sheet_choices,
     load_excel_urls,
     load_excel_wordings,
@@ -641,18 +641,21 @@ if batch_mode and mode == "Wording + URL":
         wording_sheet_names = [name for name, _ in wording_sheet_choices]
         wording_sheet_labels = dict(wording_sheet_choices)
 
-        url_sequence_options = []
+        url_sequence_choices = []
         url_tab_ok = False
         try:
-            url_sequence_options = list_url_sequences(excel_path)
+            url_sequence_choices = list_url_sequence_choices(excel_path)
             url_tab_ok = True
         except ValueError as e:
             st.error(f"❌ {e}")
 
+        url_sequence_names = [name for name, _ in url_sequence_choices]
+        url_sequence_labels = dict(url_sequence_choices)
+
         if wording_sheet_names and url_tab_ok:
             st.write("**Associe chaque fichier HTML à sa séquence Wording et à sa séquence URL :**")
 
-            if not url_sequence_options:
+            if not url_sequence_names:
                 st.caption(
                     "ℹ️ L'onglet UTM ne regroupe qu'une seule séquence — la séquence Wording "
                     "est réutilisée automatiquement côté URL, aucun choix supplémentaire n'est nécessaire."
@@ -668,10 +671,11 @@ if batch_mode and mode == "Wording + URL":
                         key=f"wseq_{f.name}"
                     )
                 with col_b:
-                    if url_sequence_options:
+                    if url_sequence_names:
                         u_choice = st.selectbox(
                             f"Séquence URL pour **{f.name}**",
-                            [NO_SELECTION] + url_sequence_options,
+                            [NO_SELECTION] + url_sequence_names,
+                            format_func=lambda x: url_sequence_labels.get(x, x),
                             key=f"useq_{f.name}"
                         )
                     else:
@@ -698,7 +702,9 @@ elif batch_mode:
                 sequence_options = [name for name, _ in sequence_choices]
                 sequence_labels = dict(sequence_choices)
             else:
-                sequence_options = list_url_sequences(excel_path)
+                sequence_choices = list_url_sequence_choices(excel_path)
+                sequence_options = [name for name, _ in sequence_choices]
+                sequence_labels = dict(sequence_choices)
                 if not sequence_options:
                     st.warning(
                         "⚠️ Aucune séquence détectée dans l'onglet UTM — le mode multi-séquences "
@@ -754,10 +760,13 @@ else:
 
     if test_url:
         sequence_options = []
+        sequence_labels = {}
         excel_read_ok = False
         if excel_path:
             try:
-                sequence_options = list_url_sequences(excel_path)
+                sequence_choices = list_url_sequence_choices(excel_path)
+                sequence_options = [name for name, _ in sequence_choices]
+                sequence_labels = dict(sequence_choices)
                 excel_read_ok = True
             except ValueError as e:
                 st.error(f"❌ {e}")
@@ -765,7 +774,11 @@ else:
         if sequence_options:
             # L'onglet UTM regroupe plusieurs sequences empilees : il faut
             # choisir laquelle tester.
-            url_keyword = st.selectbox("Séquence (onglet UTM)", [NO_SELECTION] + sequence_options)
+            url_keyword = st.selectbox(
+                "Séquence (onglet UTM)",
+                [NO_SELECTION] + sequence_options,
+                format_func=lambda x: sequence_labels.get(x, x)
+            )
             if url_keyword == NO_SELECTION:
                 url_keyword = ""
             url_ready = bool(url_keyword)
@@ -884,7 +897,7 @@ if excel_path and not batch_mode and not missing_keyword:
 
             if test_url:
                 try:
-                    diag_sheet, diag_urls = load_excel_urls(excel_path, url_keyword)
+                    diag_sheet, _, diag_urls = load_excel_urls(excel_path, url_keyword)
                     st.success(
                         f"✅ Onglet UTM trouvé : **{diag_sheet}** — "
                         f"{len(diag_urls)} URL(s) de référence pour cette séquence"
