@@ -187,6 +187,16 @@ def extract_texts_from_textcontribution(soup: BeautifulSoup, title_to_component:
 
 
             component_class = find_component_class(el)
+            if component_class is None:
+                # Aucun ancetre audit-component : el est peut-etre a
+                # l'interieur d'un titre generique (audit-generique-title),
+                # dont le composant se resout via la sequence DOM plutot
+                # qu'une classe directe (voir build_title_to_component_map).
+                # Fait ici, AVANT d'ajouter le texte a `seen`, sinon la
+                # boucle "Traitement des audit-generique-title" plus bas
+                # trouverait ce texte deja vu et ne le retraiterait jamais -
+                # le laissant resolu a None pour toujours.
+                component_class = find_generic_title_class(el, title_to_component)
 
 
             # Ignore les liens individuels des mentions legales/footer : leur
@@ -238,7 +248,7 @@ def extract_texts_from_textcontribution(soup: BeautifulSoup, title_to_component:
                 "text": block_text,
                 "tag": "div",
                 "type": "Text",
-                "component_class": find_component_class(block)
+                "component_class": find_component_class(block) or find_generic_title_class(block, title_to_component)
             }
             results.append(item)
             seen.add(block_text)
@@ -247,7 +257,20 @@ def extract_texts_from_textcontribution(soup: BeautifulSoup, title_to_component:
     titles = soup.find_all(class_="audit-generique-title")
 
     for title_tag in titles:
-        for el in title_tag.find_all(True):  # h1, h2, span, etc. à l'intérieur
+        # Cas standard : le titre est un wrapper (div, td, ...) contenant un
+        # ou plusieurs h1/h2/span/etc. Cas leaf : la classe
+        # audit-generique-title est posee directement sur le tag de texte
+        # (ex. <h2 class="audit-generique-title">...</h2>, sans wrapper) -
+        # title_tag.find_all(True) ne renvoie alors AUCUN descendant (il ne
+        # s'inclut jamais lui-meme), et ce titre ne serait jamais traite.
+        # On retombe sur title_tag lui-meme dans ce cas.
+        descendants = [
+            el for el in title_tag.find_all(True)
+            if el.name.lower() in {"h1", "h2", "h3", "p", "span", "b", "strong"}
+        ]
+        candidates = descendants if descendants else [title_tag]
+
+        for el in candidates:
             if el.name.lower() not in {"h1", "h2", "h3", "p", "span", "b", "strong"}:
                 continue
 
@@ -336,6 +359,29 @@ def find_component_class(tag):
             for c in classes:
                 if c.startswith("audit-component"):
                     return c
+        parent = parent.parent
+
+    return None
+
+
+def find_generic_title_class(tag, title_to_component: dict):
+    """
+    Remonte dans les parents (comme find_component_class) a la recherche
+    d'un ancetre - ou tag lui-meme - portant la classe audit-generique-title,
+    puis resout sa classe composant via title_to_component (voir
+    build_title_to_component_map). La cle utilisee est le texte COMPLET de
+    cet ancetre (get_text sur l'element qui porte la classe), exactement
+    comme la map a ete construite - jamais le texte partiel d'un descendant
+    isole, qui ne correspondrait a aucune entree de la map.
+    """
+    parent = tag
+
+    while parent:
+        if hasattr(parent, "attrs"):
+            classes = parent.get("class", [])
+            if "audit-generique-title" in classes:
+                text_norm = normalize(parent.get_text(" ", strip=True))
+                return title_to_component.get(text_norm)
         parent = parent.parent
 
     return None

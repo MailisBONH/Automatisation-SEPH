@@ -1,6 +1,6 @@
 from bs4 import BeautifulSoup
 
-from qa.html_extraction import extract_texts_from_textcontribution
+from qa.html_extraction import build_title_to_component_map, extract_texts_from_textcontribution
 
 
 def _extract(html):
@@ -9,6 +9,15 @@ def _extract(html):
     # <p> imbrique dans un <p>) comme le ferait un vrai navigateur/lxml.
     soup = BeautifulSoup(html, "lxml")
     return extract_texts_from_textcontribution(soup, {})
+
+
+def _extract_with_titles(html):
+    # Pipeline complet (voir qa.html_extraction.load_and_extract_html_texts) :
+    # la map titre -> composant doit etre construite AVANT l'extraction pour
+    # que la resolution des titres generiques fonctionne.
+    soup = BeautifulSoup(html, "lxml")
+    title_to_component = build_title_to_component_map(soup)
+    return extract_texts_from_textcontribution(soup, title_to_component)
 
 
 def _texts(html):
@@ -99,3 +108,79 @@ class TestExtractTextsFromTextcontribution:
         )
         items = _extract(html)
         assert items[0]["component_class"] == "audit-component-loyalty"
+
+
+class TestGenericTitleClassResolution:
+    """
+    Regression : un titre generique (class="audit-generique-title") n'a pas
+    d'ancetre audit-component - c'est justement pour ca qu'il a besoin de la
+    resolution via title_to_component (voir build_title_to_component_map).
+    Deux bugs empechaient cette resolution de fonctionner en pratique.
+    """
+
+    def test_title_inside_text_contribution_is_resolved_before_being_marked_seen(self):
+        # Bug 1 : le titre est nested dans un wrapper audit-generique-title,
+        # lui-meme nested dans un bloc text-contribution. La boucle
+        # principale (find_component_class, aucun ancetre audit-component)
+        # le capturait avec component_class=None ET l'ajoutait a `seen`
+        # AVANT que la boucle specialisee (plus bas, qui sait resoudre via
+        # title_to_component) n'ait la moindre chance de le retraiter - donc
+        # le texte "deja vu" restait bloque a None pour toujours.
+        html = (
+            '<div class="text-contribution">'
+            '<div class="audit-generique-title"><h2>Découvrez vos avantages</h2></div>'
+            '<div class="audit-component-program-benefit"><p>Profitez de vos points</p></div>'
+            "</div>"
+        )
+        items = _extract_with_titles(html)
+
+        title_item = next(i for i in items if i["text"] == "Découvrez vos avantages")
+        assert title_item["component_class"] == "audit-component-program-benefit"
+
+    def test_title_class_on_leaf_tag_without_wrapper_is_still_resolved(self):
+        # Bug 2 : la classe audit-generique-title posee directement sur le
+        # tag de texte (pas de wrapper autour) - title_tag.find_all(True)
+        # dans la boucle specialisee ne renvoie alors AUCUN descendant (il
+        # ne s'inclut jamais lui-meme), donc ce titre n'etait jamais traite
+        # du tout.
+        html = (
+            '<div class="text-contribution">'
+            '<h2 class="audit-generique-title">Découvrez vos avantages</h2>'
+            '<div class="audit-component-program-benefit"><p>Profitez de vos points</p></div>'
+            "</div>"
+        )
+        items = _extract_with_titles(html)
+
+        title_item = next(i for i in items if i["text"] == "Découvrez vos avantages")
+        assert title_item["component_class"] == "audit-component-program-benefit"
+
+    def test_title_followed_by_another_title_belongs_to_preceding_component(self):
+        # Regle documentee de build_title_to_component_map : un titre suivi
+        # d'un autre titre (pas d'un composant) appartient au composant
+        # PRECEDENT dans la sequence DOM.
+        html = (
+            '<div class="text-contribution">'
+            '<div class="audit-component-loyalty"><p>Vos points</p></div>'
+            '<div class="audit-generique-title"><h2>Premier titre</h2></div>'
+            '<div class="audit-generique-title"><h2>Second titre</h2></div>'
+            "</div>"
+        )
+        items = _extract_with_titles(html)
+
+        first = next(i for i in items if i["text"] == "Premier titre")
+        second = next(i for i in items if i["text"] == "Second titre")
+        assert first["component_class"] == "audit-component-loyalty"
+        assert second["component_class"] == "audit-component-loyalty"
+
+    def test_title_with_no_component_anywhere_in_sequence_stays_unresolved(self):
+        # Aucun audit-component ni avant ni apres dans tout le document :
+        # rien a resoudre, component_class doit rester None (et non planter).
+        html = (
+            '<div class="text-contribution">'
+            '<div class="audit-generique-title"><h2>Titre isole</h2></div>'
+            "</div>"
+        )
+        items = _extract_with_titles(html)
+
+        title_item = next(i for i in items if i["text"] == "Titre isole")
+        assert title_item["component_class"] is None

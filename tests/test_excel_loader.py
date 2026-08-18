@@ -5,6 +5,9 @@ from qa.excel_loader import (
     find_column,
     find_sheet,
     find_sibling_sequence_sheet,
+    list_wording_sheet_choices,
+    load_excel_wordings,
+    load_generic_wordings,
     load_sibling_sequence_wordings,
 )
 
@@ -141,3 +144,73 @@ class TestLoadSiblingSequenceWordings:
         assert len(wordings) == 1
         assert wordings[0]["Wording"] == "Dir fehlen noch 2 Punkte"
         assert wordings[0]["Technical"] == "audit-component-loyalty"
+
+    def test_sibling_wordings_carry_the_sibling_sheet_name(self, tmp_path):
+        # Regression : le rapport doit pouvoir indiquer que ce wording vient
+        # de l'onglet frere fusionne, pas de l'onglet sequence teste.
+        path = make_wording_workbook(tmp_path, {
+            "SEQ 1 NON LOYAL": [["Loyalty", "Text", "Dir fehlt noch 1 Punkt", "audit-component-loyalty"]],
+            "SEQ 1 LOYAL": [["Loyalty", "Text", "Dir fehlen noch 2 Punkte", "audit-component-loyalty"]],
+        })
+        _, wordings = load_sibling_sequence_wordings(path, "SEQ 1 NON LOYAL")
+        assert wordings[0]["Sheet"] == "SEQ 1 LOYAL"
+
+
+class TestWordingsCarrySourceSheet:
+    def test_load_excel_wordings_tags_each_row_with_its_own_sheet(self, tmp_path):
+        path = make_wording_workbook(tmp_path, {
+            "SEQ 1 NON LOYAL": [["Header", "Title", "Hallo", "audit-component-header"]],
+        })
+        sheet, wordings = load_excel_wordings(path, "NON LOYAL")
+        assert sheet == "SEQ 1 NON LOYAL"
+        assert wordings[0]["Sheet"] == "SEQ 1 NON LOYAL"
+
+    def test_load_generic_wordings_tags_each_row_with_the_generic_sheet(self, tmp_path):
+        path = make_wording_workbook(tmp_path, {
+            "GENERIC": [["Footer", "Text", "Mentions légales", "audit-component-footer"]],
+        })
+        sheet, wordings = load_generic_wordings(path)
+        assert sheet == "GENERIC"
+        assert wordings[0]["Sheet"] == "GENERIC"
+
+
+class TestListWordingSheetChoices:
+    """
+    Le menu de selection d'une sequence Wording (home.py) ne doit jamais
+    proposer l'onglet UTM (dedie a la QA URL) ni l'onglet GENERIC (toujours
+    fusionne automatiquement), et ne doit proposer qu'UN SEUL onglet d'une
+    paire FID/NON FID (ou LOYAL/NON LOYAL) "frere" puisque l'autre est
+    fusionne automatiquement des qu'on teste le premier.
+    """
+
+    def test_excludes_url_and_generic_sheets(self, tmp_path):
+        path = make_wording_workbook(tmp_path, {
+            "SEQ 1": [["Header", "Title", "Hallo", "audit-component-header"]],
+            "GENERIC": [["Footer", "Text", "Mentions légales", "audit-component-footer"]],
+        })
+        # Ajoute un onglet UTM (structure differente, sans importance ici -
+        # seul le nom compte pour le filtrage).
+        with pd.ExcelWriter(path, mode="a", engine="openpyxl") as writer:
+            pd.DataFrame({"a": [1]}).to_excel(writer, sheet_name="UTM TRACKING", index=False)
+
+        choices = list_wording_sheet_choices(path)
+        names = [name for name, _ in choices]
+        assert names == ["SEQ 1"]
+
+    def test_merges_loyal_non_loyal_pair_into_a_single_labeled_choice(self, tmp_path):
+        path = make_wording_workbook(tmp_path, {
+            "SEQ 1 NON LOYAL": [["Header", "Title", "Hallo", "audit-component-header"]],
+            "SEQ 1 LOYAL": [["Header", "Title", "Hallo", "audit-component-header"]],
+        })
+        choices = list_wording_sheet_choices(path)
+
+        assert len(choices) == 1
+        name, label = choices[0]
+        assert name == "SEQ 1 NON LOYAL"
+        assert "SEQ 1 LOYAL" in label
+
+    def test_sheet_without_sibling_is_listed_with_its_own_name_as_label(self, tmp_path):
+        path = make_wording_workbook(tmp_path, {
+            "SEQ 1": [["Header", "Title", "Hallo", "audit-component-header"]],
+        })
+        assert list_wording_sheet_choices(path) == [("SEQ 1", "SEQ 1")]

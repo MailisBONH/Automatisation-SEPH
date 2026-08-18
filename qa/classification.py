@@ -17,8 +17,6 @@ import pandas as pd
 from qa.config import (
     DOMAIN_TO_COUNTRY,
     LANGUAGE_TO_COUNTRY,
-    LOYAL_KEYWORDS as _LOYAL_KEYWORDS,
-    NON_LOYAL_KEYWORDS as _NON_LOYAL_KEYWORDS,
     SEQ_NUMBER_PATTERN as _SEQ_NUMBER_RE,
     WORDING_COLUMN_NAME,
 )
@@ -28,19 +26,27 @@ from qa.history import build_history_tree
 
 def normalize_sequence_name(name: str) -> str:
     """
-    Canonicalise un nom de sequence pour que la MEME sequence testee en
-    wording (onglet Excel, vocabulaire "LOYAL"/"NON LOYAL") et en url
-    (section de l'onglet UTM, vocabulaire "FID"/"NON FID" - fidelite) soit
-    rangee dans le meme dossier d'historique plutot que deux dossiers
-    distincts (ex: "SEQ 1 NON FID" et "SEQ 1 NON LOYAL" -> tous deux
-    "SEQ 1 NON LOYAL"). Le texte additionnel autour (ex: "SEQ 4 WELCOME
-    BACK NON LOYAL") n'affecte pas le resultat, seuls le numero de sequence
-    et le statut fidelite/loyal comptent.
+    Canonicalise un nom de sequence pour que la MEME sequence soit toujours
+    rangee dans le meme dossier d'historique, quel que soit l'onglet/vocabulaire
+    d'origine :
+    - wording (onglet Excel, vocabulaire "LOYAL"/"NON LOYAL") et url (section
+      de l'onglet UTM, vocabulaire "FID"/"NON FID" - fidelite) pour la MEME
+      sequence numerotee ;
+    - LOYAL et NON LOYAL (ou FID et NON FID) entre eux : ce sont les 2
+      wordings/audiences possibles d'un seul et meme template HTML, qui
+      bascule de l'un a l'autre via une condition AEM selon le destinataire
+      (voir qa.excel_loader.find_sibling_sequence_sheet - le moteur QA les
+      fusionne deja systematiquement avant le matching, cote wording). Les
+      archiver separement dupliquerait a tort l'historique d'une seule et
+      meme sequence testee.
 
-    Si aucun numero de sequence n'est trouve, ou si aucun mot-cle
-    fidelite/loyal n'est present, retourne le nom d'origine (nettoye des
-    espaces) sans le modifier davantage : mieux vaut ne pas fusionner que
-    fusionner a tort.
+    Ex: "SEQ 1 NON FID", "SEQ 1 NON LOYAL", "SEQ 1 LOYAL", "SEQ 1 FID" ->
+    tous "SEQ 1". Le texte additionnel autour (ex: "SEQ 4 WELCOME BACK NON
+    LOYAL") n'affecte pas le resultat, seul le numero de sequence compte.
+
+    Si aucun numero de sequence n'est trouve, retourne le nom d'origine
+    (nettoye des espaces) sans le modifier davantage : mieux vaut ne pas
+    fusionner que fusionner a tort.
     """
     if not name:
         return name
@@ -51,13 +57,7 @@ def normalize_sequence_name(name: str) -> str:
     if not match:
         return str(name).strip()
 
-    seq_label = f"SEQ {int(match.group(1))}"
-
-    if any(kw in upper for kw in _NON_LOYAL_KEYWORDS):
-        return f"{seq_label} NON LOYAL"
-    if any(kw in upper for kw in _LOYAL_KEYWORDS):
-        return f"{seq_label} LOYAL"
-    return seq_label
+    return f"SEQ {int(match.group(1))}"
 
 
 def resolve_sequence_alias(country: str, trigger: str, sequence: str) -> str:

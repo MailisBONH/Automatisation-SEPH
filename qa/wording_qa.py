@@ -5,6 +5,7 @@ from qa.config import (
     SIM_CLOSEST_MATCH_MIN,
     SIM_SHARED_BRANCH_EXACT,
     KO_WRONG_COMPONENT,
+    KO_COMPONENT_CLASS_NOT_FOUND,
     KO_WORDING_MISMATCH,
     KO_WORDING_RELOCATED,
     KO_UNEXPECTED_WORDING,
@@ -67,8 +68,9 @@ def _unexpected_wording_row(h_text: str, expected_class, found_class, html_order
     return {
         "Component Name": "",
         "Element": "",
+        "Source Sheet": "",
         "Expected Class": expected_class or "",
-        "HTML Class": found_class or "",
+        "HTML Class": found_class or "none",
         "Excel Wording": "",
         "HTML Wording": clean_display_text(h_text),
         "Status": "KO",
@@ -139,7 +141,15 @@ def run_wording_qa(html_texts, excel_wordings):
         split = find_split_match(item, excel_wordings, matched_excel_counts)
         if split:
             idx, status, error, sim = split
-            row = make_row(excel_wordings[idx], item, h_text, "OK", "", sim, "Split (HTML ⊂ Excel)")
+            # find_split_match ne verifie la classe technique que si les DEUX
+            # cotes en ont une connue (voir sa docstring) : si le HTML n'a
+            # aucune classe detectee, on ne peut pas confirmer le composant,
+            # donc pas de OK sans preuve - meme logique que le closest-match
+            # ci-dessous.
+            if found_class:
+                row = make_row(excel_wordings[idx], item, h_text, "OK", "", sim, "Split (HTML ⊂ Excel)")
+            else:
+                row = make_row(excel_wordings[idx], item, h_text, "KO", KO_COMPONENT_CLASS_NOT_FOUND, sim, "Split (HTML ⊂ Excel)")
             row["_html_order"] = i
             results.append(row)
             i += 1
@@ -206,6 +216,13 @@ def run_wording_qa(html_texts, excel_wordings):
                 status = "KO"
                 error_type = KO_WRONG_COMPONENT
 
+            elif not found_class:
+                # Aucune classe audit-component detectee sur l'element HTML :
+                # impossible de confirmer que le texte est dans le bon
+                # composant, meme si la similarite textuelle est excellente.
+                status = "KO"
+                error_type = KO_COMPONENT_CLASS_NOT_FOUND
+
             elif c_sim >= SIM_CLOSEST_MATCH_ACCEPT:
                 status = "OK"
                 error_type = ""
@@ -224,8 +241,9 @@ def run_wording_qa(html_texts, excel_wordings):
             results.append({
                 "Component Name": ex_closest["Component"],
                 "Element": ex_closest["Element"],
+                "Source Sheet": ex_closest.get("Sheet", ""),
                 "Expected Class": expected_class,
-                "HTML Class": found_class,
+                "HTML Class": found_class or "none",
                 "Excel Wording": clean_display_text(ex_closest["Wording"], h_text),
                 "HTML Wording": clean_display_text(h_text, ex_closest["Wording"]),
                 "Status": status,
@@ -274,16 +292,40 @@ def run_wording_qa(html_texts, excel_wordings):
                 # ecart sur CETTE branche precise, qui ne doit pas etre
                 # masque juste parce qu'une branche soeur a bien matche.
                 #
-                # Comme pour KO_WRONG_COMPONENT plus haut : si la classe HTML
-                # n'a pas ete detectee (ex. titre generique non resolu), on
-                # ne peut pas exiger qu'elle corresponde - le seuil de
-                # similarite quasi-parfait suffit deja a exclure les faux
-                # positifs (une coincidence a >=99.5% de similarite est
-                # extremement improbable).
+                # Si la classe HTML n'a pas ete detectee (ex. titre generique
+                # non resolu), on ne peut plus se contenter du seuil de
+                # similarite quasi-parfait pour valider en OK : on ne peut
+                # pas confirmer le composant, donc c'est un KO explicite
+                # (KO_COMPONENT_CLASS_NOT_FOUND) plutot qu'une hypothese
+                # optimiste. Comme pour KO_WRONG_COMPONENT plus haut, un
+                # KO_WRONG_COMPONENT reste pose plus loin (bloc else) quand
+                # les deux classes sont connues mais differentes.
                 expected_class = ex.get("Technical")
                 found_class = closest_item.get("component_class")
                 class_known = bool(expected_class) and bool(found_class)
-                same_class = (not class_known) or expected_class == found_class
+                same_class = class_known and expected_class == found_class
+
+                if (
+                    not found_class
+                    and best_h_sim >= SIM_SHARED_BRANCH_EXACT
+                    and (excel_display, html_display) not in ko_pairs
+                ):
+                    results.append({
+                        "Component Name": ex["Component"],
+                        "Element": ex["Element"],
+                        "Source Sheet": ex.get("Sheet", ""),
+                        "Expected Class": ex.get("Technical"),
+                        "HTML Class": "none",
+                        "Excel Wording": excel_display,
+                        "HTML Wording": html_display,
+                        "Status": "KO",
+                        "Error Type": KO_COMPONENT_CLASS_NOT_FOUND,
+                        "Similarity": f"{round(best_h_sim * 100)}%",
+                        "Criticality": criticality_for(KO_COMPONENT_CLASS_NOT_FOUND),
+                        "Match Type": "Shared conditional branch",
+                        "_html_order": best_h_idx
+                    })
+                    continue
 
                 if (
                     same_class
@@ -293,8 +335,9 @@ def run_wording_qa(html_texts, excel_wordings):
                     results.append({
                         "Component Name": ex["Component"],
                         "Element": ex["Element"],
+                        "Source Sheet": ex.get("Sheet", ""),
                         "Expected Class": ex.get("Technical"),
-                        "HTML Class": closest_item.get("component_class"),
+                        "HTML Class": found_class or "none",
                         "Excel Wording": excel_display,
                         "HTML Wording": html_display,
                         "Status": "OK",
@@ -309,8 +352,9 @@ def run_wording_qa(html_texts, excel_wordings):
                 results.append({
                     "Component Name": ex["Component"],
                     "Element": ex["Element"],
+                    "Source Sheet": ex.get("Sheet", ""),
                     "Expected Class": ex.get("Technical"),
-                    "HTML Class": closest_item.get("component_class"),
+                    "HTML Class": found_class or "none",
                     "Excel Wording": excel_display,
                     "HTML Wording": html_display,
                     "Status": "KO",
@@ -324,8 +368,9 @@ def run_wording_qa(html_texts, excel_wordings):
                 results.append({
                     "Component Name": ex["Component"],
                     "Element": ex["Element"],
+                    "Source Sheet": ex.get("Sheet", ""),
                     "Expected Class": ex.get("Technical"),
-                    "HTML Class": "",
+                    "HTML Class": "none",
                     "Excel Wording": clean_display_text(ex["Wording"]),
                     "HTML Wording": "",
                     "Status": "KO",
@@ -360,13 +405,6 @@ def run_wording_qa(html_texts, excel_wordings):
 
     total = len(results)
     ok = sum(1 for r in results if r["Status"] == "OK")
-
-
-    for r in results:
-        for idx, count in matched_excel_counts.items():
-            if r["Excel Wording"] == excel_wordings[idx]["Wording"]:
-                r["Occurrences"] = count
-
 
     print("\n" + "=" * 70)
     print(f"✅ Total: {total} | OK: {ok} | KO: {total-ok} | "

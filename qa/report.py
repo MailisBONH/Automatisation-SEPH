@@ -113,7 +113,7 @@ def build_rich_diff(text1, text2):
 
 
 BASE_COLUMNS = [
-    "Component Name", "Element", "Expected Class", "HTML Class",
+    "Component Name", "Element", "Source Sheet", "Expected Class", "HTML Class",
     "Excel Wording", "HTML Wording",
     "Status", "Error Type", "Similarity", "Criticality",
     "Match Type"

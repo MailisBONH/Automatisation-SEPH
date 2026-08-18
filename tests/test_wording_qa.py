@@ -1,3 +1,4 @@
+from qa.config import KO_COMPONENT_CLASS_NOT_FOUND
 from qa.text_utils import expand_conditional_variants, normalize, normalize_currency
 from qa.wording_qa import _drop_ko_covered_by_ok, run_wording_qa
 
@@ -84,16 +85,19 @@ class TestFinalDedupCoversOkRows:
         # Excel (par design, pour laisser d'autres fragments la matcher
         # aussi). Si personne d'autre ne la reclame, elle est ensuite
         # retrouvee "non couverte" en fin de pipeline et repromue via le
-        # fallback (Shared conditional branch), produisant une 2e ligne OK
-        # identique pour le meme texte - frequent quand la classe technique
-        # n'est connue ni cote Excel ni cote HTML (technical=None).
+        # fallback (Shared conditional branch), ce qui pourrait produire une
+        # 2e ligne identique pour le meme texte - frequent quand la classe
+        # technique n'est connue ni cote Excel ni cote HTML (technical=None).
+        # Classe HTML inconnue -> KO_COMPONENT_CLASS_NOT_FOUND (pas d'OK sans
+        # preuve de classe), et une seule ligne, pas un doublon.
         excel_wordings = [excel_row("Twoje punkty", technical=None)]
         html_texts = [html_item("Twoje punkty", component_class=None)]
 
         results = run_wording_qa(html_texts, excel_wordings)
 
-        ok_rows = [r for r in results if r["Status"] == "OK"]
-        assert len(ok_rows) == 1
+        assert len(results) == 1
+        assert results[0]["Status"] == "KO"
+        assert results[0]["Error Type"] == KO_COMPONENT_CLASS_NOT_FOUND
 
 
 class TestLowQualityBestEffortIsHonestlyUnexpectedWording:
@@ -306,12 +310,15 @@ class TestUnknownHtmlClassIsNotTreatedAsWrongComponent:
     Regression : un element HTML dont la classe technique n'a pas pu etre
     detectee (ex. un titre generique dont la resolution via
     title_to_component a echoue - component_class=None) ne doit pas etre
-    signale "Wording in wrong component" juste parce que None != la classe
-    Excel attendue. On ne sait pas que le composant est faux, on sait juste
-    que sa classe est inconnue - autant juger sur la similarite du texte.
+    signale "Wording in wrong component" (ni "Wording relocated") juste
+    parce que None != la classe Excel attendue - on ne sait pas que le
+    composant est faux, on sait juste que sa classe est inconnue. Mais on ne
+    peut pas non plus le confirmer OK sans preuve : ce cas doit ressortir en
+    KO dedie (KO_COMPONENT_CLASS_NOT_FOUND), meme quand le texte matche
+    parfaitement.
     """
 
-    def test_perfect_text_match_with_unknown_html_class_is_ok(self):
+    def test_perfect_text_match_with_unknown_html_class_is_ko_component_not_found(self):
         html_texts = [html_item("Korzyści programu", component_class=None)]
         excel_wordings = [excel_row("Korzyści programu", technical="audit-component-program-benefit")]
 
@@ -320,9 +327,12 @@ class TestUnknownHtmlClassIsNotTreatedAsWrongComponent:
         # find_split_match ne "consomme" pas la cellule Excel (par design,
         # voir son docstring), donc ce meme texte identique peut aussi etre
         # re-matche via le fallback "Excel non couverts" ; peu importe le
-        # nombre exact de lignes produites, aucune ne doit etre un faux KO.
+        # nombre exact de lignes produites, toutes doivent porter le meme
+        # KO dedie a la classe manquante, jamais "wrong component"/"relocated".
         assert results
-        assert all(r["Status"] == "OK" for r in results)
+        assert all(r["Status"] == "KO" for r in results)
+        assert all(r["Error Type"] == KO_COMPONENT_CLASS_NOT_FOUND for r in results)
+        assert all(r["HTML Class"] == "none" for r in results)
 
     def test_real_mismatch_with_unknown_html_class_still_ko_as_mismatch_not_wrong_component(self):
         # Classe inconnue -> pas de "wrong component", mais un texte vraiment
@@ -353,14 +363,16 @@ class TestUnknownHtmlClassIsNotTreatedAsWrongComponent:
         assert results
         assert all(r["Status"] == "KO" for r in results)
 
-    def test_duplicate_wording_across_merged_sheets_with_unknown_class_is_never_a_false_ko(self):
+    def test_duplicate_wording_across_merged_sheets_with_unknown_class_is_ko_component_not_found(self):
         # Cas reel : meme wording present a l'identique dans l'onglet
         # sequence et l'onglet frere LOYAL/NON LOYAL fusionne (voir
         # qa.excel_loader.find_sibling_sequence_sheet), et l'element HTML
         # n'a pas de classe detectee. Un texte identique cote Excel et cote
-        # HTML ne doit jamais ressortir en KO ("wrong component" ou
-        # "wording relocated"), peu importe combien de lignes Excel
-        # identiques y pointent.
+        # HTML ne doit jamais ressortir en "wrong component"/"wording
+        # relocated" (des faux-negatifs precis, differents de la classe
+        # simplement inconnue), et ne doit pas etre duplique - mais doit
+        # bien rester KO_COMPONENT_CLASS_NOT_FOUND, peu importe combien de
+        # lignes Excel identiques y pointent.
         html_texts = [html_item("Korzyści programu", component_class=None)]
         excel_wordings = [
             excel_row("Korzyści programu", technical="audit-component-program-benefit"),
@@ -370,7 +382,8 @@ class TestUnknownHtmlClassIsNotTreatedAsWrongComponent:
         results = run_wording_qa(html_texts, excel_wordings)
 
         assert results
-        assert all(r["Status"] == "OK" for r in results)
+        assert all(r["Status"] == "KO" for r in results)
+        assert all(r["Error Type"] == KO_COMPONENT_CLASS_NOT_FOUND for r in results)
 
 
 class TestBasicWordingQa:

@@ -68,24 +68,26 @@ def _make_combined_xlsx(tmp_path):
 
 class TestNormalizeSequenceName:
     @pytest.mark.parametrize("raw,expected", [
-        ("SEQ 1 NON FID", "SEQ 1 NON LOYAL"),
-        ("SEQ 1 NON LOYAL", "SEQ 1 NON LOYAL"),
-        ("SEQ 1 FID", "SEQ 1 LOYAL"),
-        ("SEQ 1 LOYAL", "SEQ 1 LOYAL"),
-        ("SEQ 4 NON FID", "SEQ 4 NON LOYAL"),
-        ("SEQ 4 WELCOME BACK NON LOYAL", "SEQ 4 NON LOYAL"),
-        ("SEQ 4 FID", "SEQ 4 LOYAL"),
-        ("SEQ 4 WELCOME BACK LOYAL", "SEQ 4 LOYAL"),
-        ("seq 04 loyal", "SEQ 4 LOYAL"),
+        ("SEQ 1 NON FID", "SEQ 1"),
+        ("SEQ 1 NON LOYAL", "SEQ 1"),
+        ("SEQ 1 FID", "SEQ 1"),
+        ("SEQ 1 LOYAL", "SEQ 1"),
+        ("SEQ 4 NON FID", "SEQ 4"),
+        ("SEQ 4 WELCOME BACK NON LOYAL", "SEQ 4"),
+        ("SEQ 4 FID", "SEQ 4"),
+        ("SEQ 4 WELCOME BACK LOYAL", "SEQ 4"),
+        ("seq 04 loyal", "SEQ 4"),
+        ("SEQ 2", "SEQ 2"),
     ])
-    def test_reconciles_fid_and_loyal_vocabulary(self, raw, expected):
+    def test_merges_fid_loyal_vocabulary_and_audience_variants_into_one_bare_sequence(self, raw, expected):
+        # LOYAL/NON LOYAL (et FID/NON FID) sont les 2 wordings possibles d'un
+        # seul et meme template HTML (voir find_sibling_sequence_sheet, deja
+        # fusionnes cote moteur QA) : l'historique ne doit pas les eclater en
+        # deux sequences distinctes.
         assert normalize_sequence_name(raw) == expected
 
     def test_no_sequence_number_returned_unchanged(self):
         assert normalize_sequence_name("Footer generic block") == "Footer generic block"
-
-    def test_no_qualifier_returns_bare_seq_label(self):
-        assert normalize_sequence_name("SEQ 2") == "SEQ 2"
 
     def test_empty_or_none_passthrough(self):
         assert normalize_sequence_name("") == ""

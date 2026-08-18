@@ -391,8 +391,9 @@ def make_row(ex, html_item, html_text, status, error, sim, match_type):
     return {
         "Component Name": ex["Component"],
         "Element": ex["Element"],
+        "Source Sheet": ex.get("Sheet", ""),
         "Expected Class": expected_class,
-        "HTML Class": found_class,
+        "HTML Class": found_class or "none",
         "Excel Wording": clean_display_text(ex["Wording"], html_text),
         "HTML Wording": clean_display_text(html_text, ex["Wording"]),
         "Status": status,
@@ -400,5 +401,4 @@ def make_row(ex, html_item, html_text, status, error, sim, match_type):
         "Similarity": f"{round(sim, 2)}%",
         "Criticality": crit,
         "Match Type": match_type,
-        "Occurrences": ""  # placeholder
     }

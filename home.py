@@ -11,7 +11,13 @@ from qa.cleanup import cleanup_old_temp_files_throttled
 from qa.combined_report import build_combined_report
 from qa.diagnostics import find_duplicate_components, find_unused_excel_classes, find_wrong_language_wordings
 from qa.engine import run_qa, run_qa_for_sequence
-from qa.excel_loader import list_url_sequences, load_excel_urls, load_excel_wordings, load_generic_wordings
+from qa.excel_loader import (
+    list_url_sequences,
+    list_wording_sheet_choices,
+    load_excel_urls,
+    load_excel_wordings,
+    load_generic_wordings,
+)
 from qa.history import record_run
 from qa.html_extraction import load_and_extract_html_texts
 from qa.report import save_consolidated_report, save_report, sort_results_by_html_order
@@ -626,11 +632,14 @@ url_ready = True
 if batch_mode and mode == "Wording + URL":
 
     if excel_path and html_files:
-        wording_sheet_options = []
+        wording_sheet_choices = []
         try:
-            wording_sheet_options = pd.ExcelFile(excel_path).sheet_names
+            wording_sheet_choices = list_wording_sheet_choices(excel_path)
         except Exception as e:
             st.error(f"❌ Impossible de lire les onglets du fichier Excel : {e}")
+
+        wording_sheet_names = [name for name, _ in wording_sheet_choices]
+        wording_sheet_labels = dict(wording_sheet_choices)
 
         url_sequence_options = []
         url_tab_ok = False
@@ -640,7 +649,7 @@ if batch_mode and mode == "Wording + URL":
         except ValueError as e:
             st.error(f"❌ {e}")
 
-        if wording_sheet_options and url_tab_ok:
+        if wording_sheet_names and url_tab_ok:
             st.write("**Associe chaque fichier HTML à sa séquence Wording et à sa séquence URL :**")
 
             if not url_sequence_options:
@@ -654,7 +663,8 @@ if batch_mode and mode == "Wording + URL":
                 with col_a:
                     w_choice = st.selectbox(
                         f"Onglet Wording pour **{f.name}**",
-                        [NO_SELECTION] + wording_sheet_options,
+                        [NO_SELECTION] + wording_sheet_names,
+                        format_func=lambda x: wording_sheet_labels.get(x, x),
                         key=f"wseq_{f.name}"
                     )
                 with col_b:
@@ -681,9 +691,12 @@ elif batch_mode:
 
     if excel_path and html_files:
         sequence_options = []
+        sequence_labels = {}
         try:
             if mode == "Wording":
-                sequence_options = pd.ExcelFile(excel_path).sheet_names
+                sequence_choices = list_wording_sheet_choices(excel_path)
+                sequence_options = [name for name, _ in sequence_choices]
+                sequence_labels = dict(sequence_choices)
             else:
                 sequence_options = list_url_sequences(excel_path)
                 if not sequence_options:
@@ -700,6 +713,7 @@ elif batch_mode:
                 choice = st.selectbox(
                     f"Séquence pour **{f.name}**",
                     [NO_SELECTION] + sequence_options,
+                    format_func=lambda x: sequence_labels.get(x, x),
                     key=f"seq_choice_{f.name}"
                 )
                 if choice != NO_SELECTION:
@@ -717,15 +731,21 @@ else:
     url_ready = not test_url  # pas de test URL: rien a valider de ce cote
 
     if test_wording:
-        sheet_options = []
+        sheet_choices = []
         if excel_path:
             try:
-                sheet_options = pd.ExcelFile(excel_path).sheet_names
+                sheet_choices = list_wording_sheet_choices(excel_path)
             except Exception as e:
                 st.error(f"❌ Impossible de lire les onglets du fichier Excel : {e}")
 
-        if sheet_options:
-            wording_keyword = st.selectbox("Onglet Excel (campagne)", [NO_SELECTION] + sheet_options)
+        if sheet_choices:
+            sheet_names = [name for name, _ in sheet_choices]
+            sheet_labels = dict(sheet_choices)
+            wording_keyword = st.selectbox(
+                "Onglet Excel (campagne)",
+                [NO_SELECTION] + sheet_names,
+                format_func=lambda x: sheet_labels.get(x, x)
+            )
             if wording_keyword == NO_SELECTION:
                 wording_keyword = ""
         else:

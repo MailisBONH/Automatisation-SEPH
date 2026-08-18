@@ -22,7 +22,6 @@ def _make_url_row(expected_class, found_class, excel_url, found_href, status, er
         "Similarity": "100%" if found_href else "0%",
         "Criticality": criticality,
         "Match Type": match_type,
-        "Occurrences": "",
     }
 
 

@@ -94,10 +94,16 @@ def clean_excel_wording(text: str) -> str:
     return text.strip()
 
 
-def _parse_wording_rows(df: pd.DataFrame, wording_column: str) -> list:
+def _parse_wording_rows(df: pd.DataFrame, wording_column: str, sheet_label: str = "") -> list:
     """
     Lit les lignes wording d'un onglet (campagne ou generique) deja charge
-    avec header=1. Commun a load_excel_wordings() et load_generic_wordings().
+    avec header=1. Commun a load_excel_wordings(), load_sibling_sequence_wordings()
+    et load_generic_wordings().
+
+    sheet_label : nom de l'onglet source, propage sur chaque wording (cle
+    "Sheet") pour que le rapport final puisse indiquer d'ou vient chaque
+    ligne (onglet sequence testee, onglet frere FID/NON FID fusionne, ou
+    onglet generique) - voir qa.matching.make_row et qa.wording_qa.
     """
     wordings = []
     TECHNICAL_COLUMN = "TECHNICAL NAME"
@@ -148,6 +154,7 @@ def _parse_wording_rows(df: pd.DataFrame, wording_column: str) -> list:
             "curr": curr_variants[0],
             "norm_variants": norm_variants,
             "curr_variants": curr_variants,
+            "Sheet": sheet_label,
         })
 
     return wordings
@@ -163,7 +170,7 @@ def load_excel_wordings(excel_file: str, keyword: str) -> tuple:
 
     wording_column = find_column(df, WORDING_COLUMN_NAME)
 
-    return sheet, _parse_wording_rows(df, wording_column)
+    return sheet, _parse_wording_rows(df, wording_column, sheet_label=sheet)
 
 
 def _loyalty_status(sheet_name: str) -> str:
@@ -221,6 +228,53 @@ def find_sibling_sequence_sheet(excel_file: str, sheet_name: str) -> str:
     return None
 
 
+def list_wording_sheet_choices(excel_file: str) -> list:
+    """
+    Liste les onglets a proposer dans le menu de selection d'une sequence
+    Wording (voir home.py), en excluant ceux qui ne doivent jamais etre
+    choisis directement soi-meme dans ce menu :
+    - l'onglet UTM (URL_SHEET_KEYWORD) : dedie a la QA URL, jamais un onglet
+      de wording de sequence.
+    - l'onglet des composants generiques (GENERIC_SHEET_KEYWORD) : toujours
+      fusionne automatiquement avec la sequence testee via la case "composants
+      generiques" (voir load_generic_wordings), jamais teste seul.
+    - un seul des deux onglets d'une paire FID/NON FID (ou LOYAL/NON LOYAL)
+      "frere" (voir find_sibling_sequence_sheet) : le second est fusionne
+      automatiquement des qu'on teste le premier (voir
+      load_sibling_sequence_wordings) - le proposer separement ferait
+      croire a 2 tests distincts pour ce qui est en realite le meme HTML,
+      teste une seule fois avec les wordings des deux audiences reunis.
+
+    Retourne une liste de tuples (sheet_name, display_label) dans l'ordre du
+    classeur : sheet_name est la valeur reelle a repasser a
+    load_excel_wordings/run_qa, display_label est le texte a afficher dans
+    le menu (indique explicitement la fusion pour une paire FID/NON FID).
+    """
+    xls = pd.ExcelFile(excel_file)
+    all_sheets = xls.sheet_names
+
+    relevant = [
+        s for s in all_sheets
+        if URL_SHEET_KEYWORD.lower() not in s.lower()
+        and GENERIC_SHEET_KEYWORD.lower() not in s.lower()
+    ]
+
+    choices = []
+    hidden_siblings = set()
+    for sheet in relevant:
+        if sheet in hidden_siblings:
+            continue
+
+        sibling = find_sibling_sequence_sheet(excel_file, sheet)
+        if sibling and sibling in relevant:
+            hidden_siblings.add(sibling)
+            choices.append((sheet, f"{sheet} (regroupé avec {sibling})"))
+        else:
+            choices.append((sheet, sheet))
+
+    return choices
+
+
 def load_sibling_sequence_wordings(excel_file: str, sheet_name: str) -> tuple:
     """
     Charge les wordings de l'onglet "frere" LOYAL/NON LOYAL de sheet_name
@@ -237,7 +291,7 @@ def load_sibling_sequence_wordings(excel_file: str, sheet_name: str) -> tuple:
 
     wording_column = find_column(df, WORDING_COLUMN_NAME)
 
-    return sibling_sheet, _parse_wording_rows(df, wording_column)
+    return sibling_sheet, _parse_wording_rows(df, wording_column, sheet_label=sibling_sheet)
 
 
 def load_generic_wordings(excel_file: str) -> tuple:
@@ -257,7 +311,7 @@ def load_generic_wordings(excel_file: str) -> tuple:
     # comme un onglet de campagne, ou simplement "TEXT" (deja localise).
     wording_column = find_column(df, [WORDING_COLUMN_NAME, "TEXT"])
 
-    return sheet, _parse_wording_rows(df, wording_column)
+    return sheet, _parse_wording_rows(df, wording_column, sheet_label=sheet)
 
 
 def _find_cell(raw: pd.DataFrame, label: str):

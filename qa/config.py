@@ -143,6 +143,7 @@ KO_FUZZY_MISMATCH = "Fuzzy mismatch"                             # similarite en
 KO_CURRENCY_FORMAT_MISMATCH = "Currency format mismatch"         # meme montant, presentation/devise differente
 KO_CONTENT_MISMATCH = "Content mismatch"                         # texte substantiellement different
 KO_WRONG_COMPONENT = "Wording in wrong component"                # wording trouve, mais dans une autre classe technique
+KO_COMPONENT_CLASS_NOT_FOUND = "Component class not found in HTML"  # texte matche par similarite, mais aucune classe audit-component detectee sur l'element HTML (impossible de verifier le composant)
 KO_WORDING_MISMATCH = "Wording mismatch"                         # bonne classe technique, texte trop different (55-85%)
 KO_WORDING_RELOCATED = "Wording relocated (similar text found)"  # wording Excel introuvable, mais texte proche trouve ailleurs
 KO_UNEXPECTED_WORDING = "Unexpected wording (not in Excel)"      # texte HTML sans aucune correspondance Excel
@@ -162,6 +163,7 @@ CRITICALITY_BY_ERROR_TYPE = {
     KO_CURRENCY_FORMAT_MISMATCH: "Medium",
     KO_WORDING_MISMATCH: "Medium",
     KO_WORDING_RELOCATED: "Medium",
+    KO_COMPONENT_CLASS_NOT_FOUND: "Medium",
     KO_URL_PARAM_MISMATCH: "Medium",
     KO_TEXT_MISSING: "High",
     KO_CONTENT_MISMATCH: "High",
