@@ -15,6 +15,7 @@ import plotly.express as px
 import streamlit as st
 
 from qa.archive import delete_sequence_dir, list_reports, move_sequence_dir
+from qa.classification import migrate_legacy_loyalty_sequences
 from qa.history import (
     build_history_tree,
     delete_classification,
@@ -33,6 +34,17 @@ if "history_nav" not in st.session_state:
     st.session_state["history_nav"] = {"country": None, "trigger": None, "sequence": None}
 
 nav = st.session_state["history_nav"]
+
+# Reprise retroactive, silencieuse et idempotente : toute sequence encore
+# archivee sous un ancien nom qualifie LOYAL/NON LOYAL/FID/NON FID (avant
+# l'unification du nommage, voir qa.classification.normalize_sequence_name)
+# est fusionnee vers son nom canonique avant meme de construire l'arbre.
+migrated = migrate_legacy_loyalty_sequences()
+if migrated:
+    st.info(
+        f"🔀 {len(migrated)} séquence(s) archivée(s) sous un ancien nom LOYAL/NON LOYAL/FID/NON FID "
+        "fusionnée(s) automatiquement vers leur nom unifié."
+    )
 
 tree = build_history_tree()
 

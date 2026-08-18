@@ -3,9 +3,14 @@ import pytest
 
 from qa.classification import (
     detect_classification,
+    migrate_legacy_loyalty_sequences,
     normalize_sequence_name,
     resolve_sequence_alias,
 )
+
+
+def _fail(*args, **kwargs):
+    raise AssertionError("should not be called")
 
 
 def _make_wording_xlsx(tmp_path, sheet_name, wording_column_name, filename="wording.xlsx"):
@@ -142,6 +147,40 @@ class TestDetectClassification:
         result = detect_classification(path, "SEQ 1 NON LOYAL", "wording")
         assert result == {"country": "Germany", "trigger": "Revamp Inac"}
 
+    def test_utm_domain_wins_over_ambiguous_wording_language_on_conflict(self, tmp_path):
+        # Regression : "FRENCH" (colonne wording) peut designer la France OU
+        # la Belgique - LANGUAGE_TO_COUNTRY retient la traduction litterale
+        # (France) sans pouvoir trancher. Si le domaine des URLs UTM dit
+        # explicitement Belgique, c'est un signal plus fiable et il doit
+        # l'emporter, pas la simple traduction du mot-cle de langue.
+        path = tmp_path / "conflict.xlsx"
+        wording_rows = [
+            ["", "", "", ""],
+            ["COMPONENT NAME", "ELEMENT", "TRANSLATION FRENCH", "TECHNICAL NAME"],
+            ["Header", "Title", "Bonjour", "audit-component-header"],
+        ]
+        utm_rows = [
+            [None, "!! CHECK !!", None, None, None, None, None, None],
+            [None, "URL", "SOURCE", "MEDIUM", "CAMPAIGN", "SEQUENCE", "VERSION", "<< TRACKED URL >>"],
+            [None, "Insert url here", "Mandatory", "Mandatory", "TRIGGER", "SEQ", "VERSION", None],
+            ["HEADER", "https://example.com/", "trigger", "email", "revamp_inac", "seq1", "",
+             "https://www.example.be/?utm_content=header"],
+        ]
+        with pd.ExcelWriter(path) as writer:
+            pd.DataFrame(wording_rows).to_excel(writer, sheet_name="SEQ 1", index=False, header=False)
+            pd.DataFrame(utm_rows).to_excel(writer, sheet_name="UTM TRIGGER", index=False, header=False)
+
+        result = detect_classification(path, "SEQ 1", "wording")
+        assert result["country"] == "Belgium"
+
+    def test_language_still_used_as_fallback_when_no_utm_domain_detected(self, tmp_path):
+        # Aucun onglet UTM dans ce classeur : la langue reste le seul signal
+        # disponible, donc toujours utilisee (pas de domaine pour la
+        # contredire).
+        path = _make_wording_xlsx(tmp_path, "SEQ 1", "TRANSLATION FRENCH")
+        result = detect_classification(path, "SEQ 1", "wording")
+        assert result["country"] == "France"
+
     def test_unrecognized_language_returns_none_country(self, tmp_path):
         path = _make_wording_xlsx(tmp_path, "SEQ 1", "TRANSLATION KLINGON")
         result = detect_classification(path, "SEQ 1", "wording")
@@ -169,3 +208,57 @@ class TestDetectClassification:
 
         result = detect_classification(str(path), "anything", "url")
         assert result["trigger"] == "Welcome Back"
+
+
+class TestMigrateLegacyLoyaltySequences:
+    """
+    Reprise retroactive (voir pages/1_Historique.py) : toute sequence
+    archivee sous un ancien nom qualifie LOYAL/NON LOYAL/FID/NON FID doit
+    etre fusionnee vers son nom canonique "SEQ <n>", avec les memes outils
+    que la fusion manuelle (move_sequence_dir + rewrite_classification).
+    """
+
+    def test_merges_loyal_and_non_loyal_pair_into_the_bare_sequence(self, monkeypatch):
+        tree = {
+            "Germany": {
+                "Revamp Inac": {
+                    "SEQ 1 LOYAL": [{"score": 100}],
+                    "SEQ 1 NON LOYAL": [{"score": 90}],
+                }
+            }
+        }
+        monkeypatch.setattr("qa.classification.build_history_tree", lambda: tree)
+
+        moved, rewritten = [], []
+        monkeypatch.setattr(
+            "qa.classification.move_sequence_dir",
+            lambda oc, ot, os_, nc, nt, ns: moved.append((oc, ot, os_, nc, nt, ns)),
+        )
+        monkeypatch.setattr(
+            "qa.classification.rewrite_classification",
+            lambda oc, ot, os_, nc, nt, ns: rewritten.append((oc, ot, os_, nc, nt, ns)),
+        )
+
+        migrated = migrate_legacy_loyalty_sequences()
+
+        assert sorted(m[2] for m in migrated) == ["SEQ 1 LOYAL", "SEQ 1 NON LOYAL"]
+        assert all(m[3] == "SEQ 1" for m in migrated)
+        assert len(moved) == 2 and len(rewritten) == 2
+
+    def test_already_canonical_sequence_is_left_untouched(self, monkeypatch):
+        tree = {"Germany": {"Revamp Inac": {"SEQ 1": [{"score": 100}]}}}
+        monkeypatch.setattr("qa.classification.build_history_tree", lambda: tree)
+        monkeypatch.setattr("qa.classification.move_sequence_dir", _fail)
+        monkeypatch.setattr("qa.classification.rewrite_classification", _fail)
+
+        assert migrate_legacy_loyalty_sequences() == []
+
+    def test_non_sequence_named_folder_is_left_untouched(self, monkeypatch):
+        # Pas de numero de sequence detectable -> normalize_sequence_name
+        # retourne le nom inchange, rien a fusionner.
+        tree = {"Germany": {"Revamp Inac": {"Footer generic block": [{"score": 100}]}}}
+        monkeypatch.setattr("qa.classification.build_history_tree", lambda: tree)
+        monkeypatch.setattr("qa.classification.move_sequence_dir", _fail)
+        monkeypatch.setattr("qa.classification.rewrite_classification", _fail)
+
+        assert migrate_legacy_loyalty_sequences() == []

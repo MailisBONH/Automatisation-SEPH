@@ -150,6 +150,7 @@ KO_UNEXPECTED_WORDING = "Unexpected wording (not in Excel)"      # texte HTML sa
 KO_MISSING_WORDING = "Missing wording (not in HTML)"             # wording Excel jamais retrouve dans le HTML
 KO_URL_PARAM_MISMATCH = "URL parameter mismatch (order/encoding)"  # meme destination, ordre/encodage different
 KO_URL_NOT_FOUND = "URL not found"                                # aucune correspondance dans le HTML
+KO_UNEXPECTED_URL = "Unexpected URL (not in Excel)"               # lien HTML jamais reference dans le referentiel Excel
 
 # Echelle de criticite par type de KO, basee sur la gravite reelle du cas
 # plutot que sur le chemin de code qui l'a produit (avant cette table,
@@ -165,6 +166,7 @@ CRITICALITY_BY_ERROR_TYPE = {
     KO_WORDING_RELOCATED: "Medium",
     KO_COMPONENT_CLASS_NOT_FOUND: "Medium",
     KO_URL_PARAM_MISMATCH: "Medium",
+    KO_UNEXPECTED_URL: "Medium",
     KO_TEXT_MISSING: "High",
     KO_CONTENT_MISMATCH: "High",
     KO_WRONG_COMPONENT: "High",
