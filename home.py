@@ -32,15 +32,28 @@ from st_aggrid.shared import JsCode
 import difflib
 
 
-def highlight_differences(excel_text, html_text):
+def highlight_differences(excel_text, html_text, char_level=False):
+    """Diff en gras rouge entre 2 textes. Par mots par defaut (wording) ;
+    char_level=True decoupe caractere par caractere (mode URL, ou une URL
+    n'a pas d'espaces - un decoupage par mots surlignerait l'URL entiere en
+    rouge pour la moindre difference)."""
 
-    excel_words = str(excel_text or "").split()
-    html_words = str(html_text or "").split()
+    excel_text = str(excel_text or "")
+    html_text = str(html_text or "")
+
+    if char_level:
+        excel_tokens = list(excel_text)
+        html_tokens = list(html_text)
+        sep = ""
+    else:
+        excel_tokens = excel_text.split()
+        html_tokens = html_text.split()
+        sep = " "
 
     matcher = difflib.SequenceMatcher(
         None,
-        excel_words,
-        html_words
+        excel_tokens,
+        html_tokens
     )
 
     excel_parts = []
@@ -48,8 +61,8 @@ def highlight_differences(excel_text, html_text):
 
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
 
-        ex = " ".join(excel_words[i1:i2])
-        ht = " ".join(html_words[j1:j2])
+        ex = sep.join(excel_tokens[i1:i2])
+        ht = sep.join(html_tokens[j1:j2])
 
         if tag == "equal":
 
@@ -67,8 +80,8 @@ def highlight_differences(excel_text, html_text):
             )
 
     return (
-        " ".join(excel_parts),
-        " ".join(html_parts)
+        sep.join(excel_parts),
+        sep.join(html_parts)
     )
 
 
@@ -81,10 +94,14 @@ def run_with_debug_capture(fn, *args, **kwargs):
 
 
 URL_COLUMN_RENAME = {
+    "Source Section": "Section (FID/NON FID)",
     "Expected Class": "Classe attendue (Excel)",
     "HTML Class": "Classe trouvée (HTML)",
     "Excel Wording": "URL attendue (Excel)",
     "HTML Wording": "URL trouvée (HTML)",
+    "Error Type": "Raison",
+    "Similarity": "Similarité (%)",
+    "Occurrences": "Occurrences (HTML)",
     "Sequence": "Séquence",
 }
 
@@ -108,10 +125,25 @@ def _prepare_display_df(results, mode):
 
     if mode == "url":
         display_cols = [
-            c for c in ["Sequence", "Expected Class", "HTML Class", "Excel Wording", "HTML Wording", "Status"]
+            c for c in [
+                "Sequence", "Source Section", "Expected Class", "HTML Class",
+                "Excel Wording", "HTML Wording", "Status", "Error Type", "Similarity", "Occurrences"
+            ]
             if c in df.columns
         ]
-        df_display = df[display_cols].rename(columns=URL_COLUMN_RENAME)
+        df_display = df[display_cols].copy()
+
+        for idx, row in df_display.iterrows():
+            if row["Status"] == "KO":
+                excel_diff, html_diff = highlight_differences(
+                    row.get("Excel Wording", ""),
+                    row.get("HTML Wording", ""),
+                    char_level=True
+                )
+                df_display.at[idx, "Excel Wording"] = excel_diff
+                df_display.at[idx, "HTML Wording"] = html_diff
+
+        df_display = df_display.rename(columns=URL_COLUMN_RENAME)
     else:
         df_display = df.copy()
 
@@ -254,18 +286,25 @@ def _render_table(results, mode, key_suffix):
     }
     """)
 
-    if mode != "url":
-        gb.configure_column(
-            "Excel Wording",
-            cellRenderer=html_renderer,
-            width=500
-        )
+    # En mode URL, ces colonnes ont ete renommees en francais dans
+    # df_display (voir _prepare_display_df / URL_COLUMN_RENAME) - il faut
+    # configurer le rendu HTML sur leur nom final, pas l'original.
+    excel_col, html_col = (
+        ("URL attendue (Excel)", "URL trouvée (HTML)") if mode == "url"
+        else ("Excel Wording", "HTML Wording")
+    )
 
-        gb.configure_column(
-            "HTML Wording",
-            cellRenderer=html_renderer,
-            width=500
-        )
+    gb.configure_column(
+        excel_col,
+        cellRenderer=html_renderer,
+        width=500
+    )
+
+    gb.configure_column(
+        html_col,
+        cellRenderer=html_renderer,
+        width=500
+    )
 
     grid_options = gb.build()
 

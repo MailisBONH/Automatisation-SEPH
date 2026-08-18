@@ -346,6 +346,10 @@ def _parse_url_sections(raw: pd.DataFrame, header_row_idx: int, section_col_idx:
     label_col_idx, ex: "HEADER", "ALGO"...), retrouve par report vers le bas
     quand la cellule est vide (meme principe que COMPONENT NAME dans les
     onglets wording) : utilise ensuite comme "classe attendue" pour la QA URL.
+    Chaque URL porte aussi sa propre section d'origine ("Section", ex. "SEQ 1
+    NON FID") : propagee jusqu'au rapport (colonne "Source Section") pour
+    savoir de quelle section - la testee, ou sa soeur FID/NON FID fusionnee -
+    vient chaque ligne (voir qa.engine.run_qa_for_sequence).
     """
     sections = {"": []}
     current = ""
@@ -373,7 +377,7 @@ def _parse_url_sections(raw: pd.DataFrame, header_row_idx: int, section_col_idx:
         if pd.notna(value):
             url = str(value).strip()
             if url:
-                sections[current].append({"label": last_label, "url": url})
+                sections[current].append({"label": last_label, "url": url, "Section": current})
 
     return sections
 
@@ -452,7 +456,7 @@ def load_excel_urls(excel_file: str, keyword: str) -> tuple:
             if pd.notna(value):
                 url = str(value).strip()
                 if url:
-                    urls.append({"label": last_label, "url": url})
+                    urls.append({"label": last_label, "url": url, "Section": ""})
         return sheet, "", urls
 
     sections = _parse_url_sections(raw, header_row_idx, section_col_idx, tracked_col_idx)

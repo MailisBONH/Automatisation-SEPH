@@ -258,6 +258,20 @@ class TestLoadExcelUrlsReturnsResolvedSectionName:
         sheet, section_name, urls = load_excel_urls(path, "anything")
         assert section_name == ""
 
+    def test_each_url_dict_carries_its_own_section(self, tmp_path):
+        # Chaque URL porte sa section d'origine (utilisee ensuite pour la
+        # colonne "Source Section" du rapport, voir qa.url_qa).
+        path = make_utm_workbook(tmp_path, {
+            "SEQ 1 NON FID": ["https://example.com/non-fid"],
+        })
+        _, _, urls = load_excel_urls(path, "NON FID")
+        assert urls[0]["Section"] == "SEQ 1 NON FID"
+
+    def test_flat_tab_url_carries_an_empty_section(self, tmp_path):
+        path = make_utm_workbook(tmp_path, {"": ["https://example.com/a"]})
+        _, _, urls = load_excel_urls(path, "anything")
+        assert urls[0]["Section"] == ""
+
 
 class TestFindSiblingUrlSection:
     """

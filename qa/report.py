@@ -112,6 +112,65 @@ def build_rich_diff(text1, text2):
     return rich1, rich2
 
 
+def build_rich_diff_char(text1, text2):
+    """
+    Comme build_rich_diff(), mais decoupe caractere par caractere plutot que
+    mot par mot - utilisee pour le rapport URL (qa/url_qa.py), ou un decoupage
+    par mots n'a aucun sens (une URL n'a pas d'espaces : la moindre difference,
+    meme un seul caractere, ferait surligner l'URL entiere en rouge).
+    """
+
+    text1 = str(text1 or "")
+    text2 = str(text2 or "")
+
+    matcher = difflib.SequenceMatcher(
+        None,
+        text1,
+        text2
+    )
+
+    rich1 = CellRichText()
+    rich2 = CellRichText()
+
+    red_bold = InlineFont(
+        color="FF0000",
+        b=True
+    )
+
+    normal = InlineFont()
+
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+
+        part1 = text1[i1:i2]
+        part2 = text2[j1:j2]
+
+        if tag == "equal":
+
+            if part1:
+                rich1.append(
+                    TextBlock(normal, part1)
+                )
+
+            if part2:
+                rich2.append(
+                    TextBlock(normal, part2)
+                )
+
+        else:
+
+            if part1:
+                rich1.append(
+                    TextBlock(red_bold, part1)
+                )
+
+            if part2:
+                rich2.append(
+                    TextBlock(red_bold, part2)
+                )
+
+    return rich1, rich2
+
+
 BASE_COLUMNS = [
     "Component Name", "Element", "Source Sheet", "Expected Class", "HTML Class",
     "Excel Wording", "HTML Wording",
@@ -119,21 +178,36 @@ BASE_COLUMNS = [
     "Match Type"
 ]
 
-# Rapport dedie aux URLs : pas de wording/composant, seulement classe +
-# URL attendues (Excel) vs trouvees (HTML), et le statut.
-URL_COLUMNS = ["Expected Class", "HTML Class", "Excel Wording", "HTML Wording", "Status"]
+# Rapport dedie aux URLs : pas de wording/composant, seulement la section
+# source (FID/NON FID), la classe + URL attendues (Excel) vs trouvees
+# (HTML), le statut, la raison (KO, ou une note informative sur un OK -
+# voir INFO_URL_QUERY_IGNORED), la similarite caractere par caractere et le
+# nombre d'occurrences trouvees dans le HTML.
+URL_COLUMNS = [
+    "Source Section", "Expected Class", "HTML Class", "Excel Wording", "HTML Wording",
+    "Status", "Error Type", "Similarity", "Occurrences"
+]
 
 URL_HEADER_LABELS = {
+    "Source Section": "Section (FID/NON FID)",
     "Expected Class": "Classe attendue (Excel)",
     "HTML Class": "Classe trouvée (HTML)",
     "Excel Wording": "URL attendue (Excel)",
     "HTML Wording": "URL trouvée (HTML)",
     "Status": "Status",
+    "Error Type": "Raison",
+    "Similarity": "Similarité (%)",
+    "Occurrences": "Occurrences (HTML)",
     "Sequence": "Séquence",
 }
 
 
-def _write_results_sheet(ws_target, df_data, header_color, columns, header_labels=None):
+def _write_results_sheet(ws_target, df_data, header_color, columns, header_labels=None, char_diff=False):
+    # char_diff=True (mode URL) : diff caractere par caractere plutot que
+    # mot par mot - une URL n'a pas d'espaces, un decoupage par mots
+    # surlignerait l'URL entiere en rouge pour la moindre difference.
+    diff_fn = build_rich_diff_char if char_diff else build_rich_diff
+
     status_idx = columns.index("Status")
     excel_idx = columns.index("Excel Wording")
     html_idx = columns.index("HTML Wording")
@@ -160,7 +234,7 @@ def _write_results_sheet(ws_target, df_data, header_color, columns, header_label
 
                 html_wording = row[html_idx]
 
-                rich_excel, _ = build_rich_diff(
+                rich_excel, _ = diff_fn(
                     safe_val,
                     html_wording
                 )
@@ -174,7 +248,7 @@ def _write_results_sheet(ws_target, df_data, header_color, columns, header_label
 
                 excel_wording = row[excel_idx]
 
-                _, rich_html = build_rich_diff(
+                _, rich_html = diff_fn(
                     excel_wording,
                     safe_val
                 )
@@ -234,12 +308,12 @@ def save_report(results: list, campaign_sheet_name: str, mode: str = "wording"):
     # Details
     ws2 = wb.create_sheet("Details")
     df_sorted = sort_results_by_html_order(df).reset_index(drop=True)
-    _write_results_sheet(ws2, df_sorted, "4472C4", columns, header_labels)
+    _write_results_sheet(ws2, df_sorted, "4472C4", columns, header_labels, char_diff=(mode == "url"))
 
     # KO Only
     ws3 = wb.create_sheet("KO Only")
     df_ko = _sort_by_criticality(df[df["Status"] == "KO"]).reset_index(drop=True)
-    _write_results_sheet(ws3, df_ko, "C00000", columns, header_labels)
+    _write_results_sheet(ws3, df_ko, "C00000", columns, header_labels, char_diff=(mode == "url"))
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     path = os.path.join(
@@ -326,14 +400,14 @@ def save_consolidated_report(results_by_sequence: dict, report_name: str = "Mult
     # Details
     ws2 = wb.create_sheet("Details")
     df_sorted = sort_results_by_html_order(df, prefix_columns=["Sequence"]).reset_index(drop=True) if total else df
-    _write_results_sheet(ws2, df_sorted, "4472C4", columns, header_labels)
+    _write_results_sheet(ws2, df_sorted, "4472C4", columns, header_labels, char_diff=(mode == "url"))
 
     # KO Only
     ws3 = wb.create_sheet("KO Only")
     df_ko = _sort_by_criticality(
         df[df["Status"] == "KO"], prefix_columns=["Sequence"]
     ).reset_index(drop=True) if total else df
-    _write_results_sheet(ws3, df_ko, "C00000", columns, header_labels)
+    _write_results_sheet(ws3, df_ko, "C00000", columns, header_labels, char_diff=(mode == "url"))
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     safe_name = re.sub(r"[^\w\-]", "_", report_name)

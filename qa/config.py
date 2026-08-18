@@ -18,6 +18,17 @@ DEBUG_MODE = True
 URL_SHEET_KEYWORD = "UTM"                 # Mot-clé pour repérer l'onglet des URLs trackées
 URL_COLUMN_NAME = "<< TRACKED URL >>"     # Colonne des URLs de référence dans cet onglet
 
+# Domaines pour lesquels la query string (paramètres UTM/tracking) n'est
+# jamais comparée, seule l'URL de base (chemin) compte - voir
+# qa.url_utils.is_query_ignored_domain/strip_query. homeios.onelink.me :
+# lien court OneLink/deep-link vers l'app - le tracking (UTM/attribution)
+# est déjà encodé par OneLink DANS le chemin du lien lui-même (le token
+# après /oUpm/...), pas dans une query string classique ; d'éventuels
+# paramètres ajoutés en plus sur ce lien sont générés dynamiquement à
+# l'envoi et ne sont jamais figés à l'identique dans le référentiel Excel -
+# les comparer n'aurait aucune valeur diagnostique.
+URL_IGNORE_QUERY_DOMAINS = ("homeios.onelink.me",)
+
 # Reconnaissance des noms de sequence "LOYAL"/"NON LOYAL" (onglets wording)
 # et "FID"/"NON FID" (sections de l'onglet UTM) : vit ici (plutot que dans
 # qa/classification.py) pour etre partagee sans creer d'import circulaire
@@ -151,6 +162,15 @@ KO_MISSING_WORDING = "Missing wording (not in HTML)"             # wording Excel
 KO_URL_PARAM_MISMATCH = "URL parameter mismatch (order/encoding)"  # meme destination, ordre/encodage different
 KO_URL_NOT_FOUND = "URL not found"                                # aucune correspondance dans le HTML
 KO_UNEXPECTED_URL = "Unexpected URL (not in Excel)"               # lien HTML jamais reference dans le referentiel Excel
+KO_URL_WRONG_COMPONENT = "URL in wrong component"                 # URL trouvee, mais dans une autre classe technique
+KO_URL_CLASS_NOT_FOUND = "URL component class not found in HTML"  # URL trouvee, mais aucune classe audit-component detectee autour du lien (impossible de verifier le composant)
+
+# Note informative (colonne "Error Type"/"Raison" du rapport URL) posee sur
+# une ligne OK, pas un KO : un "Exact (parametres ignores)" (domaine de
+# URL_IGNORE_QUERY_DOMAINS) peut afficher un pourcentage de similarite bas
+# alors que le match est valide, puisque seul le chemin compte pour ces
+# domaines - sans cette note, le pourcentage bas parait a tort suspect.
+INFO_URL_QUERY_IGNORED = "Domaine à query ignorée : % bas normal (seul le chemin est comparé, pas la query)"
 
 # Echelle de criticite par type de KO, basee sur la gravite reelle du cas
 # plutot que sur le chemin de code qui l'a produit (avant cette table,
@@ -167,11 +187,13 @@ CRITICALITY_BY_ERROR_TYPE = {
     KO_COMPONENT_CLASS_NOT_FOUND: "Medium",
     KO_URL_PARAM_MISMATCH: "Medium",
     KO_UNEXPECTED_URL: "Medium",
+    KO_URL_CLASS_NOT_FOUND: "Medium",
     KO_TEXT_MISSING: "High",
     KO_CONTENT_MISMATCH: "High",
     KO_WRONG_COMPONENT: "High",
     KO_UNEXPECTED_WORDING: "High",
     KO_URL_NOT_FOUND: "High",
+    KO_URL_WRONG_COMPONENT: "High",
 }
 DEFAULT_KO_CRITICALITY = "High"  # filet de securite si un Error Type n'est pas dans la table ci-dessus
 

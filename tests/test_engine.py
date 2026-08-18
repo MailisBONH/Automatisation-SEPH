@@ -36,7 +36,13 @@ def _make_utm_workbook(tmp_path, sections: dict, filename="utm.xlsx"):
     for name, urls in sections.items():
         rows.append([None, name, None, None, None, None, None, None])
         for url in urls:
-            rows.append(["HEADER", "https://example.com/", "trigger", "email", "revamp_inac", "seq1", "", url])
+            # Le label matche la classe posee par _make_html_with_link,
+            # pour que ces tests de fusion de section ne declenchent pas
+            # accidentellement un KO de classe (Wrong component / class not
+            # found) - ce n'est pas ce qu'ils cherchent a verifier.
+            rows.append([
+                "audit-component-cta", "https://example.com/", "trigger", "email", "revamp_inac", "seq1", "", url
+            ])
 
     with pd.ExcelWriter(path) as writer:
         pd.DataFrame(rows).to_excel(writer, sheet_name="UTM TRIGGER", index=False, header=False)
@@ -45,7 +51,13 @@ def _make_utm_workbook(tmp_path, sections: dict, filename="utm.xlsx"):
 
 def _make_html_with_link(tmp_path, href, filename="email.html"):
     path = tmp_path / filename
-    path.write_text(f'<a href="{href}">Shop</a>', encoding="utf-8")
+    # Ancetre audit-component-* : sans classe HTML detectable, run_url_qa
+    # renvoie desormais KO_URL_CLASS_NOT_FOUND (comme le wording), ce que
+    # ces tests de fusion de section ne cherchent pas a verifier.
+    path.write_text(
+        f'<div class="audit-component-cta"><a href="{href}">Shop</a></div>',
+        encoding="utf-8",
+    )
     return str(path)
 
 
@@ -173,6 +185,37 @@ class TestRunQaForSequenceMergesSiblingUrlSection:
         html_file = _make_html_with_link(tmp_path, "https://example.com/shared")
 
         results, sheet = run_qa_for_sequence(html_file, excel_file, "SEQ 1 NON FID", mode="url")
+
+        matched = [r for r in results if r["HTML Wording"] == "https://example.com/shared"]
+        assert len(matched) == 1
+        assert matched[0]["Status"] == "OK"
+
+    def test_sibling_url_identical_but_under_a_different_label_is_still_a_single_row(self, tmp_path):
+        # Regression : le meme lien peut etre liste sous des labels
+        # differents entre les deux sections (ex. "HEADER" cote NON FID,
+        # "SOCIAL" cote FID) - c'est toujours la MEME destination testee
+        # contre le MEME lien HTML, donc un seul OK doit apparaitre, pas un
+        # par label. run_url_qa ne filtre jamais le matching par label
+        # (seulement l'affichage), donc dedoublonner par URL seule ne fait
+        # perdre aucune verification reelle.
+        path = tmp_path / "utm_diff_label.xlsx"
+        rows = [
+            [None, "!! CHECK !!", None, None, None, None, None, None],
+            [None, "URL", "SOURCE", "MEDIUM", "CAMPAIGN", "SEQUENCE", "VERSION", "<< TRACKED URL >>"],
+            [None, "Insert url here", "Mandatory", "Mandatory", "TRIGGER", "SEQ", "VERSION", None],
+            [None, "SEQ 1 NON FID", None, None, None, None, None, None],
+            ["audit-component-cta", "https://example.com/", "trigger", "email", "revamp_inac", "seq1", "",
+             "https://example.com/shared"],
+            [None, "SEQ 1 FID", None, None, None, None, None, None],
+            ["SOCIAL", "https://example.com/", "trigger", "email", "revamp_inac", "seq1", "",
+             "https://example.com/shared"],
+        ]
+        with pd.ExcelWriter(path) as writer:
+            pd.DataFrame(rows).to_excel(writer, sheet_name="UTM TRIGGER", index=False, header=False)
+
+        html_file = _make_html_with_link(tmp_path, "https://example.com/shared")
+
+        results, sheet = run_qa_for_sequence(html_file, str(path), "SEQ 1 NON FID", mode="url")
 
         matched = [r for r in results if r["HTML Wording"] == "https://example.com/shared"]
         assert len(matched) == 1

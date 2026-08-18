@@ -113,24 +113,38 @@ def run_qa_for_sequence(html_file, excel_file, keyword, mode="wording", include_
         # audience comme introuvable.
         if section_name:
             sibling_section, sibling_urls = load_sibling_url_section(excel_file, section_name)
-            if sibling_section:
-                existing_keys = {(normalize_url(u["url"]), u.get("label")) for u in excel_urls}
-                new_sibling_urls = [
-                    u for u in sibling_urls
-                    if (normalize_url(u["url"]), u.get("label")) not in existing_keys
-                ]
-                skipped = len(sibling_urls) - len(new_sibling_urls)
-                if skipped:
-                    print(
-                        f"➖ {skipped} URL(s) de la section frère '{sibling_section}' ignorée(s) "
-                        "(identiques à la section testée, rien de spécifique à l'audience)"
-                    )
-                if new_sibling_urls:
-                    print(
-                        f"🔀 Section frère '{sibling_section}' détectée (même séquence, audience "
-                        f"opposée) : {len(new_sibling_urls)} URL(s) réellement différente(s) fusionnée(s)."
-                    )
-                excel_urls = excel_urls + new_sibling_urls
+            if sibling_section and sibling_urls:
+                print(
+                    f"🔀 Section frère '{sibling_section}' détectée (même séquence, audience "
+                    "opposée) : URLs fusionnées avant dédoublonnage."
+                )
+                excel_urls = excel_urls + sibling_urls
+
+        # Deduplique par URL normalisee (ordre/encodage des parametres
+        # ignore), quel que soit le label : une meme destination ne doit
+        # etre testee qu'UNE fois, meme si elle apparait sous 2 labels ou
+        # 2 sections differentes (typiquement un lien identique repris tel
+        # quel entre FID et NON FID) - sinon elle produirait 2 lignes
+        # OK/KO redondantes pour le meme constat. run_url_qa ne filtre
+        # jamais par label pour le matching lui-meme (seulement pour
+        # l'affichage), donc ce dedoublonnage ne fait perdre aucune
+        # verification reelle. S'applique que la section ait un frere ou
+        # non - une meme section peut deja lister la meme URL 2 fois sous
+        # des labels differents.
+        seen_urls = set()
+        deduped_urls = []
+        for u in excel_urls:
+            raw_url = u.get("url", "") if isinstance(u, dict) else str(u)
+            key = normalize_url(raw_url)
+            if key in seen_urls:
+                continue
+            seen_urls.add(key)
+            deduped_urls.append(u)
+
+        skipped = len(excel_urls) - len(deduped_urls)
+        if skipped:
+            print(f"➖ {skipped} URL(s) dupliquée(s) (même destination normalisée) ignorée(s)")
+        excel_urls = deduped_urls
 
         results = run_url_qa(raw_html, excel_urls)
 
