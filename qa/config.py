@@ -18,6 +18,16 @@ DEBUG_MODE = True
 URL_SHEET_KEYWORD = "UTM"                 # Mot-clé pour repérer l'onglet des URLs trackées
 URL_COLUMN_NAME = "<< TRACKED URL >>"     # Colonne des URLs de référence dans cet onglet
 
+# Reconnaissance des noms de sequence "LOYAL"/"NON LOYAL" (onglets wording)
+# et "FID"/"NON FID" (sections de l'onglet UTM) : vit ici (plutot que dans
+# qa/classification.py) pour etre partagee sans creer d'import circulaire
+# avec qa/excel_loader.py (qui a besoin de detecter l'onglet "frere" d'une
+# sequence - voir find_sibling_sequence_sheet - et que classification.py
+# importe deja pour sa propre detection pays/trigger).
+SEQ_NUMBER_PATTERN = re.compile(r"\bSEQ\s*0*(\d+)\b", re.IGNORECASE)
+NON_LOYAL_KEYWORDS = ("NON FID", "NON-FID", "NON LOYAL", "NON-LOYAL")
+LOYAL_KEYWORDS = ("FID", "LOYAL")
+
 GENERIC_SHEET_KEYWORD = "GENERIC"         # Mot-clé pour repérer l'onglet des composants génériques
 
 # Mots-clés (insensibles à la casse) identifiant une classe de mentions

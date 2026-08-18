@@ -1,7 +1,12 @@
 import os
 
 from qa.config import CAMPAIGN_KEYWORD, EXCEL_FILE, HTML_FILE
-from qa.excel_loader import load_excel_urls, load_excel_wordings, load_generic_wordings
+from qa.excel_loader import (
+    load_excel_urls,
+    load_excel_wordings,
+    load_generic_wordings,
+    load_sibling_sequence_wordings,
+)
 from qa.html_extraction import (
     fetch_html_from_aem,
     load_and_extract_html_texts,
@@ -31,10 +36,51 @@ def run_qa_for_sequence(html_file, excel_file, keyword, mode="wording", include_
     générique sont retirés au préalable : c'est l'onglet générique qui fait
     foi pour ces composants (évite qu'un wording obsolète/incorrect resté
     dans l'onglet séquence ne pollue le matching).
+
+    Onglet "frère" LOYAL/NON LOYAL (mode "wording" uniquement, toujours
+    actif, sans option) : si l'onglet résolu a un frère pour la même
+    séquence mais l'audience opposée (ex. "SEQ 1 NON LOYAL" / "SEQ 1
+    LOYAL"), ses wordings sont automatiquement ajoutés à ceux de la
+    séquence avant le matching — les deux onglets représentent en réalité
+    le même template HTML, qui bascule de l'un à l'autre via une condition
+    AEM selon l'audience du destinataire (voir "Blocs conditionnels AEM"
+    dans le README). Contrairement à l'onglet générique, rien n'est retiré
+    de l'onglet séquence : les deux jeux de wordings sont simplement réunis
+    (voir qa.excel_loader.find_sibling_sequence_sheet) - SAUF les wordings
+    de l'onglet frère STRICTEMENT identiques (même texte normalisé, même
+    classe technique) à un wording déjà présent côté séquence : la plupart
+    des composants ne changent pas selon l'audience (header, carrousel
+    produits...), seuls quelques-uns diffèrent réellement. L'égalité doit
+    être exacte (pas une similarité approchée) : un pavé de mentions
+    légales recopié avec une variation mineure (ex. un nom de marque
+    différent) reste un écart réel qu'il faut signaler séparément, pas un
+    doublon à masquer silencieusement.
     """
     if mode == "wording":
         html_texts = load_and_extract_html_texts(html_file)
         sheet, excel_wordings = load_excel_wordings(excel_file, keyword)
+
+        sibling_sheet, sibling_wordings = load_sibling_sequence_wordings(excel_file, sheet)
+        if sibling_sheet:
+            existing_keys = {(w["norm"], w.get("Technical")) for w in excel_wordings}
+            new_sibling_wordings = [
+                w for w in sibling_wordings
+                if (w["norm"], w.get("Technical")) not in existing_keys
+            ]
+            skipped = len(sibling_wordings) - len(new_sibling_wordings)
+            if skipped:
+                print(
+                    f"➖ {skipped} wording(s) de l'onglet frère '{sibling_sheet}' ignoré(s) "
+                    "(identiques à l'onglet séquence, rien de spécifique à l'audience)"
+                )
+            if new_sibling_wordings:
+                print(
+                    f"🔀 Onglet frère '{sibling_sheet}' détecté (même séquence, audience "
+                    f"opposée) : {len(new_sibling_wordings)} wording(s) réellement "
+                    "différent(s) fusionné(s) — le HTML gère probablement les deux via "
+                    "une condition AEM."
+                )
+            excel_wordings = excel_wordings + new_sibling_wordings
 
         if include_generic:
             generic_sheet, generic_wordings = load_generic_wordings(excel_file)

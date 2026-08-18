@@ -2,6 +2,7 @@ from collections import defaultdict
 
 from qa.config import (
     SIM_CLOSEST_MATCH_ACCEPT,
+    SIM_CLOSEST_MATCH_MIN,
     SIM_SHARED_BRANCH_EXACT,
     KO_WRONG_COMPONENT,
     KO_WORDING_MISMATCH,
@@ -48,6 +49,35 @@ def _drop_ko_covered_by_ok(results: list, min_length: int = 5) -> list:
                 continue
         filtered.append(r)
     return filtered
+
+
+def _unexpected_wording_row(h_text: str, expected_class, found_class, html_order: int) -> dict:
+    """
+    Ligne KO "Unexpected wording (not in Excel)" pour un fragment HTML dont
+    aucun wording Excel de la meme classe n'atteint le seuil minimal de
+    similarite (SIM_CLOSEST_MATCH_MIN). Utilisee a la place du "meilleur
+    effort" de compare() (Direct/Agrege) quand ce dernier est sous ce seuil :
+    au-dessous, le candidat "le moins pire" n'a aucune valeur informative -
+    ce n'est pas un wording legerement incorrect a corriger, juste le moins
+    eloigne parmi des non-matchs (voir find_best_match). Afficher ce
+    rapprochement arbitraire comme "Content mismatch contre tel wording"
+    induit en erreur ; autant dire honnetement qu'aucune correspondance
+    plausible n'a ete trouvee.
+    """
+    return {
+        "Component Name": "",
+        "Element": "",
+        "Expected Class": expected_class or "",
+        "HTML Class": found_class or "",
+        "Excel Wording": "",
+        "HTML Wording": clean_display_text(h_text),
+        "Status": "KO",
+        "Error Type": KO_UNEXPECTED_WORDING,
+        "Similarity": "0%",
+        "Criticality": criticality_for(KO_UNEXPECTED_WORDING),
+        "Match Type": "No match",
+        "_html_order": html_order
+    }
 
 
 # =========================
@@ -124,18 +154,28 @@ def run_wording_qa(html_texts, excel_wordings):
         # pouvoir encore la matcher correctement via Direct/Agregation/Split.
         if direct:
             idx, status, error, sim = direct
-            row = make_row(excel_wordings[idx], item, h_text, status, error, sim, "Direct")
-            row["_html_order"] = i
-            results.append(row)
+            # Sous le seuil minimal (meme utilise par find_closest_match),
+            # le "meilleur effort" de compare() n'est que le candidat le
+            # moins pire parmi des non-matchs - l'afficher associe a ce
+            # wording precis serait trompeur (voir _unexpected_wording_row).
+            if sim < SIM_CLOSEST_MATCH_MIN * 100:
+                results.append(_unexpected_wording_row(h_text, expected_class, found_class, i))
+            else:
+                row = make_row(excel_wordings[idx], item, h_text, status, error, sim, "Direct")
+                row["_html_order"] = i
+                results.append(row)
             i += 1
             continue
 
         if agg:
             nb, idx, status, error, sim = agg
             agg_text = " ".join(html_texts[i + k]["text"] for k in range(nb))
-            row = make_row(excel_wordings[idx], item, agg_text, status, error, sim, f"Agrege ({nb} blocs)")
-            row["_html_order"] = i
-            results.append(row)
+            if sim < SIM_CLOSEST_MATCH_MIN * 100:
+                results.append(_unexpected_wording_row(agg_text, expected_class, found_class, i))
+            else:
+                row = make_row(excel_wordings[idx], item, agg_text, status, error, sim, f"Agrege ({nb} blocs)")
+                row["_html_order"] = i
+                results.append(row)
             for k in range(nb):
                 html_consumed.add(i + k)
             i += nb
@@ -153,9 +193,16 @@ def run_wording_qa(html_texts, excel_wordings):
             expected_class = ex_closest.get("Technical")
             found_class = item.get("component_class")
 
-            class_match = expected_class == found_class
+            # Un "Wording in wrong component" ne doit etre pose que si les
+            # DEUX classes sont effectivement connues et differentes. Si le
+            # HTML n'a pas de classe detectee (found_class vide - ex. un
+            # titre generique dont la resolution via title_to_component a
+            # echoue), on ne peut pas affirmer que le composant est le
+            # mauvais : autant juger uniquement sur la similarite du texte.
+            class_known = bool(expected_class) and bool(found_class)
+            class_mismatch = class_known and expected_class != found_class
 
-            if not class_match:
+            if class_mismatch:
                 status = "KO"
                 error_type = KO_WRONG_COMPONENT
 
@@ -189,20 +236,7 @@ def run_wording_qa(html_texts, excel_wordings):
                 "_html_order": i
             })
         else:
-            results.append({
-                "Component Name": "",
-                "Element": "",
-                "Expected Class": expected_class or "",
-                "HTML Class": found_class or "",
-                "Excel Wording": "",
-                "HTML Wording": clean_display_text(h_text),
-                "Status": status,
-                "Error Type": KO_UNEXPECTED_WORDING,
-                "Similarity": "0%",
-                "Criticality": criticality_for(KO_UNEXPECTED_WORDING),
-                "Match Type": "No match",
-                "_html_order": i
-            })
+            results.append(_unexpected_wording_row(h_text, expected_class, found_class, i))
         i += 1
 
     # Une meme cellule Excel peut deja avoir un KO "best-effort" pose par le
@@ -239,10 +273,17 @@ def run_wording_qa(html_texts, excel_wordings):
                 # (ex: 98% a cause d'une ponctuation en trop) reflete un vrai
                 # ecart sur CETTE branche precise, qui ne doit pas etre
                 # masque juste parce qu'une branche soeur a bien matche.
-                same_class = (
-                    bool(ex.get("Technical"))
-                    and closest_item.get("component_class") == ex.get("Technical")
-                )
+                #
+                # Comme pour KO_WRONG_COMPONENT plus haut : si la classe HTML
+                # n'a pas ete detectee (ex. titre generique non resolu), on
+                # ne peut pas exiger qu'elle corresponde - le seuil de
+                # similarite quasi-parfait suffit deja a exclure les faux
+                # positifs (une coincidence a >=99.5% de similarite est
+                # extremement improbable).
+                expected_class = ex.get("Technical")
+                found_class = closest_item.get("component_class")
+                class_known = bool(expected_class) and bool(found_class)
+                same_class = (not class_known) or expected_class == found_class
 
                 if (
                     same_class
@@ -299,13 +340,18 @@ def run_wording_qa(html_texts, excel_wordings):
     # ailleurs (fragment redondant d'un bloc plus large deja valide).
     results = _drop_ko_covered_by_ok(results)
 
-    # Deduplication des KO : supprimer les doublons HTML+Excel identiques
-    # (peut arriver quand un HTML non matche et un Excel non matche pointent l'un vers l'autre)
+    # Deduplication des lignes identiques (meme statut, meme paire HTML/Excel
+    # affichee) : peut arriver par ex. quand un fragment deja valide via
+    # Split ou Direct (qui ne "consomment" pas forcement la cellule Excel,
+    # voir find_split_match) est aussi retrouve comme wording "non couvert"
+    # ci-dessus et repromu separement - meme constat pour un HTML et un
+    # Excel non matches qui pointent l'un vers l'autre. On garde la 1ere
+    # occurrence rencontree, peu importe le Match Type exact.
     seen_pairs = set()
     deduped = []
     for r in results:
-        key = (str(r.get("HTML Wording", "")), str(r.get("Excel Wording", "")))
-        if r["Status"] == "KO" and key in seen_pairs:
+        key = (r["Status"], str(r.get("Excel Wording", "")), str(r.get("HTML Wording", "")))
+        if key in seen_pairs:
             continue
         seen_pairs.add(key)
         deduped.append(r)

@@ -120,6 +120,18 @@ class TestFindBestMatch:
         item = html_item("Discover now", component_class="audit-component-b")
         assert find_best_match(item, wordings, set()) is None
 
+    def test_two_unknown_classes_are_not_treated_as_a_matching_pair(self):
+        # Regression : "None != None" est faux, donc sans verification
+        # explicite que les DEUX classes sont connues, un element HTML sans
+        # classe detectee (component_class=None) et un wording Excel sans
+        # classe technique renseignee (Technical=None) etaient a tort
+        # traites comme "la meme classe" et compares, produisant un
+        # "meilleur effort" KO arbitraire contre un texte totalement sans
+        # rapport (voir l'onglet loyalty-section polonais dans la conv.).
+        wordings = [excel_row("Completely unrelated wording here", technical=None)]
+        item = html_item("Totally different text", component_class=None)
+        assert find_best_match(item, wordings, set()) is None
+
 
 class TestFindSplitMatch:
     def test_short_fragment_below_threshold_is_rejected(self):

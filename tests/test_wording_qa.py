@@ -78,6 +78,71 @@ class TestKoFallbackDoesNotStarveSplit:
         assert big_fragment["Match Type"] == "Split (HTML ⊂ Excel)"
 
 
+class TestFinalDedupCoversOkRows:
+    def test_split_matched_row_is_not_also_duplicated_via_fallback(self):
+        # Regression : find_split_match ne "consomme" jamais la cellule
+        # Excel (par design, pour laisser d'autres fragments la matcher
+        # aussi). Si personne d'autre ne la reclame, elle est ensuite
+        # retrouvee "non couverte" en fin de pipeline et repromue via le
+        # fallback (Shared conditional branch), produisant une 2e ligne OK
+        # identique pour le meme texte - frequent quand la classe technique
+        # n'est connue ni cote Excel ni cote HTML (technical=None).
+        excel_wordings = [excel_row("Twoje punkty", technical=None)]
+        html_texts = [html_item("Twoje punkty", component_class=None)]
+
+        results = run_wording_qa(html_texts, excel_wordings)
+
+        ok_rows = [r for r in results if r["Status"] == "OK"]
+        assert len(ok_rows) == 1
+
+
+class TestLowQualityBestEffortIsHonestlyUnexpectedWording:
+    """
+    Regression : le "meilleur effort" de compare() (Direct/Agrege) n'a
+    aucun plancher de qualite - meme un texte totalement sans rapport
+    ressortait associe au wording Excel "le moins pire" trouve dans la
+    meme classe technique (ex: "Twoje punkty" affiche comme "meilleur
+    candidat" contre "Gold", "Nagrody"... des textes sans aucun rapport,
+    juste parce qu'aucun autre wording de la classe loyalty-section ne
+    matchait mieux). Sous SIM_CLOSEST_MATCH_MIN, ce rapprochement doit etre
+    remplace par un KO honnete ("Unexpected wording"), sans pretendre a un
+    rapport avec un wording precis.
+    """
+
+    def test_low_similarity_direct_guess_becomes_unexpected_wording(self):
+        html_texts = [html_item("Gold", component_class="audit-component-loyalty")]
+        excel_wordings = [excel_row("Twoje punkty", technical="audit-component-loyalty")]
+
+        results = run_wording_qa(html_texts, excel_wordings)
+
+        row = next(r for r in results if r["HTML Wording"] == "Gold")
+        assert row["Status"] == "KO"
+        assert row["Error Type"] == "Unexpected wording (not in Excel)"
+        assert row["Excel Wording"] == ""
+
+    def test_aggregation_priority_over_low_quality_direct_is_preserved(self):
+        # Regression : downgrader le "meilleur effort" Direct en
+        # "Unexpected wording" ne doit pas pour autant laisser
+        # l'agregation "avaler" un fragment qui aurait pu matcher
+        # parfaitement seul au tour suivant (voir
+        # TestCascadeDoesNotLockInOnBadDirect, qui verifie deja ce
+        # comportement de bout en bout).
+        html_texts = [
+            html_item("New", component_class="audit-component-x"),
+            html_item("Discover our new arrivals today", component_class="audit-component-x"),
+        ]
+        excel_wordings = [excel_row("Discover our new arrivals today", technical="audit-component-x")]
+
+        results = run_wording_qa(html_texts, excel_wordings)
+
+        row = result_for(results, "Discover our new arrivals today")
+        assert row["Status"] == "OK"
+        assert row["Match Type"] == "Direct"
+
+        unrelated = next(r for r in results if r["HTML Wording"] == "New")
+        assert unrelated["Error Type"] == "Unexpected wording (not in Excel)"
+
+
 class TestDropKoCoveredByOk:
     def test_ko_fragment_contained_in_ok_html_is_dropped(self):
         results = [
@@ -234,6 +299,78 @@ class TestConditionalBranchesDisplayAndMatching:
 
         loyalty_row = next(r for r in results if r["Excel Wording"] == "Dein offenes Geschenk")
         assert loyalty_row["Status"] == "KO"
+
+
+class TestUnknownHtmlClassIsNotTreatedAsWrongComponent:
+    """
+    Regression : un element HTML dont la classe technique n'a pas pu etre
+    detectee (ex. un titre generique dont la resolution via
+    title_to_component a echoue - component_class=None) ne doit pas etre
+    signale "Wording in wrong component" juste parce que None != la classe
+    Excel attendue. On ne sait pas que le composant est faux, on sait juste
+    que sa classe est inconnue - autant juger sur la similarite du texte.
+    """
+
+    def test_perfect_text_match_with_unknown_html_class_is_ok(self):
+        html_texts = [html_item("Korzyści programu", component_class=None)]
+        excel_wordings = [excel_row("Korzyści programu", technical="audit-component-program-benefit")]
+
+        results = run_wording_qa(html_texts, excel_wordings)
+
+        # find_split_match ne "consomme" pas la cellule Excel (par design,
+        # voir son docstring), donc ce meme texte identique peut aussi etre
+        # re-matche via le fallback "Excel non couverts" ; peu importe le
+        # nombre exact de lignes produites, aucune ne doit etre un faux KO.
+        assert results
+        assert all(r["Status"] == "OK" for r in results)
+
+    def test_real_mismatch_with_unknown_html_class_still_ko_as_mismatch_not_wrong_component(self):
+        # Classe inconnue -> pas de "wrong component", mais un texte vraiment
+        # different reste KO (juge sur la similarite, comme d'habitude).
+        html_texts = [html_item("Something totally unrelated", component_class=None)]
+        excel_wordings = [excel_row("Korzyści programu", technical="audit-component-program-benefit")]
+
+        results = run_wording_qa(html_texts, excel_wordings)
+
+        row = next(r for r in results if r["HTML Wording"] == "Something totally unrelated")
+        assert row["Status"] == "KO"
+        assert row["Error Type"] != "Wording in wrong component"
+
+    def test_known_mismatched_classes_are_still_ko_never_falsely_ok(self):
+        # Les deux classes SONT connues et different reellement : ce texte
+        # ne doit jamais ressortir OK par erreur. (find_closest_match filtre
+        # deja les candidats de classe differente pendant sa recherche
+        # interne, donc ce cas remonte via "Unexpected wording"/"Wording
+        # relocated" plutot que via "Wording in wrong component" - qui, une
+        # fois ce fix applique, ne peut plus se produire que pour une classe
+        # HTML inconnue suivie d'une reconciliation ailleurs, jamais pour
+        # deux classes connues-et-differentes.)
+        html_texts = [html_item("Korzyści programu", component_class="audit-component-banner-right")]
+        excel_wordings = [excel_row("Korzyści programu", technical="audit-component-program-benefit")]
+
+        results = run_wording_qa(html_texts, excel_wordings)
+
+        assert results
+        assert all(r["Status"] == "KO" for r in results)
+
+    def test_duplicate_wording_across_merged_sheets_with_unknown_class_is_never_a_false_ko(self):
+        # Cas reel : meme wording present a l'identique dans l'onglet
+        # sequence et l'onglet frere LOYAL/NON LOYAL fusionne (voir
+        # qa.excel_loader.find_sibling_sequence_sheet), et l'element HTML
+        # n'a pas de classe detectee. Un texte identique cote Excel et cote
+        # HTML ne doit jamais ressortir en KO ("wrong component" ou
+        # "wording relocated"), peu importe combien de lignes Excel
+        # identiques y pointent.
+        html_texts = [html_item("Korzyści programu", component_class=None)]
+        excel_wordings = [
+            excel_row("Korzyści programu", technical="audit-component-program-benefit"),
+            excel_row("Korzyści programu", technical="audit-component-program-benefit"),
+        ]
+
+        results = run_wording_qa(html_texts, excel_wordings)
+
+        assert results
+        assert all(r["Status"] == "OK" for r in results)
 
 
 class TestBasicWordingQa:

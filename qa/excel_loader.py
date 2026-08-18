@@ -7,7 +7,10 @@ from qa.config import (
     EXCLUDED_QA_ELEMENTS,
     EXCLUDED_QA_ROWS,
     GENERIC_SHEET_KEYWORD,
+    LOYAL_KEYWORDS,
     MIN_TEXT_LENGTH,
+    NON_LOYAL_KEYWORDS,
+    SEQ_NUMBER_PATTERN,
     URL_COLUMN_NAME,
     URL_SHEET_KEYWORD,
     WORDING_COLUMN_NAME,
@@ -161,6 +164,80 @@ def load_excel_wordings(excel_file: str, keyword: str) -> tuple:
     wording_column = find_column(df, WORDING_COLUMN_NAME)
 
     return sheet, _parse_wording_rows(df, wording_column)
+
+
+def _loyalty_status(sheet_name: str) -> str:
+    """'non_loyal' / 'loyal' / None selon les mots-cles fidelite presents
+    dans le nom de l'onglet (voir qa.config.NON_LOYAL_KEYWORDS/LOYAL_KEYWORDS ;
+    NON_LOYAL_KEYWORDS teste en premier car "NON LOYAL" contient aussi "LOYAL")."""
+    upper = sheet_name.upper()
+    if any(kw in upper for kw in NON_LOYAL_KEYWORDS):
+        return "non_loyal"
+    if any(kw in upper for kw in LOYAL_KEYWORDS):
+        return "loyal"
+    return None
+
+
+def find_sibling_sequence_sheet(excel_file: str, sheet_name: str) -> str:
+    """
+    Pour un onglet de sequence deja resolu (ex: "SEQ 1 NON LOYAL"), cherche
+    l'onglet "frere" du meme classeur qui couvre la MEME sequence (meme
+    numero SEQ) mais l'audience OPPOSEE (LOYAL <-> NON LOYAL, FID <-> NON
+    FID).
+
+    Cas cible : les deux onglets ne sont pas deux campagnes differentes,
+    mais les 2 wordings possibles d'un seul et meme template HTML, qui
+    bascule de l'un a l'autre via une condition AEM selon l'audience du
+    destinataire (voir "Blocs conditionnels AEM" dans le README). Tester ce
+    HTML contre un seul des deux onglets ferait ressortir a tort le wording
+    de l'autre audience comme introuvable.
+
+    Retourne le nom de l'onglet frere, ou None si le nom fourni n'a pas de
+    numero de sequence / mot-cle fidelite, si aucun autre onglet ne
+    correspond, ou si PLUSIEURS onglets correspondent (ambigu : mieux vaut
+    ne rien fusionner que fusionner a tort).
+    """
+    match = SEQ_NUMBER_PATTERN.search(sheet_name.upper())
+    status = _loyalty_status(sheet_name)
+    if not match or not status:
+        return None
+
+    seq_num = int(match.group(1))
+    target_status = "loyal" if status == "non_loyal" else "non_loyal"
+
+    xls = pd.ExcelFile(excel_file)
+    candidates = []
+    for candidate in xls.sheet_names:
+        if candidate == sheet_name:
+            continue
+        candidate_match = SEQ_NUMBER_PATTERN.search(candidate.upper())
+        if not candidate_match or int(candidate_match.group(1)) != seq_num:
+            continue
+        if _loyalty_status(candidate) == target_status:
+            candidates.append(candidate)
+
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
+
+
+def load_sibling_sequence_wordings(excel_file: str, sheet_name: str) -> tuple:
+    """
+    Charge les wordings de l'onglet "frere" LOYAL/NON LOYAL de sheet_name
+    (voir find_sibling_sequence_sheet), meme structure de retour que
+    load_excel_wordings. Retourne (None, []) si aucun onglet frere n'a ete
+    trouve.
+    """
+    sibling_sheet = find_sibling_sequence_sheet(excel_file, sheet_name)
+    if not sibling_sheet:
+        return None, []
+
+    df = pd.read_excel(excel_file, sheet_name=sibling_sheet, header=1, engine="openpyxl")
+    df.columns = df.columns.str.strip()
+
+    wording_column = find_column(df, WORDING_COLUMN_NAME)
+
+    return sibling_sheet, _parse_wording_rows(df, wording_column)
 
 
 def load_generic_wordings(excel_file: str) -> tuple:

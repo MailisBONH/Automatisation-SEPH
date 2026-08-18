@@ -132,9 +132,12 @@ def _compare_single(html_text: str, excel_text: str) -> tuple:
 # =========================
 def find_best_match(html_item: dict, excel_wordings: list, matched_excel_idx: set):
     """
-    Cherche uniquement parmi les wordings Excel dont la classe technique
-    correspond à la component_class de l'élément HTML.
-    Si aucun wording de la bonne classe ne matche → None (sera traité comme KO).
+    Cherche uniquement parmi les wordings Excel dont la classe technique est
+    CONNUE et correspond a la component_class (elle aussi connue) de
+    l'element HTML. Si l'une des deux (ou les deux) est inconnue, aucun
+    wording n'est considere ici (sera traite comme KO, avec une chance
+    d'etre rattrape par find_closest_match qui gere ce cas plus finement).
+    Si aucun wording de la bonne classe ne matche -> None (sera traite comme KO).
     """
     found_class = html_item.get("component_class")
     h_text = html_item["text"]
@@ -147,8 +150,18 @@ def find_best_match(html_item: dict, excel_wordings: list, matched_excel_idx: se
 
             # ── NOUVEAU : filtrage strict par classe ──────────────────────────
             # On ne compare que les wordings dont la classe attendue correspond
-            # à la classe du composant HTML où le texte a été trouvé.
-            if ex.get("Technical") != found_class:
+            # a la classe du composant HTML ou le texte a ete trouve. Les DEUX
+            # doivent etre connues : "None != None" est faux, donc sans cette
+            # verification explicite, deux classes INCONNUES des deux cotes
+            # seraient a tort traitees comme "la meme classe" (par egalite de
+            # deux None) et comparees sans filtre - produisant des "meilleurs
+            # candidats" arbitraires (Content mismatch) contre un texte
+            # totalement sans rapport. Une classe inconnue est deja geree plus
+            # loin dans le pipeline (find_closest_match), de facon bornee par
+            # un seuil de similarite minimal - pas ici, ou compare() n'a aucun
+            # plancher de qualite pour son suivi "meilleur effort".
+            expected_class = ex.get("Technical")
+            if not (found_class and expected_class and found_class == expected_class):
                 continue
             # ─────────────────────────────────────────────────────────────────
 

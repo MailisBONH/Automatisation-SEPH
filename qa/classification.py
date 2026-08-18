@@ -10,18 +10,20 @@ devinee ici.
 Ne leve jamais : une detection ratee retourne simplement None, l'utilisateur
 complete alors manuellement dans le formulaire.
 """
-import re
 import urllib.parse
 
 import pandas as pd
 
-from qa.config import DOMAIN_TO_COUNTRY, LANGUAGE_TO_COUNTRY, WORDING_COLUMN_NAME
+from qa.config import (
+    DOMAIN_TO_COUNTRY,
+    LANGUAGE_TO_COUNTRY,
+    LOYAL_KEYWORDS as _LOYAL_KEYWORDS,
+    NON_LOYAL_KEYWORDS as _NON_LOYAL_KEYWORDS,
+    SEQ_NUMBER_PATTERN as _SEQ_NUMBER_RE,
+    WORDING_COLUMN_NAME,
+)
 from qa.excel_loader import _locate_url_sheet_layout, find_column, find_sheet
 from qa.history import build_history_tree
-
-_SEQ_NUMBER_RE = re.compile(r"\bSEQ\s*0*(\d+)\b", re.IGNORECASE)
-_NON_LOYAL_KEYWORDS = ("NON FID", "NON-FID", "NON LOYAL", "NON-LOYAL")
-_LOYAL_KEYWORDS = ("FID", "LOYAL")
 
 
 def normalize_sequence_name(name: str) -> str:
