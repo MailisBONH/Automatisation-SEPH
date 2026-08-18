@@ -1,5 +1,3 @@
-import os
-
 from qa.config import CAMPAIGN_KEYWORD, EXCEL_FILE, HTML_FILE
 from qa.excel_loader import (
     load_excel_urls,
@@ -8,12 +6,7 @@ from qa.excel_loader import (
     load_sibling_sequence_wordings,
     load_sibling_url_section,
 )
-from qa.html_extraction import (
-    fetch_html_from_aem,
-    load_and_extract_html_texts,
-    load_raw_html,
-    save_html_to_temp,
-)
+from qa.html_extraction import load_and_extract_html_texts, load_raw_html
 from qa.report import save_report
 from qa.url_qa import run_url_qa
 from qa.url_utils import normalize_url
@@ -154,19 +147,7 @@ def run_qa_for_sequence(html_file, excel_file, keyword, mode="wording", include_
     return results, sheet
 
 
-def run_qa(html_file=None, excel_file=None, keyword="", aem_url=None, username=None, password=None,
-           mode="wording", aem_temp_path="temp/aem_input.html", include_generic=False):
-
-    # ✅ Si URL AEM fournie → priorité
-    if aem_url:
-
-        html_content = fetch_html_from_aem(aem_url, username, password)
-
-        os.makedirs(os.path.dirname(aem_temp_path) or ".", exist_ok=True)
-        html_file = aem_temp_path
-
-        save_html_to_temp(html_content, html_file)
-
+def run_qa(html_file=None, excel_file=None, keyword="", mode="wording", include_generic=False):
 
     print("\n" + "=" * 70)
     print("🔎 QA EMAIL - HTML → Excel (text-contribution)")

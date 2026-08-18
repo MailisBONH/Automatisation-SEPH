@@ -5,12 +5,20 @@ ligne) dans output/history.jsonl - non versionne, comme le reste de output/.
 """
 import json
 import os
+import threading
 from collections import defaultdict
 from datetime import datetime, timedelta
 
 from qa.config import HISTORY_RETENTION_DAYS, OUTPUT_DIR
 
 HISTORY_PATH = os.path.join(OUTPUT_DIR, "history.jsonl")
+
+# Streamlit sert chaque session utilisateur dans un thread du meme process :
+# un RLock (pas un Lock simple - record_run appelle prune_history, qui doit
+# pouvoir re-acquerir le verrou depuis le meme thread) protege les
+# operations de lecture-modification-ecriture sur HISTORY_PATH contre une
+# ecriture concurrente entre deux sessions qui archiveraient au meme moment.
+_LOCK = threading.RLock()
 
 
 def _parse_timestamp(timestamp: str) -> datetime:
@@ -45,40 +53,42 @@ def record_run(sheet: str, mode: str, total: int, ok: int, ko: int, score: float
         entry["trigger"] = trigger
     if sequence:
         entry["sequence"] = sequence
-    try:
-        directory = os.path.dirname(path)
-        if directory:
-            os.makedirs(directory, exist_ok=True)
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    except OSError:
-        return
+    with _LOCK:
+        try:
+            directory = os.path.dirname(path)
+            if directory:
+                os.makedirs(directory, exist_ok=True)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except OSError:
+            return
 
-    try:
-        prune_history(path=path)
-    except OSError:
-        pass
+        try:
+            prune_history(path=path)
+        except OSError:
+            pass
 
 
 def load_history(sheet: str = None, path: str = HISTORY_PATH) -> list:
     """Retourne les runs enregistres (tous, ou filtres sur sheet), dans
     l'ordre chronologique. Liste vide si le fichier n'existe pas encore."""
-    if not os.path.exists(path):
-        return []
+    with _LOCK:
+        if not os.path.exists(path):
+            return []
 
-    entries = []
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if sheet is None or entry.get("sheet") == sheet:
-                entries.append(entry)
-    return entries
+        entries = []
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if sheet is None or entry.get("sheet") == sheet:
+                    entries.append(entry)
+        return entries
 
 
 def load_classified_history(path: str = HISTORY_PATH) -> list:
@@ -120,30 +130,31 @@ def _rewrite_entries(path: str, transform) -> None:
     fichier (entree ignoree si transform retourne None). Les lignes non-JSON
     ou non classees sont recopiees telles quelles. No-op si le fichier
     n'existe pas encore."""
-    if not os.path.exists(path):
-        return
+    with _LOCK:
+        if not os.path.exists(path):
+            return
 
-    lines = []
-    with open(path, encoding="utf-8") as f:
-        for raw_line in f:
-            raw_line = raw_line.strip()
-            if not raw_line:
-                continue
-            try:
-                entry = json.loads(raw_line)
-            except json.JSONDecodeError:
-                lines.append(raw_line)
-                continue
-
-            if entry.get("country") and entry.get("trigger") and entry.get("sequence"):
-                entry = transform(entry)
-                if entry is None:
+        lines = []
+        with open(path, encoding="utf-8") as f:
+            for raw_line in f:
+                raw_line = raw_line.strip()
+                if not raw_line:
+                    continue
+                try:
+                    entry = json.loads(raw_line)
+                except json.JSONDecodeError:
+                    lines.append(raw_line)
                     continue
 
-            lines.append(json.dumps(entry, ensure_ascii=False))
+                if entry.get("country") and entry.get("trigger") and entry.get("sequence"):
+                    entry = transform(entry)
+                    if entry is None:
+                        continue
 
-    with open(path, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines) + ("\n" if lines else ""))
+                lines.append(json.dumps(entry, ensure_ascii=False))
+
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + ("\n" if lines else ""))
 
 
 def rewrite_classification(old_country: str, old_trigger: str, old_sequence: str,
@@ -184,48 +195,49 @@ def prune_history(path: str = HISTORY_PATH, retention_days: int = HISTORY_RETENT
     delete_classification). Appelee automatiquement par record_run, mais
     peut aussi etre invoquee directement (ex: nettoyage manuel).
     """
-    if not os.path.exists(path):
-        return
+    with _LOCK:
+        if not os.path.exists(path):
+            return
 
-    now = now or datetime.now()
-    cutoff = now - timedelta(days=retention_days)
+        now = now or datetime.now()
+        cutoff = now - timedelta(days=retention_days)
 
-    with open(path, encoding="utf-8") as f:
-        raw_lines = [line.strip() for line in f if line.strip()]
+        with open(path, encoding="utf-8") as f:
+            raw_lines = [line.strip() for line in f if line.strip()]
 
-    parsed = []
-    for raw_line in raw_lines:
-        try:
-            parsed.append((raw_line, json.loads(raw_line)))
-        except json.JSONDecodeError:
-            parsed.append((raw_line, None))
+        parsed = []
+        for raw_line in raw_lines:
+            try:
+                parsed.append((raw_line, json.loads(raw_line)))
+            except json.JSONDecodeError:
+                parsed.append((raw_line, None))
 
-    groups = defaultdict(list)
-    for i, (_, entry) in enumerate(parsed):
-        if entry and entry.get("country") and entry.get("trigger") and entry.get("sequence"):
-            groups[(entry["country"], entry["trigger"], entry["sequence"])].append(i)
+        groups = defaultdict(list)
+        for i, (_, entry) in enumerate(parsed):
+            if entry and entry.get("country") and entry.get("trigger") and entry.get("sequence"):
+                groups[(entry["country"], entry["trigger"], entry["sequence"])].append(i)
 
-    drop = set()
-    for indices in groups.values():
-        indices.sort(key=lambda i: parsed[i][1]["timestamp"])
-        recent = [i for i in indices if _parse_timestamp(parsed[i][1]["timestamp"]) >= cutoff]
+        drop = set()
+        for indices in groups.values():
+            indices.sort(key=lambda i: parsed[i][1]["timestamp"])
+            recent = [i for i in indices if _parse_timestamp(parsed[i][1]["timestamp"]) >= cutoff]
 
-        if len(recent) >= 2:
-            keep = set(recent)
-        elif len(recent) == 1:
-            pos = indices.index(recent[0])
-            keep = set(indices[max(0, pos - 1):pos + 1])
-        else:
-            keep = set(indices[-2:])
+            if len(recent) >= 2:
+                keep = set(recent)
+            elif len(recent) == 1:
+                pos = indices.index(recent[0])
+                keep = set(indices[max(0, pos - 1):pos + 1])
+            else:
+                keep = set(indices[-2:])
 
-        drop.update(set(indices) - keep)
+            drop.update(set(indices) - keep)
 
-    if not drop:
-        return
+        if not drop:
+            return
 
-    kept_lines = [raw_line for i, (raw_line, _) in enumerate(parsed) if i not in drop]
-    with open(path, "w", encoding="utf-8") as f:
-        f.write("\n".join(kept_lines) + ("\n" if kept_lines else ""))
+        kept_lines = [raw_line for i, (raw_line, _) in enumerate(parsed) if i not in drop]
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(kept_lines) + ("\n" if kept_lines else ""))
 
 
 def delete_classification(country: str, trigger: str, sequence: str, path: str = HISTORY_PATH) -> None:

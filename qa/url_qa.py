@@ -97,31 +97,47 @@ def _as_entry(excel_entry) -> tuple:
     return str(excel_entry), "", ""
 
 
+def _classify_href_match(html_variants, excel_variants, norm_excel_variants) -> str:
+    """
+    Classe la correspondance entre les variantes (AEM if/else deja
+    depliees) d'un href HTML et celles d'une URL Excel : "exact",
+    "query_ignored", "functional", ou "" si aucune ne correspond. Seule
+    source de verite pour ces 3 criteres, partagee par run_url_qa (matching
+    principal) et _count_occurrences (comptage) - avant cette factorisation,
+    les deux redefinissaient les memes conditions separement, avec le risque
+    qu'une evolution future (ex. nouvelle regle de domaine) soit appliquee a
+    l'un et oubliee dans l'autre.
+    """
+    if any(hv == ev for hv in html_variants for ev in excel_variants):
+        return "exact"
+    if any(
+        is_query_ignored_domain(ev) and strip_query(hv) == strip_query(ev)
+        for hv in html_variants for ev in excel_variants
+    ):
+        return "query_ignored"
+    norm_html_variants = [normalize_url(v) for v in html_variants]
+    if any(hv == ev for hv in norm_html_variants for ev in norm_excel_variants):
+        return "functional"
+    return ""
+
+
 def _count_occurrences(excel_variants, norm_excel_variants, links) -> int:
     """
     Nombre de liens HTML dont la destination correspond a cette URL Excel
     (exactement, fonctionnellement, ou via un domaine a query ignoree - les
-    3 memes criteres que le matching principal), tous comptes - pas
-    seulement le premier trouve. Certains liens sont normalement repetes
-    plusieurs fois dans le HTML (ex. un meme CTA en plusieurs endroits) ;
-    il n'y a pas de "nombre attendu" cote referentiel, mais afficher le
-    compte reel aide a verifier qu'un lien censement repete l'est bien.
+    3 memes criteres que le matching principal, voir _classify_href_match),
+    tous comptes - pas seulement le premier trouve. Certains liens sont
+    normalement repetes plusieurs fois dans le HTML (ex. un meme CTA en
+    plusieurs endroits) ; il n'y a pas de "nombre attendu" cote referentiel,
+    mais afficher le compte reel aide a verifier qu'un lien censement repete
+    l'est bien.
     """
     count = 0
     for link in links:
         href_unescaped = html.unescape(link["href"].strip())
         html_variants = expand_conditional_variants(href_unescaped)
 
-        exact = any(hv == ev for hv in html_variants for ev in excel_variants)
-        query_ignored = any(
-            is_query_ignored_domain(ev) and strip_query(hv) == strip_query(ev)
-            for hv in html_variants for ev in excel_variants
-        )
-        functional = exact or query_ignored or any(
-            normalize_url(hv) == nev for hv in html_variants for nev in norm_excel_variants
-        )
-
-        if exact or query_ignored or functional:
+        if _classify_href_match(html_variants, excel_variants, norm_excel_variants):
             count += 1
 
     return count
@@ -186,23 +202,20 @@ def run_url_qa(raw_html: str, excel_urls: list) -> list:
             href_unescaped = html.unescape(href)
             html_variants = expand_conditional_variants(href_unescaped)
 
-            if exact_href is None and any(hv == ev for hv in html_variants for ev in excel_variants):
+            match_kind = _classify_href_match(html_variants, excel_variants, norm_excel_variants)
+
+            if match_kind == "exact" and exact_href is None:
                 exact_href = href
                 exact_class = link["component_class"]
                 break  # rien de mieux possible pour cette URL Excel
 
-            if ignored_query_href is None and any(
-                is_query_ignored_domain(ev) and strip_query(hv) == strip_query(ev)
-                for hv in html_variants for ev in excel_variants
-            ):
+            if match_kind == "query_ignored" and ignored_query_href is None:
                 ignored_query_href = href
                 ignored_query_class = link["component_class"]
 
-            if functional_href is None:
-                norm_html_variants = [normalize_url(v) for v in html_variants]
-                if any(hv == ev for hv in norm_html_variants for ev in norm_excel_variants):
-                    functional_href = href
-                    functional_class = link["component_class"]
+            elif match_kind == "functional" and functional_href is None:
+                functional_href = href
+                functional_class = link["component_class"]
 
         # Meilleur candidat trouve, par ordre de priorite (Exact > domaine a
         # query ignoree > fonctionnel), avec son statut/type "de base".

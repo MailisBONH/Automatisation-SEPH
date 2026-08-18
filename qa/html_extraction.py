@@ -1,7 +1,5 @@
 import html
 
-import requests
-from requests.auth import HTTPBasicAuth
 from bs4 import BeautifulSoup
 
 from qa.config import DEBUG_MODE, LEGAL_MENTION_CLASS_KEYWORDS, MIN_TEXT_LENGTH
@@ -35,28 +33,6 @@ def extract_real_html_from_viewsource(raw: str) -> str:
 # =========================
 # EXTRACTION HTML
 # =========================
-def fetch_html_from_aem(link: str, username: str, password: str) -> str:
-    try:
-        response = requests.get(
-            link,
-            auth=HTTPBasicAuth(username, password),
-            timeout=30,
-            verify=True
-        )
-
-        response.raise_for_status()
-
-        return response.text
-
-    except requests.exceptions.RequestException as e:
-        raise ValueError(f"Erreur lors de la récupération AEM : {e}")
-
-
-def save_html_to_temp(html_content: str, path: str):
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(html_content)
-
-
 def build_title_to_component_map(soup: BeautifulSoup) -> dict:
     """
     Construit la map { texte_normalisé_du_titre -> "audit-component-xxx" }

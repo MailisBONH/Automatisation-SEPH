@@ -185,37 +185,38 @@ def _loyalty_status(sheet_name: str) -> str:
     return None
 
 
-def find_sibling_sequence_sheet(excel_file: str, sheet_name: str) -> str:
+def _find_sibling_name(name: str, candidate_names: list) -> str:
     """
-    Pour un onglet de sequence deja resolu (ex: "SEQ 1 NON LOYAL"), cherche
-    l'onglet "frere" du meme classeur qui couvre la MEME sequence (meme
+    Coeur commun a find_sibling_sequence_sheet (onglets d'un classeur) et
+    find_sibling_url_section (sections d'un meme onglet UTM, voir
+    _parse_url_sections) : pour un nom deja resolu (ex: "SEQ 1 NON LOYAL"),
+    cherche parmi candidate_names celui qui couvre la MEME sequence (meme
     numero SEQ) mais l'audience OPPOSEE (LOYAL <-> NON LOYAL, FID <-> NON
     FID).
 
-    Cas cible : les deux onglets ne sont pas deux campagnes differentes,
-    mais les 2 wordings possibles d'un seul et meme template HTML, qui
-    bascule de l'un a l'autre via une condition AEM selon l'audience du
-    destinataire (voir "Blocs conditionnels AEM" dans le README). Tester ce
-    HTML contre un seul des deux onglets ferait ressortir a tort le wording
-    de l'autre audience comme introuvable.
+    Cas cible : les deux ne sont pas deux campagnes differentes, mais les 2
+    wordings/URLs possibles d'un seul et meme template HTML, qui bascule de
+    l'un a l'autre via une condition AEM selon l'audience du destinataire
+    (voir "Blocs conditionnels AEM" dans le README). Tester ce HTML contre
+    un seul des deux ferait ressortir a tort le contenu de l'autre audience
+    comme introuvable.
 
-    Retourne le nom de l'onglet frere, ou None si le nom fourni n'a pas de
-    numero de sequence / mot-cle fidelite, si aucun autre onglet ne
-    correspond, ou si PLUSIEURS onglets correspondent (ambigu : mieux vaut
-    ne rien fusionner que fusionner a tort).
+    Retourne le nom trouve, ou None si name n'a pas de numero de sequence /
+    mot-cle fidelite, si aucun candidat ne correspond, ou si PLUSIEURS
+    candidats correspondent (ambigu : mieux vaut ne rien fusionner que
+    fusionner a tort).
     """
-    match = SEQ_NUMBER_PATTERN.search(sheet_name.upper())
-    status = _loyalty_status(sheet_name)
+    match = SEQ_NUMBER_PATTERN.search(name.upper())
+    status = _loyalty_status(name)
     if not match or not status:
         return None
 
     seq_num = int(match.group(1))
     target_status = "loyal" if status == "non_loyal" else "non_loyal"
 
-    xls = pd.ExcelFile(excel_file)
     candidates = []
-    for candidate in xls.sheet_names:
-        if candidate == sheet_name:
+    for candidate in candidate_names:
+        if candidate == name:
             continue
         candidate_match = SEQ_NUMBER_PATTERN.search(candidate.upper())
         if not candidate_match or int(candidate_match.group(1)) != seq_num:
@@ -226,6 +227,43 @@ def find_sibling_sequence_sheet(excel_file: str, sheet_name: str) -> str:
     if len(candidates) == 1:
         return candidates[0]
     return None
+
+
+def find_sibling_sequence_sheet(excel_file: str, sheet_name: str) -> str:
+    """Pour un onglet de sequence deja resolu, cherche l'onglet "frere" du
+    meme classeur (voir _find_sibling_name pour la regle de recherche)."""
+    xls = pd.ExcelFile(excel_file)
+    return _find_sibling_name(sheet_name, xls.sheet_names)
+
+
+def _sibling_grouped_choices(names: list, find_sibling) -> list:
+    """
+    Coeur commun a list_wording_sheet_choices et list_url_sequence_choices :
+    ne propose qu'UN SEUL des deux noms d'une paire "soeur" LOYAL/NON LOYAL
+    (ou FID/NON FID) parmi names - le second etant fusionne automatiquement
+    des qu'on teste le premier (voir load_sibling_sequence_wordings /
+    load_sibling_url_section), le proposer separement ferait croire a 2
+    tests distincts pour ce qui est en realite le meme HTML.
+
+    find_sibling(name) -> nom du frere ou None (voir find_sibling_sequence_sheet
+    / find_sibling_url_section). Retourne une liste de tuples
+    (name, display_label), dans l'ordre de names, display_label indiquant
+    explicitement la fusion pour une paire soeur.
+    """
+    choices = []
+    hidden_siblings = set()
+    for name in names:
+        if name in hidden_siblings:
+            continue
+
+        sibling = find_sibling(name)
+        if sibling and sibling in names:
+            hidden_siblings.add(sibling)
+            choices.append((name, f"{name} (regroupé avec {sibling})"))
+        else:
+            choices.append((name, name))
+
+    return choices
 
 
 def list_wording_sheet_choices(excel_file: str) -> list:
@@ -239,16 +277,11 @@ def list_wording_sheet_choices(excel_file: str) -> list:
       fusionne automatiquement avec la sequence testee via la case "composants
       generiques" (voir load_generic_wordings), jamais teste seul.
     - un seul des deux onglets d'une paire FID/NON FID (ou LOYAL/NON LOYAL)
-      "frere" (voir find_sibling_sequence_sheet) : le second est fusionne
-      automatiquement des qu'on teste le premier (voir
-      load_sibling_sequence_wordings) - le proposer separement ferait
-      croire a 2 tests distincts pour ce qui est en realite le meme HTML,
-      teste une seule fois avec les wordings des deux audiences reunis.
+      "frere" (voir find_sibling_sequence_sheet et _sibling_grouped_choices).
 
     Retourne une liste de tuples (sheet_name, display_label) dans l'ordre du
     classeur : sheet_name est la valeur reelle a repasser a
-    load_excel_wordings/run_qa, display_label est le texte a afficher dans
-    le menu (indique explicitement la fusion pour une paire FID/NON FID).
+    load_excel_wordings/run_qa.
     """
     xls = pd.ExcelFile(excel_file)
     all_sheets = xls.sheet_names
@@ -259,20 +292,7 @@ def list_wording_sheet_choices(excel_file: str) -> list:
         and GENERIC_SHEET_KEYWORD.lower() not in s.lower()
     ]
 
-    choices = []
-    hidden_siblings = set()
-    for sheet in relevant:
-        if sheet in hidden_siblings:
-            continue
-
-        sibling = find_sibling_sequence_sheet(excel_file, sheet)
-        if sibling and sibling in relevant:
-            hidden_siblings.add(sibling)
-            choices.append((sheet, f"{sheet} (regroupé avec {sibling})"))
-        else:
-            choices.append((sheet, sheet))
-
-    return choices
+    return _sibling_grouped_choices(relevant, lambda s: find_sibling_sequence_sheet(excel_file, s))
 
 
 def load_sibling_sequence_wordings(excel_file: str, sheet_name: str) -> tuple:
@@ -486,41 +506,11 @@ def load_excel_urls(excel_file: str, keyword: str) -> tuple:
 
 
 def find_sibling_url_section(excel_file: str, section_name: str) -> str:
-    """
-    Symetrique de find_sibling_sequence_sheet, mais pour les sections
-    nommees d'un MEME onglet UTM (voir _parse_url_sections) plutot que des
-    onglets Excel separes : pour une section deja resolue (ex: "SEQ 1 NON
-    FID"), cherche la section "soeur" de la meme sequence mais l'audience
-    opposee (FID <-> NON FID, LOYAL <-> NON LOYAL) - meme HTML, le lien
-    (et sa destination/ses parametres UTM) pouvant basculer de l'un a
-    l'autre selon l'audience exactement comme le wording (voir
-    find_sibling_sequence_sheet).
-
-    Retourne le nom de la section soeur, ou None si section_name n'a pas de
-    numero de sequence/mot-cle fidelite reconnaissable, si aucune autre
-    section ne correspond, ou si PLUSIEURS correspondent (ambigu).
-    """
-    match = SEQ_NUMBER_PATTERN.search(section_name.upper())
-    status = _loyalty_status(section_name)
-    if not match or not status:
-        return None
-
-    seq_num = int(match.group(1))
-    target_status = "loyal" if status == "non_loyal" else "non_loyal"
-
-    candidates = []
-    for candidate in list_url_sequences(excel_file):
-        if candidate == section_name:
-            continue
-        candidate_match = SEQ_NUMBER_PATTERN.search(candidate.upper())
-        if not candidate_match or int(candidate_match.group(1)) != seq_num:
-            continue
-        if _loyalty_status(candidate) == target_status:
-            candidates.append(candidate)
-
-    if len(candidates) == 1:
-        return candidates[0]
-    return None
+    """Symetrique de find_sibling_sequence_sheet, mais pour les sections
+    nommees d'un MEME onglet UTM (voir _parse_url_sections et
+    _find_sibling_name pour la regle de recherche) plutot que des onglets
+    Excel separes."""
+    return _find_sibling_name(section_name, list_url_sequences(excel_file))
 
 
 def load_sibling_url_section(excel_file: str, section_name: str) -> tuple:
@@ -547,28 +537,11 @@ def list_url_sequence_choices(excel_file: str) -> list:
     Liste les sequences a proposer dans le menu de selection URL (voir
     home.py), en ne proposant qu'UN SEUL des deux noms d'une paire FID/NON
     FID (ou LOYAL/NON LOYAL) "soeur" au sein de l'onglet UTM (voir
-    find_sibling_url_section) - la seconde est fusionnee automatiquement
-    des qu'on teste la premiere (voir load_sibling_url_section dans
-    qa.engine), la proposer separement ferait croire a 2 tests distincts
-    pour ce qui est en realite le meme HTML.
+    find_sibling_url_section et _sibling_grouped_choices).
 
     Retourne une liste de tuples (section_name, display_label), dans le
     meme ordre que list_url_sequences (liste vide si l'onglet UTM ne
     comporte pas de decoupage en sequences - meme cas que list_url_sequences).
     """
     all_sections = list_url_sequences(excel_file)
-
-    choices = []
-    hidden_siblings = set()
-    for section in all_sections:
-        if section in hidden_siblings:
-            continue
-
-        sibling = find_sibling_url_section(excel_file, section)
-        if sibling and sibling in all_sections:
-            hidden_siblings.add(sibling)
-            choices.append((section, f"{section} (regroupé avec {sibling})"))
-        else:
-            choices.append((section, section))
-
-    return choices
+    return _sibling_grouped_choices(all_sections, lambda s: find_sibling_url_section(excel_file, s))
