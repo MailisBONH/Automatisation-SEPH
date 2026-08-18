@@ -1,6 +1,10 @@
 from bs4 import BeautifulSoup
 
-from qa.html_extraction import build_title_to_component_map, extract_texts_from_textcontribution
+from qa.html_extraction import (
+    build_title_to_component_map,
+    extract_anchor_links,
+    extract_texts_from_textcontribution,
+)
 
 
 def _extract(html):
@@ -184,3 +188,22 @@ class TestGenericTitleClassResolution:
 
         title_item = next(i for i in items if i["text"] == "Titre isole")
         assert title_item["component_class"] is None
+
+
+class TestExtractAnchorLinks:
+    def test_mailto_links_are_excluded(self):
+        html = (
+            '<a href="mailto:support@example.com">Contact</a>'
+            '<a href="https://example.com/shop">Shop</a>'
+        )
+        links = extract_anchor_links(html)
+        assert [l["href"] for l in links] == ["https://example.com/shop"]
+
+    def test_mailto_exclusion_is_case_insensitive(self):
+        html = '<a href="MAILTO:support@example.com">Contact</a>'
+        assert extract_anchor_links(html) == []
+
+    def test_regular_link_carries_its_component_class(self):
+        html = '<div class="audit-component-cta"><a href="https://example.com/shop">Shop</a></div>'
+        links = extract_anchor_links(html)
+        assert links == [{"href": "https://example.com/shop", "component_class": "audit-component-cta"}]

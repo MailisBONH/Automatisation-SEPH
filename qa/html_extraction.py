@@ -392,10 +392,16 @@ def extract_anchor_links(raw_html: str) -> list:
     Extrait chaque lien <a href="..."> du HTML brut avec la classe du
     composant englobant (audit-component-xxx, via find_component_class),
     pour la QA URL (voir qa.url_qa.run_url_qa).
+
+    Les liens mailto: sont ignores : ce sont des adresses de contact/support,
+    jamais des URL marketing destinees a etre trackees dans le referentiel
+    UTM - les inclure ferait ressortir chaque lien mailto comme "Unexpected
+    URL (not in Excel)" a chaque rapport, sans aucune valeur.
     """
     soup = BeautifulSoup(raw_html or "", "lxml")
 
     return [
         {"href": a["href"], "component_class": find_component_class(a) or ""}
         for a in soup.find_all("a", href=True)
+        if not a["href"].strip().lower().startswith("mailto:")
     ]

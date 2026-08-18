@@ -3,6 +3,7 @@ import html
 from qa.config import KO_URL_PARAM_MISMATCH, KO_URL_NOT_FOUND, KO_UNEXPECTED_URL
 from qa.html_extraction import extract_anchor_links
 from qa.matching import criticality_for
+from qa.text_utils import clean_display_text, expand_conditional_variants
 from qa.url_utils import normalize_url
 
 
@@ -10,13 +11,18 @@ from qa.url_utils import normalize_url
 # PIPELINE URL
 # =========================
 def _make_url_row(expected_class, found_class, excel_url, found_href, status, error, criticality, match_type):
+    # clean_display_text() ne fait rien si excel_url/found_href ne contient
+    # pas de bloc conditionnel AEM (cas courant) ; sinon elle affiche la
+    # branche resolue la plus proche de l'autre cote, jamais le code AEM
+    # brut (<% if %>...) - meme logique que qa.matching.make_row cote
+    # wording.
     return {
         "Component Name": "",
         "Element": "",
         "Expected Class": expected_class,
         "HTML Class": found_class,
-        "Excel Wording": excel_url,
-        "HTML Wording": found_href,
+        "Excel Wording": clean_display_text(excel_url, found_href),
+        "HTML Wording": clean_display_text(found_href, excel_url),
         "Status": status,
         "Error Type": error,
         "Similarity": "100%" if found_href else "0%",
@@ -44,6 +50,14 @@ def run_url_qa(raw_html: str, excel_urls: list) -> list:
       (le tracking reste correct mais l'URL n'est pas rendue a l'identique)
     - Aucune correspondance -> KO, criticite haute
 
+    Comme le wording, une URL (cote Excel ou cote HTML) peut contenir un
+    bloc conditionnel AEM (<% if %>...<% } else { %>...<% } %>) qui bascule
+    d'une destination/d'un parametre a l'autre selon l'audience - le rendu
+    final n'affiche jamais qu'une seule branche a la fois. expand_conditional_variants()
+    deplie chaque cote en une variante par branche, et n'importe quelle
+    combinaison HTML/Excel qui matche compte comme un match (meme principe
+    que qa.matching.compare()).
+
     excel_urls : liste de dicts {"label": <nom du bloc dans l'onglet UTM,
     ex "HEADER"/"ALGO">, "url": <URL de reference>}. "label" sert de classe
     attendue, comparee a la classe (audit-component-xxx) du bloc HTML
@@ -63,7 +77,8 @@ def run_url_qa(raw_html: str, excel_urls: list) -> list:
 
     for excel_entry in excel_urls:
         excel_url, expected_class = _as_entry(excel_entry)
-        norm_excel = normalize_url(excel_url)
+        excel_variants = expand_conditional_variants(excel_url)
+        norm_excel_variants = [normalize_url(v) for v in excel_variants]
 
         exact_match = False
         functional_match = False
@@ -73,18 +88,21 @@ def run_url_qa(raw_html: str, excel_urls: list) -> list:
         for link in links:
             href = link["href"].strip()
             href_unescaped = html.unescape(href)
+            html_variants = expand_conditional_variants(href_unescaped)
 
-            if excel_url == href_unescaped:
+            if any(hv == ev for hv in html_variants for ev in excel_variants):
                 exact_match = True
                 functional_match = True
                 found_href = href
                 found_class = link["component_class"]
                 break
 
-            if not functional_match and normalize_url(href) == norm_excel:
-                functional_match = True
-                found_href = href
-                found_class = link["component_class"]
+            if not functional_match:
+                norm_html_variants = [normalize_url(v) for v in html_variants]
+                if any(hv == ev for hv in norm_html_variants for ev in norm_excel_variants):
+                    functional_match = True
+                    found_href = href
+                    found_class = link["component_class"]
 
         if exact_match:
             matched_hrefs.add(found_href)
@@ -119,7 +137,7 @@ def run_url_qa(raw_html: str, excel_urls: list) -> list:
             "Expected Class": "",
             "HTML Class": link["component_class"],
             "Excel Wording": "",
-            "HTML Wording": href,
+            "HTML Wording": clean_display_text(href),
             "Status": "KO",
             "Error Type": KO_UNEXPECTED_URL,
             "Similarity": "0%",
