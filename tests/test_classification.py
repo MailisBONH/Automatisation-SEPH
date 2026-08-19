@@ -1,6 +1,7 @@
 import pandas as pd
 import pytest
 
+from conftest import make_wording_workbook
 from qa.classification import (
     detect_classification,
     migrate_legacy_loyalty_sequences,
@@ -14,17 +15,15 @@ def _fail(*args, **kwargs):
 
 
 def _make_wording_xlsx(tmp_path, sheet_name, wording_column_name, filename="wording.xlsx"):
-    """Feuille wording minimale : ligne 0 ignoree (header=1 cote lecture),
-    ligne 1 = en-tetes, ligne 2 = donnees."""
-    path = tmp_path / filename
-    rows = [
-        ["", "", "", ""],
-        ["COMPONENT NAME", "ELEMENT", wording_column_name, "TECHNICAL NAME"],
-        ["Header", "Title", "Hallo Welt", "audit-component-header"],
-    ]
-    with pd.ExcelWriter(path) as writer:
-        pd.DataFrame(rows).to_excel(writer, sheet_name=sheet_name, index=False, header=False)
-    return str(path)
+    """Feuille wording minimale (une seule ligne de donnees, "Hallo Welt") :
+    ligne 0 ignoree (header=1 cote lecture), ligne 1 = en-tetes, ligne 2 =
+    donnees."""
+    return make_wording_workbook(
+        tmp_path,
+        {sheet_name: [["Header", "Title", "Hallo Welt", "audit-component-header"]]},
+        filename=filename,
+        wording_column=wording_column_name,
+    )
 
 
 def _make_utm_xlsx(tmp_path, campaign_value="revamp_inac", url="https://www.example.de/?utm_content=x",

@@ -25,6 +25,14 @@ TEMP_CLEANUP_THROTTLE_SECONDS = 3600
 SCORE_COLOR_GOOD = 100
 SCORE_COLOR_WARN = 80
 
+# Detection de wordings dans la mauvaise langue (voir
+# qa.diagnostics.find_wrong_language_wordings) : longueur minimale d'un
+# texte pour que la detection de langue soit fiable, et nombre minimal
+# d'occurrences d'une langue minoritaire avant de la signaler (une detection
+# isolee est le plus souvent un faux positif).
+LANGUAGE_DETECTION_MIN_TEXT_LENGTH = 30
+LANGUAGE_DETECTION_MIN_CLUSTER_SIZE = 2
+
 # Duree de conservation de l'historique classe (pays/trigger/sequence), en
 # jours. Voir qa.history.prune_history pour la regle de purge appliquee au
 # dela de cette limite.

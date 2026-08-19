@@ -1,5 +1,6 @@
 from qa.config import CAMPAIGN_KEYWORD, EXCEL_FILE, HTML_FILE
 from qa.excel_loader import (
+    EXCEL_READ_ERRORS,
     load_excel_urls,
     load_excel_wordings,
     load_generic_wordings,
@@ -11,6 +12,14 @@ from qa.report import save_report
 from qa.url_qa import run_url_qa
 from qa.url_utils import normalize_url
 from qa.wording_qa import run_wording_qa
+
+# Exceptions realistes qu'un appel a run_qa/run_qa_for_sequence peut lever en
+# lisant ses fichiers d'entree : EXCEL_READ_ERRORS (classeur introuvable,
+# onglet/colonne ambigu, fichier corrompu...) plus UnicodeDecodeError (le
+# HTML est toujours lu en UTF-8, voir qa.html_extraction.load_raw_html) - a
+# catcher ensemble par tout appelant (voir home.py) qui doit degrader
+# proprement (message clair) plutot que planter sur un fichier illisible.
+QA_RUN_READ_ERRORS = EXCEL_READ_ERRORS + (UnicodeDecodeError,)
 
 
 # =========================

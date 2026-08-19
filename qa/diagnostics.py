@@ -7,6 +7,8 @@ from collections import Counter
 
 from langdetect import DetectorFactory, LangDetectException, detect
 
+from qa.config import LANGUAGE_DETECTION_MIN_CLUSTER_SIZE, LANGUAGE_DETECTION_MIN_TEXT_LENGTH
+
 # langdetect utilise un tirage aleatoire interne ; on fixe la graine pour
 # avoir un resultat reproductible (important pour les tests).
 DetectorFactory.seed = 0
@@ -47,7 +49,11 @@ def find_duplicate_components(excel_wordings: list) -> list:
     )
 
 
-def find_wrong_language_wordings(excel_wordings: list, min_text_length: int = 30, min_cluster_size: int = 2) -> list:
+def find_wrong_language_wordings(
+    excel_wordings: list,
+    min_text_length: int = LANGUAGE_DETECTION_MIN_TEXT_LENGTH,
+    min_cluster_size: int = LANGUAGE_DETECTION_MIN_CLUSTER_SIZE,
+) -> list:
     """
     Detecte les wordings dont la langue semble differente de la langue
     dominante du referentiel (ex: du texte italien reste dans un onglet

@@ -27,7 +27,17 @@ def normalize_url(url: str) -> str:
     url = urllib.parse.unquote(url)
     url = url.strip()
 
-    parsed = urllib.parse.urlparse(url)
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except ValueError:
+        # URL malformee (ex: IPv6 invalide dans le netloc) - urlparse()
+        # lui-meme echoue, comme deja gere dans is_query_ignored_domain().
+        # Retourne le meilleur repli disponible (decode/nettoye, non
+        # reconstruit) plutot que de faire planter tout le run pour un seul
+        # lien casse dans le HTML : deux occurrences du meme lien malforme
+        # produisent quand meme la meme chaine, suffisant pour comparaison/
+        # dedoublonnage.
+        return url
 
     params = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
     sorted_params = sorted(params)
@@ -76,5 +86,8 @@ def strip_query(url: str) -> str:
     url = urllib.parse.unquote(url)
     url = url.strip()
 
-    parsed = urllib.parse.urlparse(url)
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except ValueError:
+        return url
     return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"

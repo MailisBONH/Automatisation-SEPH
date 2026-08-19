@@ -15,7 +15,11 @@ import os
 import shutil
 import tempfile
 
+import pandas as pd
+import pytest
 from streamlit.testing.v1 import AppTest
+
+from conftest import make_wording_workbook
 
 HOME_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "home.py")
 
@@ -167,6 +171,224 @@ class TestArchiveKey:
     def test_same_run_always_produces_the_same_key(self):
         last_run = {"kind": "single", "report_path": "r.xlsx"}
         assert home._archive_key(last_run) == home._archive_key(dict(last_run))
+
+
+class TestWriteBatchHtml:
+    class _FakeUploadedFile:
+        def __init__(self, content: bytes):
+            self._content = content
+
+        def getvalue(self):
+            return self._content
+
+    def test_writes_the_uploaded_bytes_under_a_session_scoped_path(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        path = home._write_batch_html(self._FakeUploadedFile(b"<html>hello</html>"), "sess123")
+
+        assert path.startswith("temp/sess123_") and path.endswith(".html")
+        assert open(path, "rb").read() == b"<html>hello</html>"
+
+    def test_two_calls_for_the_same_session_get_distinct_paths(self, tmp_path, monkeypatch):
+        # Mode batch : plusieurs fichiers HTML pour une meme session ne
+        # doivent jamais s'ecraser les uns les autres pendant la boucle.
+        monkeypatch.chdir(tmp_path)
+        path1 = home._write_batch_html(self._FakeUploadedFile(b"A"), "sess123")
+        path2 = home._write_batch_html(self._FakeUploadedFile(b"B"), "sess123")
+        assert path1 != path2
+
+
+class TestRunBatchQa:
+    def _make_excel_and_html(self, tmp_path, wording="Hallo", html_text="Hallo"):
+        excel_file = make_wording_workbook(tmp_path, {
+            "SEQ 1": [["Header", "Title", wording, "audit-component-header"]],
+        })
+        html_file = tmp_path / "email.html"
+        html_file.write_text(
+            f'<div class="text-contribution"><p class="audit-component-header">{html_text}</p></div>',
+            encoding="utf-8",
+        )
+        return excel_file, str(html_file)
+
+    def test_returns_results_on_success(self, tmp_path):
+        excel_file, html_file = self._make_excel_and_html(tmp_path)
+
+        results = home._run_batch_qa(html_file, excel_file, "SEQ 1", "wording", False, label="SEQ 1")
+
+        assert results is not None
+        assert results[0]["Status"] == "OK"
+
+    def test_returns_none_and_shows_an_error_on_unreadable_html(self, tmp_path):
+        excel_file, html_file = self._make_excel_and_html(tmp_path)
+        # Ecrase le HTML valide par une sequence non-UTF8 (voir QA_RUN_READ_ERRORS).
+        with open(html_file, "wb") as f:
+            f.write("café".encode("latin-1"))
+
+        results = home._run_batch_qa(html_file, excel_file, "SEQ 1", "wording", False, label="SEQ 1")
+
+        assert results is None
+
+
+class TestDoArchive:
+    """
+    _do_archive est le coeur de l'orchestration d'archivage (voir
+    ensure_archived) : resout le nom de sequence, copie le rapport dans
+    output/<Pays>/<Trigger>/<Sequence>/, et enregistre l'entree
+    d'historique correspondante. Isole des vraies output/history.jsonl du
+    projet (voir isolated_archive_dirs) et du vrai historique deja archive
+    (build_history_tree stubbe a vide) pour rendre resolve_sequence_alias
+    deterministe, independant de tout run reel deja archive par ailleurs.
+    """
+
+    @pytest.fixture(autouse=True)
+    def isolated_archive_dirs(self, tmp_path, monkeypatch):
+        import qa.archive as archive_module
+        import qa.combined_report as combined_report_module
+        from qa.history import record_run as real_record_run
+
+        monkeypatch.setattr(archive_module, "OUTPUT_DIR", str(tmp_path / "output"))
+        monkeypatch.setattr(combined_report_module, "OUTPUT_DIR", str(tmp_path / "output"))
+        monkeypatch.setattr("qa.classification.build_history_tree", lambda: {})
+
+        self.history_path = str(tmp_path / "history.jsonl")
+        monkeypatch.setattr(
+            home, "record_run",
+            lambda *a, path=self.history_path, **k: real_record_run(*a, path=path, **k)
+        )
+
+    def _make_details_report(self, path, rows):
+        from openpyxl import Workbook
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Details"
+        headers = list(rows[0].keys())
+        ws.append(headers)
+        for row in rows:
+            ws.append([row[h] for h in headers])
+        wb.save(path)
+
+    def test_archives_a_single_run_and_records_its_score_in_history(self, tmp_path):
+        from qa.history import load_sequence_history
+
+        report_path = tmp_path / "report.xlsx"
+        self._make_details_report(str(report_path), [{"Status": "OK"}, {"Status": "KO"}])
+        last_run = {
+            "kind": "single", "mode": "wording", "sequence": "SEQ 1 NON LOYAL",
+            "results": [{"Status": "OK"}, {"Status": "KO"}], "report_path": str(report_path),
+        }
+
+        home._do_archive(last_run, "Germany", "Revamp Inac")
+
+        entries = load_sequence_history("Germany", "Revamp Inac", "SEQ 1", path=self.history_path)
+        assert any(e["mode"] == "wording" and e["score"] == 50.0 for e in entries)
+
+    def test_generates_a_combined_report_once_wording_and_url_are_both_archived(self, tmp_path):
+        from qa.history import load_sequence_history
+
+        wording_report = tmp_path / "wording.xlsx"
+        self._make_details_report(str(wording_report), [{"Status": "OK"}])
+        url_report = tmp_path / "url.xlsx"
+        self._make_details_report(str(url_report), [{"Status": "OK"}])
+
+        # normalize_sequence_name reduit "SEQ 1 NON LOYAL"/"SEQ 1 NON FID" au
+        # meme "SEQ 1" : les deux tombent dans le meme dossier de sequence,
+        # ce qui doit declencher la generation du rapport combine.
+        last_run = {
+            "kind": "combined_test",
+            "wording_sequence": "SEQ 1 NON LOYAL", "wording_results": [{"Status": "OK"}],
+            "wording_report_path": str(wording_report),
+            "url_sequence": "SEQ 1 NON FID", "url_results": [{"Status": "OK"}],
+            "url_report_path": str(url_report),
+        }
+
+        home._do_archive(last_run, "Germany", "Revamp Inac")
+
+        entries = load_sequence_history("Germany", "Revamp Inac", "SEQ 1", path=self.history_path)
+        assert any(e["mode"] == "combined" and e["score"] == 100.0 for e in entries)
+
+
+def _make_combined_excel(tmp_path, filename="combined.xlsx"):
+    """Classeur avec un onglet wording (Allemand) ET un onglet UTM (meme
+    trigger) - necessaire pour que detect_classification detecte a la fois
+    un pays (langue) ET un trigger (onglet UTM), voir tests/test_classification.py."""
+    path = tmp_path / filename
+    wording_rows = [
+        ["", "", "", ""],
+        ["COMPONENT NAME", "ELEMENT", "TRANSLATION GERMAN", "TECHNICAL NAME"],
+        ["Header", "Title", "Hallo Welt", "audit-component-header"],
+    ]
+    utm_rows = [
+        [None, "!! CHECK !!", None, None, None, None, None, None],
+        [None, "URL", "SOURCE", "MEDIUM", "CAMPAIGN", "SEQUENCE", "VERSION", "<< TRACKED URL >>"],
+        [None, "Insert url here", "Mandatory", "Mandatory", "TRIGGER", "SEQ", "VERSION", None],
+        ["HEADER", "https://example.com/", "trigger", "email", "revamp_inac", "seq1", "",
+         "https://www.example.de/?utm_content=header"],
+    ]
+    with pd.ExcelWriter(path) as writer:
+        pd.DataFrame(wording_rows).to_excel(writer, sheet_name="SEQ 1", index=False, header=False)
+        pd.DataFrame(utm_rows).to_excel(writer, sheet_name="UTM TRIGGER", index=False, header=False)
+    return str(path)
+
+
+class TestEnsureArchived:
+    """
+    ensure_archived decide entre archivage automatique (pays/trigger
+    detectes) et ouverture d'une pop-up de completion manuelle - voir
+    _do_archive/_prompt_missing_classification pour ce que chaque branche
+    declenche reellement.
+    """
+
+    @pytest.fixture(autouse=True)
+    def isolated_ensure_archived(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("qa.classification.build_history_tree", lambda: {})
+        self.do_archive_calls = []
+        monkeypatch.setattr(home, "_do_archive", lambda last_run, c, t: self.do_archive_calls.append((c, t)))
+        self.prompt_calls = []
+        monkeypatch.setattr(
+            home, "_prompt_missing_classification",
+            lambda last_run, guess, sequences: self.prompt_calls.append((guess, sequences))
+        )
+        yield
+        import streamlit as st
+        st.session_state.clear()
+
+    def test_auto_archives_when_country_and_trigger_are_both_detected(self, tmp_path):
+        excel_file = _make_combined_excel(tmp_path)
+        last_run = {
+            "kind": "single", "mode": "wording", "sequence": "SEQ 1", "excel_path": excel_file,
+            "results": [{"Status": "OK"}], "report_path": str(tmp_path / "report.xlsx"),
+        }
+
+        home.ensure_archived(last_run)
+
+        assert self.do_archive_calls == [("Germany", "Revamp Inac")]
+        assert self.prompt_calls == []
+
+    def test_opens_the_completion_prompt_when_nothing_is_detected(self, tmp_path):
+        excel_file = make_wording_workbook(tmp_path, {
+            "SEQ 1": [["Header", "Title", "Hallo Welt", "audit-component-header"]],
+        }, wording_column="TRANSLATION KLINGON")
+        last_run = {
+            "kind": "single", "mode": "wording", "sequence": "SEQ 1", "excel_path": excel_file,
+            "results": [{"Status": "OK"}], "report_path": str(tmp_path / "report_2.xlsx"),
+        }
+
+        home.ensure_archived(last_run)
+
+        assert self.do_archive_calls == []
+        assert len(self.prompt_calls) == 1
+
+    def test_is_idempotent_for_an_already_archived_run(self, tmp_path):
+        excel_file = _make_combined_excel(tmp_path)
+        last_run = {
+            "kind": "single", "mode": "wording", "sequence": "SEQ 1", "excel_path": excel_file,
+            "results": [{"Status": "OK"}], "report_path": str(tmp_path / "report_3.xlsx"),
+        }
+
+        home.ensure_archived(last_run)
+        home.ensure_archived(last_run)
+
+        assert len(self.do_archive_calls) == 1
 
 
 class TestHomeAppSmoke:

@@ -10,7 +10,7 @@ from qa.classification import detect_classification, normalize_sequence_name, re
 from qa.cleanup import cleanup_old_temp_files_throttled
 from qa.combined_report import build_combined_report
 from qa.diagnostics import find_duplicate_components, find_unused_excel_classes, find_wrong_language_wordings
-from qa.engine import run_qa, run_qa_for_sequence
+from qa.engine import QA_RUN_READ_ERRORS, run_qa, run_qa_for_sequence
 from qa.excel_loader import (
     EXCEL_READ_ERRORS,
     _open_excel_file,
@@ -93,6 +93,43 @@ def run_with_debug_capture(fn, *args, **kwargs):
     with contextlib.redirect_stdout(buf):
         result = fn(*args, **kwargs)
     return result, buf.getvalue()
+
+
+def _write_batch_html(uploaded_file, session_id) -> str:
+    """Ecrit un fichier uploade (mode batch, plusieurs HTML par run) dans un
+    chemin temporaire propre a ce fichier - contrairement au mode simple (un
+    seul chemin fixe par session), chaque fichier du batch doit avoir le
+    sien pour ne pas s'ecraser les uns les autres pendant la boucle."""
+    os.makedirs("temp", exist_ok=True)
+    path = f"temp/{session_id}_{uuid.uuid4().hex[:6]}.html"
+    with open(path, "wb") as out:
+        out.write(uploaded_file.getvalue())
+    return path
+
+
+def _run_batch_qa(html_path, excel_path, keyword, mode, include_generic, label):
+    """
+    Execute run_qa_for_sequence pour un fichier/sequence du batch (mode
+    "batch" ou moitie wording/url du mode "combined_batch", voir le bouton
+    Comparer plus bas) : affiche une erreur claire (log + UI) plutot que
+    d'interrompre tout le run si CE fichier precis est illisible - les
+    autres fichiers du batch continuent d'etre traites. Retourne les
+    resultats, ou None si l'appel a echoue (rien a ajouter au dict de
+    resultats de l'appelant dans ce cas).
+    """
+    try:
+        results, _ = run_qa_for_sequence(
+            html_file=html_path,
+            excel_file=excel_path,
+            keyword=keyword,
+            mode=mode,
+            include_generic=include_generic,
+        )
+        return results
+    except QA_RUN_READ_ERRORS as e:
+        print(f"❌ {label} : {e}")
+        st.error(f"❌ {label} : {e}")
+        return None
 
 
 # Memes libelles que l'export Excel (qa.report.URL_HEADER_LABELS), pour que
@@ -965,36 +1002,27 @@ if st.button(button_label):
         with contextlib.redirect_stdout(debug_buf):
             for f, w_seq, u_seq in combined_sequence_assignments:
 
-                batch_html_path = f"temp/{session_id}_{uuid.uuid4().hex[:6]}.html"
-                with open(batch_html_path, "wb") as out:
-                    out.write(f.getvalue())
+                batch_html_path = _write_batch_html(f, session_id)
 
                 print(f"\n{'=' * 20} {w_seq} / {u_seq} ({f.name}) {'=' * 20}")
 
-                try:
-                    w_results, _ = run_qa_for_sequence(
-                        html_file=batch_html_path,
-                        excel_file=excel_path,
-                        keyword=w_seq,
-                        mode="wording",
-                        include_generic=include_generic
-                    )
+                w_results = _run_batch_qa(
+                    batch_html_path, excel_path, w_seq, "wording", include_generic,
+                    label=f"Wording {w_seq} ({f.name})"
+                )
+                if w_results is not None:
                     wording_results_by_sequence[w_seq] = w_results
-                except ValueError as e:
-                    print(f"❌ Wording {w_seq} ({f.name}) : {e}")
-                    st.error(f"❌ Wording {w_seq} ({f.name}) : {e}")
 
-                try:
-                    u_results, _ = run_qa_for_sequence(
-                        html_file=batch_html_path,
-                        excel_file=excel_path,
-                        keyword=u_seq,
-                        mode="url"
-                    )
+                # include_generic ne s'applique qu'au wording (case a cocher
+                # non affichee du tout en mode url, voir plus haut) - jamais
+                # la valeur (potentiellement True) choisie pour la moitie
+                # wording de ce meme run combine.
+                u_results = _run_batch_qa(
+                    batch_html_path, excel_path, u_seq, "url", False,
+                    label=f"URL {u_seq} ({f.name})"
+                )
+                if u_results is not None:
                     url_results_by_sequence[u_seq] = u_results
-                except ValueError as e:
-                    print(f"❌ URL {u_seq} ({f.name}) : {e}")
-                    st.error(f"❌ URL {u_seq} ({f.name}) : {e}")
 
         if wording_results_by_sequence or url_results_by_sequence:
 
@@ -1070,24 +1098,16 @@ if st.button(button_label):
         with contextlib.redirect_stdout(debug_buf):
             for f, seq_name in sequence_assignments:
 
-                batch_html_path = f"temp/{session_id}_{uuid.uuid4().hex[:6]}.html"
-                with open(batch_html_path, "wb") as out:
-                    out.write(f.getvalue())
+                batch_html_path = _write_batch_html(f, session_id)
 
                 print(f"\n{'=' * 20} {seq_name} ({f.name}) {'=' * 20}")
 
-                try:
-                    seq_results, resolved_sheet = run_qa_for_sequence(
-                        html_file=batch_html_path,
-                        excel_file=excel_path,
-                        keyword=seq_name,
-                        mode=qa_mode,
-                        include_generic=include_generic
-                    )
+                seq_results = _run_batch_qa(
+                    batch_html_path, excel_path, seq_name, qa_mode, include_generic,
+                    label=f"{seq_name} ({f.name})"
+                )
+                if seq_results is not None:
                     results_by_sequence[seq_name] = seq_results
-                except ValueError as e:
-                    print(f"❌ {seq_name} ({f.name}) : {e}")
-                    st.error(f"❌ {seq_name} ({f.name}) : {e}")
 
         if results_by_sequence:
 
@@ -1216,7 +1236,7 @@ if st.button(button_label):
                     "debug_logs": debug_logs,
                 }
 
-        except ValueError as e:
+        except QA_RUN_READ_ERRORS as e:
             st.session_state.pop("last_run", None)
             st.error(str(e))
 

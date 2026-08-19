@@ -1,19 +1,10 @@
 import pandas as pd
+import pytest
 
-from qa.engine import run_qa_for_sequence
+from conftest import make_utm_workbook, make_wording_workbook
+from qa.engine import QA_RUN_READ_ERRORS, run_qa_for_sequence
 
-
-def _make_wording_workbook(tmp_path, sheets: dict, filename="wording.xlsx"):
-    """sheets: {sheet_name: [[Component, Element, Wording, Technical], ...]} -
-    ligne vide en tete + ligne d'en-tetes (header=1 cote lecture), comme un
-    vrai onglet wording (voir tests/test_classification.py)."""
-    path = tmp_path / filename
-    header_row = ["COMPONENT NAME", "ELEMENT", "TRANSLATION", "TECHNICAL NAME"]
-    with pd.ExcelWriter(path) as writer:
-        for sheet_name, data_rows in sheets.items():
-            rows = [["", "", "", ""], header_row] + data_rows
-            pd.DataFrame(rows).to_excel(writer, sheet_name=sheet_name, index=False, header=False)
-    return str(path)
+_make_wording_workbook = make_wording_workbook
 
 
 def _make_html(tmp_path, text, component_class, filename="email.html"):
@@ -26,27 +17,11 @@ def _make_html(tmp_path, text, component_class, filename="email.html"):
 
 
 def _make_utm_workbook(tmp_path, sections: dict, filename="utm.xlsx"):
-    """sections: {section_name: [url1, url2, ...]} - voir tests/test_excel_loader.py."""
-    path = tmp_path / filename
-    rows = [
-        [None, "!! CHECK !!", None, None, None, None, None, None],
-        [None, "URL", "SOURCE", "MEDIUM", "CAMPAIGN", "SEQUENCE", "VERSION", "<< TRACKED URL >>"],
-        [None, "Insert url here", "Mandatory", "Mandatory", "TRIGGER", "SEQ", "VERSION", None],
-    ]
-    for name, urls in sections.items():
-        rows.append([None, name, None, None, None, None, None, None])
-        for url in urls:
-            # Le label matche la classe posee par _make_html_with_link,
-            # pour que ces tests de fusion de section ne declenchent pas
-            # accidentellement un KO de classe (Wrong component / class not
-            # found) - ce n'est pas ce qu'ils cherchent a verifier.
-            rows.append([
-                "audit-component-cta", "https://example.com/", "trigger", "email", "revamp_inac", "seq1", "", url
-            ])
-
-    with pd.ExcelWriter(path) as writer:
-        pd.DataFrame(rows).to_excel(writer, sheet_name="UTM TRIGGER", index=False, header=False)
-    return str(path)
+    """Le label ("audit-component-cta") matche la classe posee par
+    _make_html_with_link, pour que ces tests de fusion de section ne
+    declenchent pas accidentellement un KO de classe (Wrong component /
+    class not found) - ce n'est pas ce qu'ils cherchent a verifier."""
+    return make_utm_workbook(tmp_path, sections, filename=filename, label="audit-component-cta")
 
 
 def _make_html_with_link(tmp_path, href, filename="email.html"):
@@ -220,3 +195,30 @@ class TestRunQaForSequenceMergesSiblingUrlSection:
         matched = [r for r in results if r["HTML Wording"] == "https://example.com/shared"]
         assert len(matched) == 1
         assert matched[0]["Status"] == "OK"
+
+
+class TestRunQaForSequenceReadErrors:
+    """
+    home.py catche QA_RUN_READ_ERRORS (pas juste ValueError) autour de ses
+    appels a run_qa/run_qa_for_sequence, pour degrader proprement (message
+    clair) plutot que planter sur un fichier illisible - HTML non-UTF8
+    (load_raw_html lit toujours en UTF-8) ou Excel corrompu/introuvable.
+    """
+
+    def test_non_utf8_html_raises_an_error_covered_by_qa_run_read_errors(self, tmp_path):
+        excel_file = _make_wording_workbook(tmp_path, {
+            "SEQ 1": [["Header", "Title", "Hallo", "audit-component-header"]],
+        })
+        html_file = tmp_path / "email.html"
+        html_file.write_bytes("café".encode("latin-1"))  # sequence invalide en UTF-8
+
+        with pytest.raises(QA_RUN_READ_ERRORS):
+            run_qa_for_sequence(str(html_file), excel_file, "SEQ 1", mode="wording")
+
+    def test_missing_html_file_raises_an_error_covered_by_qa_run_read_errors(self, tmp_path):
+        excel_file = _make_wording_workbook(tmp_path, {
+            "SEQ 1": [["Header", "Title", "Hallo", "audit-component-header"]],
+        })
+
+        with pytest.raises(QA_RUN_READ_ERRORS):
+            run_qa_for_sequence(str(tmp_path / "does_not_exist.html"), excel_file, "SEQ 1", mode="wording")
