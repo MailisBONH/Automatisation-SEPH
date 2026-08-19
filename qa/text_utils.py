@@ -103,12 +103,10 @@ def normalize(text: str) -> str:
     # Directives AEM / Adobe Campaign
     s = re.sub(r"<%=?\s*.*?\s*%>", "", s, flags=re.DOTALL)
     s = re.sub(r"\$\{[^}]*\}", "", s)
+    # Placeholders entre crochets (ex: [Name], [gift validity end date]) :
+    # un seul passage suffit, \[.*?\] retire deja n'importe quel contenu
+    # entre crochets, quel qu'il soit.
     s = re.sub(r"\[.*?\]", "", s)
-
-
-    # Placeholders metier PO
-    s = re.sub(r"\[Name\]", "", s, flags=re.IGNORECASE)
-    s = re.sub(r"\[[^\]]*\]", "", s)
     s = re.sub(r"\bXXX\b", "", s)
     s = re.sub(r"Version \d[^:]*:", "", s, flags=re.IGNORECASE)
 

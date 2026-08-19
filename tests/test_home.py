@@ -237,23 +237,34 @@ class TestDoArchive:
     projet (voir isolated_archive_dirs) et du vrai historique deja archive
     (build_history_tree stubbe a vide) pour rendre resolve_sequence_alias
     deterministe, independant de tout run reel deja archive par ailleurs.
+
+    home.py, qa.archive, qa.combined_report et qa.report importent chacun
+    OUTPUT_DIR/record_run separement (from qa.config import OUTPUT_DIR /
+    from qa.history import record_run cree une liaison PROPRE a chaque
+    module) : les QUATRE doivent etre isoles, pas seulement ceux que
+    _do_archive appelle directement. Un oubli ici a deja cause une
+    suppression accidentelle de vrais fichiers projet (item["report_path"]
+    absent -> _do_archive retombe sur qa.report.save_report, qui ecrirait
+    sinon dans le vrai output/ et le vrai output/history.jsonl - voir le
+    mode "batch", ou report_path est justement None).
     """
 
     @pytest.fixture(autouse=True)
     def isolated_archive_dirs(self, tmp_path, monkeypatch):
         import qa.archive as archive_module
         import qa.combined_report as combined_report_module
+        import qa.report as report_module
         from qa.history import record_run as real_record_run
 
         monkeypatch.setattr(archive_module, "OUTPUT_DIR", str(tmp_path / "output"))
         monkeypatch.setattr(combined_report_module, "OUTPUT_DIR", str(tmp_path / "output"))
+        monkeypatch.setattr(report_module, "OUTPUT_DIR", str(tmp_path / "output"))
         monkeypatch.setattr("qa.classification.build_history_tree", lambda: {})
 
         self.history_path = str(tmp_path / "history.jsonl")
-        monkeypatch.setattr(
-            home, "record_run",
-            lambda *a, path=self.history_path, **k: real_record_run(*a, path=path, **k)
-        )
+        redirect_record_run = lambda *a, path=self.history_path, **k: real_record_run(*a, path=path, **k)
+        monkeypatch.setattr(home, "record_run", redirect_record_run)
+        monkeypatch.setattr(report_module, "record_run", redirect_record_run)
 
     def _make_details_report(self, path, rows):
         from openpyxl import Workbook
@@ -281,6 +292,32 @@ class TestDoArchive:
 
         entries = load_sequence_history("Germany", "Revamp Inac", "SEQ 1", path=self.history_path)
         assert any(e["mode"] == "wording" and e["score"] == 50.0 for e in entries)
+
+    def test_archives_a_batch_item_with_no_pregenerated_report_path(self, tmp_path):
+        # Regression : un item "batch" (voir _run_items) a report_path=None -
+        # _do_archive doit alors appeler qa.report.save_report lui-meme.
+        # Avant la correction de ce fixture, qa.report.OUTPUT_DIR/record_run
+        # n'etaient pas isoles : cet appel aurait ecrit dans le vrai output/
+        # et le vrai output/history.jsonl du projet.
+        from qa.history import load_sequence_history
+
+        def _row(component, status, criticality):
+            return {
+                "Component Name": component, "Element": "", "Source Sheet": "",
+                "Expected Class": "", "HTML Class": "", "Excel Wording": "", "HTML Wording": "",
+                "Status": status, "Error Type": "", "Similarity": "", "Criticality": criticality,
+                "Match Type": "",
+            }
+
+        rows = [_row("Header", "OK", ""), _row("Footer", "KO", "High")]
+        last_run = {"kind": "batch", "mode": "wording", "sequences": {"SEQ 1 NON LOYAL": rows}}
+
+        home._do_archive(last_run, "Germany", "Revamp Inac")
+
+        entries = load_sequence_history("Germany", "Revamp Inac", "SEQ 1", path=self.history_path)
+        assert any(e["mode"] == "wording" and e["score"] == 50.0 for e in entries)
+        generated = list((tmp_path / "output").glob("QA_*.xlsx"))
+        assert len(generated) >= 1
 
     def test_generates_a_combined_report_once_wording_and_url_are_both_archived(self, tmp_path):
         from qa.history import load_sequence_history

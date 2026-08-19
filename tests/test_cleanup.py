@@ -1,6 +1,7 @@
 import os
 import time
 
+import qa.cleanup as cleanup
 from qa.cleanup import cleanup_old_temp_files, cleanup_old_temp_files_throttled
 
 
@@ -41,6 +42,21 @@ class TestCleanupOldTempFiles:
 
     def test_missing_directory_returns_zero(self, tmp_path):
         assert cleanup_old_temp_files(temp_dir=str(tmp_path / "does_not_exist")) == 0
+
+    def test_monkeypatching_temp_dir_and_max_age_affects_a_call_with_no_explicit_args(self, tmp_path, monkeypatch):
+        # Regression : TEMP_DIR/MAX_AGE_HOURS doivent etre relus a l'appel
+        # (pas figes comme defaut de parametre a l'import du module), sinon
+        # monkeypatcher qa.cleanup.TEMP_DIR n'aurait aucun effet sur un appel
+        # sans temp_dir= explicite - piege silencieux pour un futur test.
+        monkeypatch.setattr(cleanup, "TEMP_DIR", str(tmp_path))
+        monkeypatch.setattr(cleanup, "MAX_AGE_HOURS", 24)
+        old_file = tmp_path / "old_input.xlsx"
+        _touch(old_file, age_hours=48)
+
+        removed = cleanup_old_temp_files()
+
+        assert removed == 1
+        assert not old_file.exists()
 
     def test_mixed_old_and_recent_files(self, tmp_path):
         old1 = tmp_path / "old1.xlsx"
