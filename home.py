@@ -12,6 +12,8 @@ from qa.combined_report import build_combined_report
 from qa.diagnostics import find_duplicate_components, find_unused_excel_classes, find_wrong_language_wordings
 from qa.engine import run_qa, run_qa_for_sequence
 from qa.excel_loader import (
+    EXCEL_READ_ERRORS,
+    _open_excel_file,
     list_url_sequence_choices,
     list_wording_sheet_choices,
     load_excel_urls,
@@ -20,7 +22,7 @@ from qa.excel_loader import (
 )
 from qa.history import record_run
 from qa.html_extraction import load_and_extract_html_texts
-from qa.report import save_consolidated_report, save_report, sort_results_by_html_order
+from qa.report import URL_HEADER_LABELS, save_consolidated_report, save_report, sort_results_by_html_order
 
 from datetime import datetime
 
@@ -93,17 +95,11 @@ def run_with_debug_capture(fn, *args, **kwargs):
     return result, buf.getvalue()
 
 
-URL_COLUMN_RENAME = {
-    "Source Section": "Section (FID/NON FID)",
-    "Expected Class": "Classe attendue (Excel)",
-    "HTML Class": "Classe trouvée (HTML)",
-    "Excel Wording": "URL attendue (Excel)",
-    "HTML Wording": "URL trouvée (HTML)",
-    "Error Type": "Raison",
-    "Similarity": "Similarité (%)",
-    "Occurrences": "Occurrences (HTML)",
-    "Sequence": "Séquence",
-}
+# Memes libelles que l'export Excel (qa.report.URL_HEADER_LABELS), pour que
+# l'apercu Streamlit et le rapport telecharge affichent toujours les memes
+# noms de colonne - un renommage/ajout de colonne ne se fait plus qu'a un
+# seul endroit.
+URL_COLUMN_RENAME = URL_HEADER_LABELS
 
 
 def _prepare_display_df(results, mode):
@@ -674,7 +670,7 @@ if batch_mode and mode == "Wording + URL":
         wording_sheet_choices = []
         try:
             wording_sheet_choices = list_wording_sheet_choices(excel_path)
-        except Exception as e:
+        except EXCEL_READ_ERRORS as e:
             st.error(f"❌ Impossible de lire les onglets du fichier Excel : {e}")
 
         wording_sheet_names = [name for name, _ in wording_sheet_choices]
@@ -780,7 +776,7 @@ else:
         if excel_path:
             try:
                 sheet_choices = list_wording_sheet_choices(excel_path)
-            except Exception as e:
+            except EXCEL_READ_ERRORS as e:
                 st.error(f"❌ Impossible de lire les onglets du fichier Excel : {e}")
 
         if sheet_choices:
@@ -856,9 +852,9 @@ if excel_path and not batch_mode and missing_keyword:
 if excel_path and not batch_mode and not missing_keyword:
     with st.expander("🔍 Diagnostic du fichier Excel", expanded=True):
         try:
-            xls_preview = pd.ExcelFile(excel_path)
+            xls_preview = _open_excel_file(excel_path)
             st.caption(f"Onglets détectés : {', '.join(xls_preview.sheet_names)}")
-        except Exception as e:
+        except EXCEL_READ_ERRORS as e:
             st.error(f"Impossible de lire le fichier Excel : {e}")
             xls_preview = None
 
@@ -928,7 +924,7 @@ if excel_path and not batch_mode and not missing_keyword:
                                     "(le nom a probablement divergé du vrai template) : "
                                     + ", ".join(f"`{c}`" for c in unused_classes)
                                 )
-                        except Exception:
+                        except (OSError, UnicodeDecodeError):
                             pass  # le HTML sera re-analyse (avec message d'erreur clair) au clic sur Comparer
 
                 except ValueError as e:

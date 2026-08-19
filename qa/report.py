@@ -11,8 +11,48 @@ from openpyxl.cell.rich_text import CellRichText
 from openpyxl.cell.text import InlineFont
 from openpyxl.cell.rich_text import TextBlock
 
-from qa.config import CRITICALITY_ORDER, OUTPUT_DIR
+from qa.config import CRITICALITY_ORDER, OUTPUT_DIR, SCORE_COLOR_GOOD, SCORE_COLOR_WARN
 from qa.history import record_run
+
+
+def score_fill_color(score: float) -> str:
+    """Couleur de remplissage (hex ARGB sans '#') pour une cellule de score
+    (%) dans un rapport Excel : vert a SCORE_COLOR_GOOD (100%), jaune
+    au-dessus de SCORE_COLOR_WARN, rouge en-dessous - seuils centralises
+    dans qa.config pour que report.py et combined_report.py ne divergent
+    jamais l'un de l'autre."""
+    if score == SCORE_COLOR_GOOD:
+        return "C6EFCE"
+    if score >= SCORE_COLOR_WARN:
+        return "FFEB9C"
+    return "FFC7CE"
+
+
+def status_fill_color(status: str) -> str:
+    """Couleur de remplissage pour une cellule 'Status' (OK vert / KO
+    rouge) - partagee par tous les rapports Excel (report.py,
+    combined_report.py)."""
+    return "C6EFCE" if status == "OK" else "FFC7CE"
+
+
+def write_summary_sheet(ws, title: str, meta: list, score: float) -> None:
+    """
+    Ecrit l'onglet "Summary" commun aux 3 rapports (sequence, consolide
+    multi-sequences, combine wording+url) : titre en gras en A1, puis une
+    ligne (libelle en gras, valeur) par entree de meta a partir de la ligne
+    3. La cellule de score (toujours la DERNIERE entree de meta - "Score"/
+    "Score global"/"Score combiné" selon le rapport) est colorée via
+    score_fill_color.
+    """
+    ws.title = "Summary"
+    ws["A1"] = title
+    ws["A1"].font = Font(size=14, bold=True)
+    for i, (k, v) in enumerate(meta, start=3):
+        ws[f"A{i}"] = k
+        ws[f"A{i}"].font = Font(bold=True)
+        ws[f"B{i}"] = v
+    score_row = 3 + len(meta) - 1
+    ws[f"B{score_row}"].fill = PatternFill(start_color=score_fill_color(score), fill_type="solid")
 
 
 def _sort_by_criticality(df: pd.DataFrame, prefix_columns: list = None) -> pd.DataFrame:
@@ -259,10 +299,7 @@ def _write_results_sheet(ws_target, df_data, header_color, columns, header_label
 
                 cell.value = safe_val
             if col_name == "Status":
-                cell.fill = PatternFill(
-                    start_color="C6EFCE" if val == "OK" else "FFC7CE",
-                    fill_type="solid"
-                )
+                cell.fill = PatternFill(start_color=status_fill_color(val), fill_type="solid")
             if col_name == "Criticality" and val in crit_colors:
                 cell.font = Font(bold=True, color=crit_colors[val])
     for c, col in enumerate(columns, 1):
@@ -289,21 +326,11 @@ def save_report(results: list, campaign_sheet_name: str, mode: str = "wording"):
 
     # Summary
     ws = wb.active
-    ws.title = "Summary"
-    ws["A1"] = f"QA - {campaign_sheet_name}"
-    ws["A1"].font = Font(size=14, bold=True)
     meta = [
         ("Date", datetime.now().strftime("%Y-%m-%d %H:%M")),
         ("Total", total), ("OK", ok), ("KO", total - ok), ("Score", score)
     ]
-    for i, (k, v) in enumerate(meta, start=3):
-        ws[f"A{i}"] = k
-        ws[f"A{i}"].font = Font(bold=True)
-        ws[f"B{i}"] = v
-    ws["B7"].fill = PatternFill(
-        start_color="C6EFCE" if score == 100 else "FFEB9C" if score >= 80 else "FFC7CE",
-        fill_type="solid"
-    )
+    write_summary_sheet(ws, f"QA - {campaign_sheet_name}", meta, score)
 
     # Details
     ws2 = wb.create_sheet("Details")
@@ -361,21 +388,11 @@ def save_consolidated_report(results_by_sequence: dict, report_name: str = "Mult
 
     # Summary
     ws = wb.active
-    ws.title = "Summary"
-    ws["A1"] = f"QA - {report_name}"
-    ws["A1"].font = Font(size=14, bold=True)
     meta = [
         ("Date", datetime.now().strftime("%Y-%m-%d %H:%M")),
         ("Total", total), ("OK", ok), ("KO", total - ok), ("Score global", score)
     ]
-    for i, (k, v) in enumerate(meta, start=3):
-        ws[f"A{i}"] = k
-        ws[f"A{i}"].font = Font(bold=True)
-        ws[f"B{i}"] = v
-    ws["B7"].fill = PatternFill(
-        start_color="C6EFCE" if score == 100 else "FFEB9C" if score >= 80 else "FFC7CE",
-        fill_type="solid"
-    )
+    write_summary_sheet(ws, f"QA - {report_name}", meta, score)
 
     recap_header_row = 9
     for c, label in enumerate(["Séquence", "Total", "OK", "KO", "Score"], start=1):
@@ -389,10 +406,7 @@ def save_consolidated_report(results_by_sequence: dict, report_name: str = "Mult
         ws.cell(i, 3, seq_ok)
         ws.cell(i, 4, seq_ko)
         score_cell = ws.cell(i, 5, seq_score)
-        score_cell.fill = PatternFill(
-            start_color="C6EFCE" if seq_score == 100 else "FFEB9C" if seq_score >= 80 else "FFC7CE",
-            fill_type="solid"
-        )
+        score_cell.fill = PatternFill(start_color=score_fill_color(seq_score), fill_type="solid")
 
     for c, width in enumerate([30, 10, 10, 10, 10], start=1):
         ws.column_dimensions[get_column_letter(c)].width = width

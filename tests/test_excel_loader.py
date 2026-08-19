@@ -2,6 +2,7 @@ import pandas as pd
 import pytest
 
 from qa.excel_loader import (
+    _open_excel_file,
     find_column,
     find_sheet,
     find_sibling_sequence_sheet,
@@ -350,3 +351,30 @@ class TestListUrlSequenceChoices:
     def test_flat_tab_without_sections_returns_empty_list(self, tmp_path):
         path = make_utm_workbook(tmp_path, {"": ["https://example.com/a"]})
         assert list_url_sequence_choices(path) == []
+
+
+class TestOpenExcelFileCache:
+    """
+    _open_excel_file cache le pd.ExcelFile ouvert par (chemin, date de
+    derniere modification, taille) pour eviter de reparcourir le meme
+    classeur a chaque interaction Streamlit (voir home.py) - le point
+    critique a garantir est qu'un fichier reuploade sous le meme chemin
+    (cas reel : temp/<session_id>_input.xlsx, ecrase a chaque upload) ne
+    sert jamais une version perimee.
+    """
+
+    def test_reading_the_same_unchanged_path_returns_the_same_object(self, tmp_path):
+        path = make_xlsx(tmp_path, {"Sheet1": pd.DataFrame({"a": [1]})})
+        assert _open_excel_file(path) is _open_excel_file(path)
+
+    def test_overwriting_the_path_invalidates_the_cache(self, tmp_path):
+        path = tmp_path / "workbook.xlsx"
+        pd.DataFrame({"a": [1]}).to_excel(path, sheet_name="First", index=False)
+        first = _open_excel_file(str(path))
+        assert first.sheet_names == ["First"]
+
+        pd.DataFrame({"a": [1]}).to_excel(path, sheet_name="Second", index=False)
+        second = _open_excel_file(str(path))
+
+        assert second.sheet_names == ["Second"]
+        assert second is not first

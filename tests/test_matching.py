@@ -1,4 +1,10 @@
-from qa.matching import compare, find_best_match, find_closest_match, find_split_match
+from qa.matching import (
+    compare,
+    find_best_match,
+    find_closest_match,
+    find_split_match,
+    index_wordings_by_technical_class,
+)
 
 
 def excel_row(wording, technical=None, component="Comp", element="Elem"):
@@ -131,6 +137,48 @@ class TestFindBestMatch:
         wordings = [excel_row("Completely unrelated wording here", technical=None)]
         item = html_item("Totally different text", component_class=None)
         assert find_best_match(item, wordings, set()) is None
+
+    def test_class_index_gives_the_same_result_as_a_full_scan(self):
+        # index_wordings_by_technical_class (voir qa.wording_qa.run_wording_qa)
+        # ne doit etre qu'une optimisation de vitesse - jamais changer le
+        # resultat par rapport au parcours complet (class_index=None).
+        wordings = [
+            excel_row("Discover now", technical="audit-component-a"),
+            excel_row("Discover now", technical="audit-component-b"),
+            excel_row("Unrelated wording", technical=None),
+        ]
+        item = html_item("Discover now", component_class="audit-component-b")
+        class_index = index_wordings_by_technical_class(wordings)
+
+        assert find_best_match(item, wordings, set(), class_index) == find_best_match(item, wordings, set())
+
+    def test_class_index_returns_none_for_a_class_with_no_wordings(self):
+        wordings = [excel_row("Discover now", technical="audit-component-a")]
+        item = html_item("Discover now", component_class="audit-component-b")
+        class_index = index_wordings_by_technical_class(wordings)
+
+        assert find_best_match(item, wordings, set(), class_index) is None
+
+    def test_missing_html_class_returns_none_without_needing_the_index(self):
+        wordings = [excel_row("Discover now", technical="audit-component-a")]
+        item = html_item("Discover now", component_class=None)
+
+        assert find_best_match(item, wordings, set(), index_wordings_by_technical_class(wordings)) is None
+
+
+class TestIndexWordingsByTechnicalClass:
+    def test_groups_indices_by_technical_class(self):
+        wordings = [
+            excel_row("A", technical="audit-component-a"),
+            excel_row("B", technical="audit-component-b"),
+            excel_row("C", technical="audit-component-a"),
+        ]
+        index = index_wordings_by_technical_class(wordings)
+        assert index == {"audit-component-a": [0, 2], "audit-component-b": [1]}
+
+    def test_wordings_without_a_technical_class_are_not_indexed(self):
+        wordings = [excel_row("A", technical=None), excel_row("B", technical="")]
+        assert index_wordings_by_technical_class(wordings) == {}
 
 
 class TestFindSplitMatch:

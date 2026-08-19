@@ -1,6 +1,18 @@
+import functools
+import os
 import re
+from zipfile import BadZipFile
 
 import pandas as pd
+from openpyxl.utils.exceptions import InvalidFileException
+
+# Exceptions realistes quand un fichier .xlsx fourni par l'utilisateur est
+# illisible (corrompu, ou renomme en .xlsx sans en etre un) - a distinguer
+# d'un ValueError "onglet/colonne introuvable" (qui, lui, peut deja survenir
+# sur un classeur par ailleurs valide). Regroupees ici pour que tout appelant
+# qui doit degrader proprement (message clair plutot qu'un plantage, voir
+# home.py) les catche ensemble sans redefinir la liste a chaque endroit.
+EXCEL_READ_ERRORS = (ValueError, OSError, KeyError, BadZipFile, InvalidFileException)
 
 from qa.config import (
     EXCEL_PLACEHOLDER_PATTERN,
@@ -18,11 +30,47 @@ from qa.config import (
 from qa.text_utils import expand_conditional_variants, normalize, normalize_currency
 
 
+@functools.lru_cache(maxsize=8)
+def _cached_excel_file(path: str, mtime_ns: int, size: int) -> pd.ExcelFile:
+    """
+    Cache pd.ExcelFile par (chemin, date de derniere modification en
+    nanosecondes, taille) : Streamlit reexecute tout le script a chaque
+    interaction, ce qui reparse sinon inutilement le meme classeur (liste
+    des onglets, sequences UTM, diagnostic Excel...) plusieurs fois par
+    affichage. Cle sur mtime_ns+size (pas seulement le chemin) pour ne
+    jamais servir une version perimee si l'utilisateur reuploade un
+    fichier different sous le meme chemin temporaire (voir home.py, un
+    chemin par session) : mtime_ns (et non mtime en secondes) pour rester
+    fiable meme si deux uploads successifs tombent dans la meme seconde ;
+    size en plus par prudence si jamais l'horloge du systeme de fichiers
+    est plus grossiere que la nanoseconde. Taille de cache bornee (8) pour
+    eviter une fuite memoire sur un process serveur de longue duree avec de
+    nombreux classeurs differents testes au fil du temps.
+
+    Contrepartie assumee : tant qu'une entree reste en cache, le fichier
+    reste ouvert (handle openpyxl/zipfile) - sur Windows, la purge
+    automatique de temp/ (qa.cleanup.cleanup_old_temp_files) peut alors
+    echouer a supprimer ce fichier precis avec un PermissionError. Deja
+    sans consequence : cette purge avale silencieusement OSError (dont
+    PermissionError) et retentera au prochain passage, une fois l'entree
+    evincee du cache (LRU) ou le process redemarre.
+    """
+    return pd.ExcelFile(path, engine="openpyxl")
+
+
+def _open_excel_file(path: str) -> pd.ExcelFile:
+    """Point d'entree cache pour ouvrir un classeur : a utiliser partout ou
+    ce module ouvrait auparavant pd.ExcelFile(excel_file)/pd.read_excel(excel_file, ...)
+    directement depuis un chemin."""
+    stat = os.stat(path)
+    return _cached_excel_file(path, stat.st_mtime_ns, stat.st_size)
+
+
 # =========================
 # LECTURE EXCEL
 # =========================
 def find_sheet(excel_file: str, keyword: str):
-    xls = pd.ExcelFile(excel_file)
+    xls = _open_excel_file(excel_file)
 
     matches = [
         sheet for sheet in xls.sheet_names
@@ -165,7 +213,7 @@ def load_excel_wordings(excel_file: str, keyword: str) -> tuple:
     if not sheet:
         raise ValueError("Feuille Excel non trouvee avec le mot-cle fourni.")
 
-    df = pd.read_excel(excel_file, sheet_name=sheet, header=1, engine="openpyxl")
+    df = pd.read_excel(_open_excel_file(excel_file), sheet_name=sheet, header=1)
     df.columns = df.columns.str.strip()
 
     wording_column = find_column(df, WORDING_COLUMN_NAME)
@@ -232,7 +280,7 @@ def _find_sibling_name(name: str, candidate_names: list) -> str:
 def find_sibling_sequence_sheet(excel_file: str, sheet_name: str) -> str:
     """Pour un onglet de sequence deja resolu, cherche l'onglet "frere" du
     meme classeur (voir _find_sibling_name pour la regle de recherche)."""
-    xls = pd.ExcelFile(excel_file)
+    xls = _open_excel_file(excel_file)
     return _find_sibling_name(sheet_name, xls.sheet_names)
 
 
@@ -283,7 +331,7 @@ def list_wording_sheet_choices(excel_file: str) -> list:
     classeur : sheet_name est la valeur reelle a repasser a
     load_excel_wordings/run_qa.
     """
-    xls = pd.ExcelFile(excel_file)
+    xls = _open_excel_file(excel_file)
     all_sheets = xls.sheet_names
 
     relevant = [
@@ -306,7 +354,7 @@ def load_sibling_sequence_wordings(excel_file: str, sheet_name: str) -> tuple:
     if not sibling_sheet:
         return None, []
 
-    df = pd.read_excel(excel_file, sheet_name=sibling_sheet, header=1, engine="openpyxl")
+    df = pd.read_excel(_open_excel_file(excel_file), sheet_name=sibling_sheet, header=1)
     df.columns = df.columns.str.strip()
 
     wording_column = find_column(df, WORDING_COLUMN_NAME)
@@ -324,7 +372,7 @@ def load_generic_wordings(excel_file: str) -> tuple:
     """
     sheet = find_sheet(excel_file, GENERIC_SHEET_KEYWORD)
 
-    df = pd.read_excel(excel_file, sheet_name=sheet, header=1, engine="openpyxl")
+    df = pd.read_excel(_open_excel_file(excel_file), sheet_name=sheet, header=1)
     df.columns = df.columns.str.strip()
 
     # Le nom de cette colonne varie selon les onglets : "TRANSLATION ..."
@@ -412,7 +460,7 @@ def _locate_url_sheet_layout(excel_file: str):
     """
     sheet = find_sheet(excel_file, URL_SHEET_KEYWORD)
 
-    raw = pd.read_excel(excel_file, sheet_name=sheet, header=None, engine="openpyxl")
+    raw = pd.read_excel(_open_excel_file(excel_file), sheet_name=sheet, header=None)
 
     header_row_idx, tracked_col_idx = _find_cell(raw, URL_COLUMN_NAME)
     if header_row_idx is None:

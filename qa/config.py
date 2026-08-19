@@ -5,6 +5,25 @@ import re
 # CONFIGURATION
 # =========================
 OUTPUT_DIR = "output"
+TEMP_DIR = "temp"          # Fichiers uploades le temps d'une session (voir qa.cleanup, home.py)
+
+# Nombre de rapports Excel les plus recents conserves par type (wording/url/
+# combined) dans un meme dossier de sequence - voir qa.archive.archive_report.
+KEEP_REPORTS = 2
+
+# Purge automatique de temp/ (voir qa.cleanup) : age au-dela duquel un
+# fichier uploade est supprime, et frequence maximale du scan reel (un
+# fichier marqueur evite de rescanner le dossier a chaque interaction
+# Streamlit, qui reexecute tout le script).
+TEMP_MAX_AGE_HOURS = 24
+TEMP_CLEANUP_THROTTLE_SECONDS = 3600
+
+# Seuils de couleur pour l'affichage d'un score (%) dans les rapports Excel
+# (Summary, recap multi-sequences, rapport combine) - voir
+# qa.report.score_fill_color. Au-dela de SCORE_COLOR_GOOD : vert ; entre les
+# deux : jaune ; en-dessous de SCORE_COLOR_WARN : rouge.
+SCORE_COLOR_GOOD = 100
+SCORE_COLOR_WARN = 80
 
 # Duree de conservation de l'historique classe (pays/trigger/sequence), en
 # jours. Voir qa.history.prune_history pour la regle de purge appliquee au

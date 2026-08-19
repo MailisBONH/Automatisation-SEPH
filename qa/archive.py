@@ -18,9 +18,7 @@ import re
 import shutil
 from datetime import datetime
 
-from qa.config import OUTPUT_DIR, UNCLASSIFIED_LABEL
-
-KEEP_REPORTS = 2
+from qa.config import KEEP_REPORTS, OUTPUT_DIR, UNCLASSIFIED_LABEL
 
 
 def safe_folder_name(name: str) -> str:

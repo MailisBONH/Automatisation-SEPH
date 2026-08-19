@@ -10,10 +10,11 @@ import glob
 import os
 import time
 
-TEMP_DIR = "temp"
-MAX_AGE_HOURS = 24
+from qa.config import TEMP_CLEANUP_THROTTLE_SECONDS, TEMP_DIR, TEMP_MAX_AGE_HOURS
+
+MAX_AGE_HOURS = TEMP_MAX_AGE_HOURS
 THROTTLE_MARKER = os.path.join(TEMP_DIR, ".last_cleanup")
-THROTTLE_SECONDS = 3600  # ne relance le scan reel qu'une fois par heure au plus
+THROTTLE_SECONDS = TEMP_CLEANUP_THROTTLE_SECONDS  # ne relance le scan reel qu'une fois par heure au plus
 
 
 def cleanup_old_temp_files(max_age_hours: float = MAX_AGE_HOURS, temp_dir: str = TEMP_DIR) -> int:

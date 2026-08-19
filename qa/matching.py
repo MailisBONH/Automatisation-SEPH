@@ -130,7 +130,25 @@ def _compare_single(html_text: str, excel_text: str) -> tuple:
 # =========================
 # MATCHING
 # =========================
-def find_best_match(html_item: dict, excel_wordings: list, matched_excel_idx: set):
+def index_wordings_by_technical_class(excel_wordings: list) -> dict:
+    """
+    Regroupe les indices de excel_wordings par classe technique (Technical),
+    en ignorant les wordings sans classe connue. A precalculer UNE fois par
+    run_wording_qa (voir qa.wording_qa) et passer a find_best_match via son
+    parametre class_index, pour eviter de reparcourir l'integralite de
+    excel_wordings pour chaque fragment HTML - utile des que le referentiel
+    est volumineux (ex: fusion des composants generiques, voir
+    include_generic dans qa.engine).
+    """
+    index = {}
+    for idx, ex in enumerate(excel_wordings):
+        technical = ex.get("Technical")
+        if technical:
+            index.setdefault(technical, []).append(idx)
+    return index
+
+
+def find_best_match(html_item: dict, excel_wordings: list, matched_excel_idx: set, class_index: dict = None):
     """
     Cherche uniquement parmi les wordings Excel dont la classe technique est
     CONNUE et correspond a la component_class (elle aussi connue) de
@@ -138,10 +156,24 @@ def find_best_match(html_item: dict, excel_wordings: list, matched_excel_idx: se
     wording n'est considere ici (sera traite comme KO, avec une chance
     d'etre rattrape par find_closest_match qui gere ce cas plus finement).
     Si aucun wording de la bonne classe ne matche -> None (sera traite comme KO).
+
+    class_index (optionnel) : index precalcule par index_wordings_by_technical_class,
+    pour ne parcourir que les wordings de la classe recherchee au lieu de
+    tout excel_wordings - strictement equivalent au parcours complet filtre
+    ci-dessous (meme filtre, applique en amont plutot qu'a chaque iteration),
+    juste plus rapide sur un gros referentiel. None (defaut) revient au
+    parcours complet, pour compatibilite avec tout appel existant qui n'a
+    pas encore cet index sous la main.
     """
     found_class = html_item.get("component_class")
     h_text = html_item["text"]
     best = None
+
+    if not found_class:
+        # Le filtre ci-dessous exige les DEUX classes connues ET egales :
+        # sans classe HTML, chaque candidat serait de toute facon exclu
+        # (aucune comparaison a faire, voir docstring ci-dessus).
+        return None
 
     def _scan(indices):
         nonlocal best
@@ -161,7 +193,7 @@ def find_best_match(html_item: dict, excel_wordings: list, matched_excel_idx: se
             # un seuil de similarite minimal - pas ici, ou compare() n'a aucun
             # plancher de qualite pour son suivi "meilleur effort".
             expected_class = ex.get("Technical")
-            if not (found_class and expected_class and found_class == expected_class):
+            if not (expected_class and found_class == expected_class):
                 continue
             # ─────────────────────────────────────────────────────────────────
 
@@ -173,11 +205,12 @@ def find_best_match(html_item: dict, excel_wordings: list, matched_excel_idx: se
             if status == "OK":
                 return (idx, status, error, sim)
 
-    _scan(range(len(excel_wordings)))
+    candidate_indices = class_index.get(found_class, []) if class_index is not None else range(len(excel_wordings))
+    _scan(candidate_indices)
     return best
 
 
-def find_aggregated_match(html_items, start_idx, excel_wordings, matched_excel_idx, max_window=3):
+def find_aggregated_match(html_items, start_idx, excel_wordings, matched_excel_idx, max_window=3, class_index=None):
     first_item = html_items[start_idx]
     first_norm = normalize(first_item["text"])
     if first_item["tag"] == "a" and len(first_norm) < 20:
@@ -201,7 +234,7 @@ def find_aggregated_match(html_items, start_idx, excel_wordings, matched_excel_i
         }
         # ────────────────────────────────────────────────────────────────────────────────
 
-        best = find_best_match(chunk_item, excel_wordings, matched_excel_idx)
+        best = find_best_match(chunk_item, excel_wordings, matched_excel_idx, class_index)
         if best is not None:
             idx, status, error, sim = best
             target_len = len(normalize(excel_wordings[idx]["Wording"]))

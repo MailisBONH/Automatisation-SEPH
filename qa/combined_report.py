@@ -15,6 +15,7 @@ from openpyxl.utils.dataframe import dataframe_to_rows
 
 from qa.archive import archive_report, list_reports
 from qa.config import OUTPUT_DIR
+from qa.report import status_fill_color, write_summary_sheet
 
 
 def _write_df_sheet(ws, df: pd.DataFrame):
@@ -29,10 +30,7 @@ def _write_df_sheet(ws, df: pd.DataFrame):
     if status_col:
         for r in range(2, len(df) + 2):
             status_val = ws.cell(r, status_col).value
-            ws.cell(r, status_col).fill = PatternFill(
-                start_color="C6EFCE" if status_val == "OK" else "FFC7CE",
-                fill_type="solid"
-            )
+            ws.cell(r, status_col).fill = PatternFill(start_color=status_fill_color(status_val), fill_type="solid")
     for c, col in enumerate(df.columns, start=1):
         try:
             max_len = max(df[col].astype(str).map(len).max(), len(str(col)))
@@ -72,24 +70,13 @@ def build_combined_report(country: str, trigger: str, sequence: str):
     wb = Workbook()
 
     ws = wb.active
-    ws.title = "Summary"
-    ws["A1"] = f"QA combiné — {sequence}"
-    ws["A1"].font = Font(size=14, bold=True)
-
     meta = [
         ("Date", datetime.now().strftime("%Y-%m-%d %H:%M")),
         ("Score Wording", f"{wording_score}% ({wording_ok}/{wording_total})"),
         ("Score URL", f"{url_score}% ({url_ok}/{url_total})"),
         ("Score combiné", f"{score}% ({ok}/{total})"),
     ]
-    for i, (k, v) in enumerate(meta, start=3):
-        ws[f"A{i}"] = k
-        ws[f"A{i}"].font = Font(bold=True)
-        ws[f"B{i}"] = v
-    ws["B6"].fill = PatternFill(
-        start_color="C6EFCE" if score == 100 else "FFEB9C" if score >= 80 else "FFC7CE",
-        fill_type="solid"
-    )
+    write_summary_sheet(ws, f"QA combiné — {sequence}", meta, score)
     ws.column_dimensions["A"].width = 20
     ws.column_dimensions["B"].width = 40
 

@@ -18,6 +18,7 @@ from qa.matching import (
     find_closest_html_match,
     find_closest_match,
     find_split_match,
+    index_wordings_by_technical_class,
     make_row,
 )
 from qa.text_utils import clean_display_text, normalize
@@ -326,6 +327,11 @@ def run_wording_qa(html_texts, excel_wordings):
     results = []
     matched_excel_counts = defaultdict(int)
     html_consumed = set()
+    # Precalcule une seule fois pour tout le run (voir find_best_match) :
+    # evite de reparcourir l'integralite de excel_wordings pour chaque
+    # fragment HTML, utile des que le referentiel est volumineux (ex: avec
+    # les composants generiques fusionnes, voir include_generic).
+    class_index = index_wordings_by_technical_class(excel_wordings)
 
     i = 0
     while i < len(html_texts):
@@ -343,7 +349,7 @@ def run_wording_qa(html_texts, excel_wordings):
         # Un candidat de la bonne classe mais textuellement tres different
         # (KO) ne doit pas empecher d'essayer l'agregation/le split, qui
         # peuvent trouver un meilleur match pour ce meme fragment HTML.
-        direct = find_best_match(item, excel_wordings, set(matched_excel_counts.keys()))
+        direct = find_best_match(item, excel_wordings, set(matched_excel_counts.keys()), class_index)
         if direct and direct[1] == "OK":
             idx, status, error, sim = direct
             row = make_row(excel_wordings[idx], item, h_text, status, error, sim, "Direct")
@@ -355,7 +361,7 @@ def run_wording_qa(html_texts, excel_wordings):
 
         # B) Agregation (N HTML → 1 Excel) — meme logique : on ne verrouille
         # que si le resultat est OK.
-        agg = find_aggregated_match(html_texts, i, excel_wordings, matched_excel_counts)
+        agg = find_aggregated_match(html_texts, i, excel_wordings, matched_excel_counts, class_index=class_index)
         if agg and agg[2] == "OK":
             nb, idx, status, error, sim = agg
             agg_text = " ".join(html_texts[i + k]["text"] for k in range(nb))

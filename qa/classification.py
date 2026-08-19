@@ -21,7 +21,7 @@ from qa.config import (
     WORDING_COLUMN_NAME,
 )
 from qa.archive import move_sequence_dir
-from qa.excel_loader import _locate_url_sheet_layout, find_column, find_sheet
+from qa.excel_loader import _locate_url_sheet_layout, _open_excel_file, find_column, find_sheet
 from qa.history import build_history_tree, rewrite_classification
 
 
@@ -87,6 +87,10 @@ def resolve_sequence_alias(country: str, trigger: str, sequence: str) -> str:
     try:
         existing = list(build_history_tree().get(country, {}).get(trigger, {}).keys())
     except Exception:
+        # Best-effort comme le reste de qa.history (voir son docstring) :
+        # une erreur ici ne doit jamais empecher l'archivage lui-meme, qui
+        # utilisera alors `sequence` telle quelle (comportement identique a
+        # l'absence de candidat trouve, voir tests.TestResolveSequenceAlias).
         return sequence
 
     candidates = [s for s in existing if s == prefix or s.startswith(prefix + " ")]
@@ -224,7 +228,7 @@ def detect_classification(excel_file: str, sheet_or_keyword: str, mode: str) -> 
     if mode == "wording" and sheet_or_keyword:
         try:
             sheet = find_sheet(excel_file, sheet_or_keyword)
-            df = pd.read_excel(excel_file, sheet_name=sheet, header=1, engine="openpyxl")
+            df = pd.read_excel(_open_excel_file(excel_file), sheet_name=sheet, header=1)
             df.columns = df.columns.str.strip()
             wording_column = find_column(df, WORDING_COLUMN_NAME)
             country_from_language = _country_from_language(wording_column)
