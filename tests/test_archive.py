@@ -169,6 +169,31 @@ class TestMoveSequenceDir:
         )  # ne doit pas lever
         assert not os.path.isdir(archive.sequence_dir("Germany", "Revamp Inac", "SEQ 1"))
 
+    def test_filename_collision_is_suffixed_instead_of_overwritten(self, isolated_output):
+        # Cas non couvert par les tests precedents (noms de fichiers
+        # distincts par construction, voir archive_report) : source ET
+        # destination contiennent chacune un fichier de MEME nom - le
+        # fichier deplace doit etre suffixe "_fusionne", jamais ecraser
+        # celui deja present dans le dossier de destination.
+        src_dir = archive.sequence_dir("Germany", "Revamp Inac", "SEQ 1 NON FID")
+        dst_dir = archive.sequence_dir("Germany", "Revamp Inac", "SEQ 1 NON LOYAL")
+        os.makedirs(src_dir)
+        os.makedirs(dst_dir)
+        with open(os.path.join(src_dir, "same_name.xlsx"), "wb") as f:
+            f.write(b"source content")
+        with open(os.path.join(dst_dir, "same_name.xlsx"), "wb") as f:
+            f.write(b"destination content")
+
+        archive.move_sequence_dir(
+            "Germany", "Revamp Inac", "SEQ 1 NON FID",
+            "Germany", "Revamp Inac", "SEQ 1 NON LOYAL"
+        )
+
+        with open(os.path.join(dst_dir, "same_name.xlsx"), "rb") as f:
+            assert f.read() == b"destination content"
+        with open(os.path.join(dst_dir, "same_name_fusionne.xlsx"), "rb") as f:
+            assert f.read() == b"source content"
+
 
 def _touch_root_file(name, mtime_offset_seconds=0):
     """Cree un fichier .xlsx factice a la racine de OUTPUT_DIR (jamais dans

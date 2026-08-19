@@ -241,6 +241,47 @@ class TestLoadExcelUrlsReturnsResolvedSectionName:
         _, _, urls = load_excel_urls(path, "anything")
         assert urls[0]["Section"] == ""
 
+    def test_no_matching_sequence_keyword_raises(self, tmp_path):
+        path = make_utm_workbook(tmp_path, {"SEQ 1 FID": ["https://example.com/fid"]})
+        with pytest.raises(ValueError, match="Aucune séquence"):
+            load_excel_urls(path, "SEQ 99")
+
+    def test_ambiguous_sequence_keyword_raises(self, tmp_path):
+        path = make_utm_workbook(tmp_path, {
+            "SEQ 1 FID": ["https://example.com/a"],
+            "SEQ 1 NON FID": ["https://example.com/b"],
+        })
+        with pytest.raises(ValueError, match="Plusieurs séquences"):
+            load_excel_urls(path, "SEQ 1")
+
+
+class TestLoadExcelUrlsWithoutUrlLabelColumn:
+    """
+    Distinct du cas "onglet a plat sans sections nommees" (voir
+    TestLoadExcelUrlsReturnsResolvedSectionName) : ici, la colonne "URL"
+    (celle qui porterait les labels de sequence) est totalement absente de
+    l'onglet - meme la ligne d'en-tete ne la contient pas. Impossible de
+    decouper en sequences des ce stade, keyword est ignore et tout l'onglet
+    est retourne, comme le cas a plat.
+    """
+
+    def test_returns_every_url_unfiltered(self, tmp_path):
+        path = tmp_path / "utm_no_url_column.xlsx"
+        rows = [
+            [None, "SOURCE", "MEDIUM", "CAMPAIGN", "SEQUENCE", "VERSION", "<< TRACKED URL >>"],
+            ["HEADER", "trigger", "email", "revamp_inac", "seq1", "", "https://example.com/a"],
+            [None, "trigger", "email", "revamp_inac", "seq1", "", "https://example.com/b"],
+        ]
+        with pd.ExcelWriter(path) as writer:
+            pd.DataFrame(rows).to_excel(writer, sheet_name="UTM TRIGGER", index=False, header=False)
+
+        sheet, section_name, urls = load_excel_urls(str(path), "anything")
+
+        assert section_name == ""
+        assert [u["url"] for u in urls] == ["https://example.com/a", "https://example.com/b"]
+        # Le label (colonne la plus a gauche) est report vers le bas quand vide.
+        assert [u["label"] for u in urls] == ["HEADER", "HEADER"]
+
 
 class TestFindSiblingUrlSection:
     """

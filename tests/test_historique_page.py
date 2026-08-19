@@ -14,6 +14,7 @@ import os
 import streamlit as st
 from streamlit.testing.v1 import AppTest
 
+from qa.archive import archive_report, list_reports
 from qa.history import load_sequence_history, record_run
 
 PAGE_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "pages", "1_Historique.py")
@@ -122,3 +123,143 @@ class TestPopulatedHistory:
         assert at.subheader[0].value == "Germany / revamp_inac / SEQ 1"
         assert load_sequence_history("Germany", "revamp_inac", "SEQ 1")
         assert not load_sequence_history("France", "revamp_inac", "SEQ 1")
+
+    def test_trigger_and_sequence_breadcrumbs_step_back_one_level_at_a_time(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        record_run(
+            "SEQ 1", "wording", total=10, ok=8, ko=2, score=80.0,
+            country="France", trigger="revamp_inac", sequence="SEQ 1",
+        )
+
+        at = _run_page()
+        at.button(key="nav_country_France").click().run()
+        at.button(key="nav_trigger_revamp_inac").click().run()
+        at.button(key="nav_sequence_SEQ 1").click().run()
+
+        # Fil d'Ariane "trigger" (2e bouton) : revient au choix de sequence,
+        # sans reperdre le pays ni le trigger deja choisis.
+        trigger_crumb = next(b for b in at.button if b.label == "📁 revamp_inac")
+        trigger_crumb.click().run()
+        assert not at.exception
+        assert at.subheader[0].value == "France / revamp_inac — choisissez une séquence"
+
+        at.button(key="nav_sequence_SEQ 1").click().run()
+
+        # Fil d'Ariane "pays" (1er bouton nomme, ici "France") : revient au
+        # choix de trigger.
+        country_crumb = next(b for b in at.button if b.label == "📁 France")
+        country_crumb.click().run()
+        assert not at.exception
+        assert at.subheader[0].value == "France — choisissez un trigger"
+
+
+class TestReportDownloads:
+    def test_shows_a_download_button_per_archived_report(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        record_run(
+            "SEQ 1", "wording", total=10, ok=8, ko=2, score=80.0,
+            country="France", trigger="revamp_inac", sequence="SEQ 1",
+        )
+        fake_report = tmp_path / "report.xlsx"
+        fake_report.write_bytes(b"fake xlsx content")
+        archive_report(str(fake_report), "France", "revamp_inac", "SEQ 1", mode="wording")
+
+        at = _run_page()
+        at.button(key="nav_country_France").click().run()
+        at.button(key="nav_trigger_revamp_inac").click().run()
+        at.button(key="nav_sequence_SEQ 1").click().run()
+
+        assert not at.exception
+        assert not any("Aucun rapport disponible" in c.value for c in at.caption)
+        download_buttons = at.get("download_button")
+        assert len(download_buttons) == 1
+        assert list_reports("France", "revamp_inac", "SEQ 1", mode="wording")[0].endswith(
+            os.path.basename(download_buttons[0].label.replace("⬇️ ", ""))
+        )
+
+
+class TestRenameFormValidation:
+    def _navigate_to_sequence(self, at):
+        at.button(key="nav_country_France").click().run()
+        at.button(key="nav_trigger_revamp_inac").click().run()
+        at.button(key="nav_sequence_SEQ 1").click().run()
+        return next(b for b in at.button if b.key and b.key.startswith("FormSubmitter"))
+
+    def test_blank_field_shows_a_required_error(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        record_run(
+            "SEQ 1", "wording", total=10, ok=8, ko=2, score=80.0,
+            country="France", trigger="revamp_inac", sequence="SEQ 1",
+        )
+
+        at = _run_page()
+        submit_button = self._navigate_to_sequence(at)
+        at.text_input[2].set_value("")  # Séquence vidée
+        submit_button.click().run()
+
+        assert not at.exception
+        assert any("obligatoires" in e.value for e in at.error)
+        # Rien n'a ete renomme : toujours "SEQ 1" cote historique.
+        assert load_sequence_history("France", "revamp_inac", "SEQ 1")
+
+    def test_submitting_unchanged_values_is_a_no_op(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        record_run(
+            "SEQ 1", "wording", total=10, ok=8, ko=2, score=80.0,
+            country="France", trigger="revamp_inac", sequence="SEQ 1",
+        )
+
+        at = _run_page()
+        submit_button = self._navigate_to_sequence(at)
+        submit_button.click().run()  # aucun champ modifie
+
+        assert not at.exception
+        assert any("Rien à changer" in i.value for i in at.info)
+
+
+class TestDeleteSequence:
+    def test_deleting_removes_reports_and_history(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        record_run(
+            "SEQ 1", "wording", total=10, ok=8, ko=2, score=80.0,
+            country="France", trigger="revamp_inac", sequence="SEQ 1",
+        )
+        fake_report = tmp_path / "report.xlsx"
+        fake_report.write_bytes(b"fake xlsx content")
+        archive_report(str(fake_report), "France", "revamp_inac", "SEQ 1", mode="wording")
+
+        at = _run_page()
+        at.button(key="nav_country_France").click().run()
+        at.button(key="nav_trigger_revamp_inac").click().run()
+        at.button(key="nav_sequence_SEQ 1").click().run()
+
+        at.checkbox(key="confirm_delete_France_revamp_inac_SEQ 1").set_value(True).run()
+        delete_button = next(b for b in at.button if b.label == "🗑️ Supprimer cette séquence")
+        delete_button.click().run()
+
+        assert not at.exception
+        assert not load_sequence_history("France", "revamp_inac", "SEQ 1")
+        assert list_reports("France", "revamp_inac", "SEQ 1", mode="wording") == []
+        # Plus aucune sequence classee du tout (c'etait la seule) : l'arbre
+        # est vide, la page retombe sur l'etat "Aucun rapport archive".
+        assert any("Aucun rapport archivé" in i.value for i in at.info)
+
+
+class TestLegacyMigrationBanner:
+    def test_legacy_qualified_sequence_is_migrated_and_reported(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        # Sequence encore archivee sous un ancien nom qualifie (avant
+        # l'unification "SEQ 1" pour wording ET url, voir
+        # qa.classification.normalize_sequence_name) : doit etre fusionnee
+        # automatiquement des l'ouverture de la page, avec un message.
+        record_run(
+            "SEQ 1 NON LOYAL", "wording", total=10, ok=8, ko=2, score=80.0,
+            country="France", trigger="revamp_inac", sequence="SEQ 1 NON LOYAL",
+        )
+
+        at = _run_page()
+
+        assert not at.exception
+        assert any("fusionnée(s) automatiquement" in i.value for i in at.info)
+        assert load_sequence_history("France", "revamp_inac", "SEQ 1")
+        assert not load_sequence_history("France", "revamp_inac", "SEQ 1 NON LOYAL")

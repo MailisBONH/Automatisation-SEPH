@@ -1,4 +1,4 @@
-from qa.config import KO_COMPONENT_CLASS_NOT_FOUND
+from qa.config import KO_COMPONENT_CLASS_NOT_FOUND, KO_WORDING_MISMATCH
 from qa.text_utils import expand_conditional_variants, normalize, normalize_currency
 from qa.wording_qa import _drop_ko_covered_by_ok, run_wording_qa
 
@@ -408,3 +408,101 @@ class TestBasicWordingQa:
         missing = [r for r in results if r["Excel Wording"] == "Discover the new collection"]
         assert len(missing) == 1
         assert missing[0]["Status"] == "KO"
+
+
+class TestAggregatedMatch:
+    def test_two_consecutive_blocks_aggregate_into_a_single_ok_match(self):
+        # Bloc B (find_aggregated_match) verrouille en OK des que la
+        # concatenation de N blocs HTML consecutifs egale une cellule Excel,
+        # meme si aucun des deux blocs pris seul n'y correspond.
+        html_texts = [
+            html_item("Discover our", component_class="audit-component-hero"),
+            html_item("new arrivals today", component_class="audit-component-hero"),
+        ]
+        excel_wordings = [excel_row("Discover our new arrivals today", technical="audit-component-hero")]
+
+        results = run_wording_qa(html_texts, excel_wordings)
+
+        row = result_for(results, "Discover our new arrivals today")
+        assert row["Status"] == "OK"
+        assert row["Match Type"] == "Agrege (2 blocs)"
+
+
+class TestBestEffortFallback:
+    """
+    Quand Direct/Agregation/Split ne trouvent aucun OK, la cascade retombe
+    sur le meilleur candidat KO deja trouve (voir _best_effort_row) plutot
+    que de sauter directement au closest-match generique - a condition que
+    sa similarite reste au-dessus de SIM_CLOSEST_MATCH_MIN (sinon
+    _unexpected_wording_row, voir TestCascadeDoesNotLockInOnBadDirect et
+    consorts pour ce seuil).
+    """
+
+    def test_direct_candidate_below_ok_but_above_min_is_reported_as_is(self):
+        html_texts = [html_item("Discover our new arrivals today", component_class="audit-component-hero")]
+        excel_wordings = [excel_row("Discover our latest deals today", technical="audit-component-hero")]
+
+        results = run_wording_qa(html_texts, excel_wordings)
+
+        row = result_for(results, "Discover our new arrivals today")
+        assert row["Status"] == "KO"
+        assert row["Match Type"] == "Direct"
+        assert row["Excel Wording"] == "Discover our latest deals today"
+
+    # Pas d'equivalent "aggregation" pour le test ci-dessus : direct et le
+    # premier essai d'agregation partagent la MEME condition de succes
+    # (find_best_match sur la classe de item/first_item - un seul et meme
+    # found_class dans les deux cas), donc direct est toujours truthy des
+    # que l'agregation pourrait l'etre - le bloc "if agg:" (fallback KO
+    # d'agregation) ne peut alors jamais s'executer, "if direct:" l'ayant
+    # deja intercepte juste avant. Verifie par une tentative de test qui
+    # echouait systematiquement en pratique - laisse volontairement sans
+    # test plutot que d'en forcer un artificiel sur un chemin mort.
+
+
+class TestClosestMatchRow:
+    """
+    Bloc D (_closest_match_row) : atteint uniquement quand Direct/Agregation/
+    Split n'ont RIEN trouve du tout (pas meme un KO) pour ce fragment -
+    typiquement quand aucun wording Excel ne partage la classe technique du
+    HTML. find_closest_match exclut deja tout candidat de classe connue et
+    differente de sa recherche interne (voir sa docstring et
+    TestKnownMismatchedClassesNeverFalselyOk plus haut) : le cas
+    "class_mismatch" de _closest_match_row n'est donc atteignable que par
+    appel direct de la fonction, jamais via ce pipeline - pas teste ici.
+    """
+
+    def test_unverifiable_component_is_ko_even_with_near_perfect_text(self):
+        # Classe HTML inconnue : meme un texte quasi-identique au wording
+        # Excel ne peut pas etre valide OK, faute de pouvoir confirmer le
+        # composant.
+        html_texts = [html_item("Discover our new arrivals today", component_class=None)]
+        excel_wordings = [excel_row("Discover our new arrival today", technical="audit-component-hero")]
+
+        results = run_wording_qa(html_texts, excel_wordings)
+
+        row = result_for(results, "Discover our new arrivals today")
+        assert row["Status"] == "KO"
+        assert row["Error Type"] == KO_COMPONENT_CLASS_NOT_FOUND
+        assert row["Match Type"] == "Closest Match"
+
+    def test_similarity_at_or_above_accept_threshold_is_ok(self):
+        html_texts = [html_item("Discover our new arrivals today", component_class="audit-component-hero")]
+        excel_wordings = [excel_row("Discover our new arrivals soon", technical=None)]
+
+        results = run_wording_qa(html_texts, excel_wordings)
+
+        row = result_for(results, "Discover our new arrivals today")
+        assert row["Status"] == "OK"
+        assert row["Match Type"] == "Closest Match Accepted"
+
+    def test_similarity_below_accept_threshold_is_wording_mismatch(self):
+        html_texts = [html_item("Discover our new arrivals today", component_class="audit-component-hero")]
+        excel_wordings = [excel_row("Discover our latest deals today", technical=None)]
+
+        results = run_wording_qa(html_texts, excel_wordings)
+
+        row = result_for(results, "Discover our new arrivals today")
+        assert row["Status"] == "KO"
+        assert row["Error Type"] == KO_WORDING_MISMATCH
+        assert row["Match Type"] == "Closest Match"

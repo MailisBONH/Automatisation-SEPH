@@ -3,6 +3,7 @@ from bs4 import BeautifulSoup
 from qa.html_extraction import (
     build_title_to_component_map,
     extract_anchor_links,
+    extract_real_html_from_viewsource,
     extract_texts_from_textcontribution,
 )
 
@@ -26,6 +27,34 @@ def _extract_with_titles(html):
 
 def _texts(html):
     return [item["text"] for item in _extract(html)]
+
+
+class TestExtractRealHtmlFromViewsource:
+    """
+    Reconstruction du HTML reel a partir d'une vue "view-source" AEM (une
+    ligne de code source par ligne de tableau, voir is_view_source_document) -
+    chemin de repli emprunte des qu'un fichier de ce type est uploade (voir
+    qa.html_extraction.load_raw_html), avant tout le reste de l'extraction.
+    """
+
+    def test_reconstructs_html_from_line_content_cells(self):
+        view_source = (
+            "<table>"
+            '<tr><td class="line-number">1</td>'
+            '<td class="line-content">&lt;div class="text-contribution"&gt;</td></tr>'
+            '<tr><td class="line-number">2</td>'
+            '<td class="line-content">&lt;p&gt;Hello &amp; welcome&lt;/p&gt;</td></tr>'
+            '<tr><td class="line-number">3</td><td class="line-content">&lt;/div&gt;</td></tr>'
+            "</table>"
+        )
+
+        result = extract_real_html_from_viewsource(view_source)
+
+        assert result == '<div class="text-contribution">\n<p>Hello & welcome</p>\n</div>'
+
+    def test_returns_the_input_unchanged_when_no_line_content_cells_found(self):
+        raw = "<div>Contenu HTML normal, pas une vue source</div>"
+        assert extract_real_html_from_viewsource(raw) == raw
 
 
 class TestExtractTextsFromTextcontribution:
@@ -113,6 +142,22 @@ class TestExtractTextsFromTextcontribution:
         items = _extract(html)
         assert items[0]["component_class"] == "audit-component-loyalty"
 
+    def test_individual_link_inside_legal_or_footer_component_is_excluded(self):
+        # Un lien individuel dans un composant legal/footer n'est jamais
+        # extrait a part - son texte est deja couvert par le paragraphe
+        # complet qui l'englobe (extrait separement via le fallback
+        # texte-brut-du-bloc).
+        html = (
+            '<div class="text-contribution">'
+            '<div class="audit-component-footer">'
+            '<p>Contact us at <a href="/legal">Legal notice</a> for details</p>'
+            "</div>"
+            "</div>"
+        )
+        items = _extract(html)
+        assert len(items) == 1
+        assert items[0]["text"] == "Contact us at Legal notice for details"
+
 
 class TestGenericTitleClassResolution:
     """
@@ -188,6 +233,46 @@ class TestGenericTitleClassResolution:
 
         title_item = next(i for i in items if i["text"] == "Titre isole")
         assert title_item["component_class"] is None
+
+    def test_title_outside_any_text_contribution_block_is_still_resolved(self):
+        # Cas distinct des precedents : le titre generique n'est PAS a
+        # l'interieur d'un bloc text-contribution (la boucle principale de
+        # extract_texts_from_textcontribution, scopee a block.find_all(True),
+        # ne le voit jamais) - traite separement par le second passage sur
+        # tout le soup (voir "Traitement des audit-generique-title").
+        html = (
+            '<div class="audit-generique-title"><h2>Decouvrez vos avantages</h2></div>'
+            '<div class="text-contribution">'
+            '<div class="audit-component-program-benefit"><p>Profitez de vos points</p></div>'
+            "</div>"
+        )
+        items = _extract_with_titles(html)
+
+        title_item = next(i for i in items if i["text"] == "Decouvrez vos avantages")
+        assert title_item["component_class"] == "audit-component-program-benefit"
+
+    def test_title_wrapper_with_no_recognized_descendant_is_silently_skipped(self):
+        # Le wrapper audit-generique-title ne contient qu'un tag hors de la
+        # liste reconnue (ici <a>, pas dans {h1,h2,h3,p,span,b,strong}) : pas
+        # de descendant candidat, et le wrapper lui-meme (<div>) n'est pas
+        # non plus un tag reconnu - ce titre est ignore sans planter.
+        html = '<div class="audit-generique-title"><a href="#">Lien seul</a></div>'
+        items = _extract_with_titles(html)
+
+        assert all(i["text"] != "Lien seul" for i in items)
+
+    def test_duplicate_generic_titles_are_deduplicated(self):
+        # Deux titres generiques identiques (hors de tout text-contribution) :
+        # le second doit etre ignore par le dedoublonnage (`seen`), pas
+        # ajoute une seconde fois.
+        html = (
+            '<div class="audit-generique-title"><h2>Titre repete</h2></div>'
+            '<div class="audit-generique-title"><h2>Titre repete</h2></div>'
+        )
+        items = _extract_with_titles(html)
+
+        matches = [i for i in items if i["text"] == "Titre repete"]
+        assert len(matches) == 1
 
 
 class TestExtractAnchorLinks:

@@ -1,7 +1,34 @@
-from qa.url_utils import is_query_ignored_domain, normalize_url, strip_query
+from qa.url_utils import extract_hrefs, is_query_ignored_domain, normalize_url, strip_query
+
+
+class TestExtractHrefs:
+    def test_extracts_every_href_in_order(self):
+        html = '<a href="https://a.example/1">A</a><a href="https://a.example/2">B</a>'
+        assert extract_hrefs(html) == ["https://a.example/1", "https://a.example/2"]
+
+    def test_single_and_double_quotes_are_both_recognized(self):
+        html = "<a href='https://a.example/1'>A</a>"
+        assert extract_hrefs(html) == ["https://a.example/1"]
+
+    def test_case_insensitive_href_attribute(self):
+        html = '<a HREF="https://a.example/1">A</a>'
+        assert extract_hrefs(html) == ["https://a.example/1"]
+
+    def test_no_links_returns_empty_list(self):
+        assert extract_hrefs("<p>No links here</p>") == []
+
+    def test_empty_or_none_returns_empty_list(self):
+        assert extract_hrefs("") == []
+        assert extract_hrefs(None) == []
 
 
 class TestIsQueryIgnoredDomain:
+    def test_relative_url_with_no_netloc_is_not_ignored(self):
+        # Pas de schema/domaine du tout (lien relatif) : urlparse() reussit
+        # mais renvoie un netloc vide - a distinguer du cas ValueError
+        # (deja teste) qui, lui, vient d'une URL malformee.
+        assert is_query_ignored_domain("/relative/path?x=1") is False
+
     def test_configured_domain_is_ignored(self):
         assert is_query_ignored_domain("https://homeios.onelink.me/oUpm/ewa9ynyg?x=1") is True
 
