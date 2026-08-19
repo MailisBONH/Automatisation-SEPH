@@ -77,11 +77,18 @@ class TestBuildRichDiffWordStillWorksAsBefore:
 
 @pytest.fixture(autouse=True)
 def isolated_report_output(tmp_path, monkeypatch):
-    """save_report/save_consolidated_report ecrivent un .xlsx dans OUTPUT_DIR
-    et appellent qa.history.record_run - isole les deux du vrai dossier
-    output/ du projet (record_run n'a pas de "path=" explicite ici, il
-    ecrirait sinon dans le vrai output/history.jsonl)."""
+    """save_report/save_consolidated_report ecrivent un .xlsx dans OUTPUT_DIR,
+    appellent qa.history.record_run, et purgent les rapports racine via
+    qa.archive.prune_root_reports (module SEPARE, avec son propre
+    OUTPUT_DIR importe independamment - une isolation incomplete ici a deja
+    cause une suppression accidentelle de fichiers reels du vrai output/ du
+    projet). Isole les trois du vrai dossier output/ du projet (record_run
+    n'a pas de "path=" explicite ici, il ecrirait sinon dans le vrai
+    output/history.jsonl)."""
+    import qa.archive as archive
+
     monkeypatch.setattr(report, "OUTPUT_DIR", str(tmp_path))
+    monkeypatch.setattr(archive, "OUTPUT_DIR", str(tmp_path))
     monkeypatch.setattr(report, "record_run", lambda *a, **k: None)
     return tmp_path
 

@@ -168,3 +168,70 @@ class TestMoveSequenceDir:
             "Germany", "Revamp Inac", "SEQ 1"
         )  # ne doit pas lever
         assert not os.path.isdir(archive.sequence_dir("Germany", "Revamp Inac", "SEQ 1"))
+
+
+def _touch_root_file(name, mtime_offset_seconds=0):
+    """Cree un fichier .xlsx factice a la racine de OUTPUT_DIR (jamais dans
+    un sous-dossier Pays/Trigger/Sequence) - simule un rapport genere par
+    qa.report.save_report/save_consolidated_report avant tout archivage."""
+    os.makedirs(archive.OUTPUT_DIR, exist_ok=True)
+    path = os.path.join(archive.OUTPUT_DIR, name)
+    with open(path, "wb") as f:
+        f.write(b"fake xlsx content")
+    if mtime_offset_seconds:
+        t = time.time() + mtime_offset_seconds
+        os.utime(path, (t, t))
+    return path
+
+
+class TestListAndPruneRootReports:
+    """
+    prune_root_reports applique la MEME regle KEEP_REPORTS que
+    archive_report, mais aux rapports "bruts" generes directement a la
+    racine de OUTPUT_DIR (un par comparaison, avant tout archivage) - voir
+    qa.report.save_report/save_consolidated_report. Ne doit jamais toucher
+    aux rapports deja archives dans un sous-dossier Pays/Trigger/Sequence.
+    """
+
+    def test_list_root_reports_ignores_archived_subfolder_reports(self, tmp_path, isolated_output):
+        _touch_root_file("QA_SEQ_1_20260101_000000.xlsx")
+        report = _make_report(tmp_path)
+        archive.archive_report(report, "Germany", "Revamp Inac", "SEQ 1", mode="wording")
+
+        assert len(archive.list_root_reports()) == 1
+
+    def test_prune_root_reports_keeps_only_the_n_most_recent(self, isolated_output):
+        paths = [_touch_root_file(f"QA_ROOT_{i}.xlsx", mtime_offset_seconds=i) for i in range(4)]
+
+        archive.prune_root_reports(keep=2)
+
+        assert not os.path.exists(paths[0])
+        assert not os.path.exists(paths[1])
+        assert os.path.exists(paths[2])
+        assert os.path.exists(paths[3])
+
+    def test_prune_root_reports_defaults_to_keep_reports(self, isolated_output):
+        for i in range(5):
+            _touch_root_file(f"QA_ROOT_{i}.xlsx", mtime_offset_seconds=i)
+
+        archive.prune_root_reports()
+
+        assert len(archive.list_root_reports()) == archive.KEEP_REPORTS
+
+    def test_prune_root_reports_never_touches_archived_subfolder_reports(self, tmp_path, isolated_output, monkeypatch):
+        _fake_incrementing_datetime(monkeypatch)
+        report = _make_report(tmp_path)
+        for _ in range(5):
+            archive.archive_report(report, "Germany", "Revamp Inac", "SEQ 1", mode="wording")
+        for i in range(5):
+            _touch_root_file(f"QA_ROOT_{i}.xlsx", mtime_offset_seconds=i)
+
+        archive.prune_root_reports(keep=2)
+
+        # Deja rabote a KEEP_REPORTS par archive_report lui-meme - doit le rester.
+        assert len(archive.list_reports("Germany", "Revamp Inac", "SEQ 1", mode="wording")) == archive.KEEP_REPORTS
+        assert len(archive.list_root_reports()) == 2
+
+    def test_no_root_reports_is_a_no_op(self, isolated_output):
+        archive.prune_root_reports()  # ne doit pas lever
+        assert archive.list_root_reports() == []

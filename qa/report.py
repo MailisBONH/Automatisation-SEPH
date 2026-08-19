@@ -11,6 +11,7 @@ from openpyxl.cell.rich_text import CellRichText
 from openpyxl.cell.text import InlineFont
 from openpyxl.cell.rich_text import TextBlock
 
+from qa.archive import prune_root_reports
 from qa.config import CRITICALITY_ORDER, OUTPUT_DIR, SCORE_COLOR_GOOD, SCORE_COLOR_WARN
 from qa.history import record_run
 
@@ -348,6 +349,7 @@ def save_report(results: list, campaign_sheet_name: str, mode: str = "wording"):
         f"QA_{campaign_sheet_name.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
     )
     wb.save(path)
+    prune_root_reports()
     print(f"📄 Rapport genere : {path}")
     return path
 
@@ -430,5 +432,6 @@ def save_consolidated_report(results_by_sequence: dict, report_name: str = "Mult
         f"QA_MULTI_{safe_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
     )
     wb.save(path)
+    prune_root_reports()
     print(f"📄 Rapport consolidé généré : {path}")
     return path

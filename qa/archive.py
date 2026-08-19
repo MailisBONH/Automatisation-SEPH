@@ -11,6 +11,12 @@ qa.classification.normalize_sequence_name pour la reconciliation des noms de
 sequence entre les deux onglets) ; le type de rapport est distingue par le
 prefixe du nom de fichier (QA_wording_/QA_url_/QA_combined_), pas par le
 dossier.
+
+La meme regle KEEP_REPORTS s'applique aussi aux rapports "bruts" generes
+directement a la racine de OUTPUT_DIR, un par comparaison, avant tout
+archivage (voir list_root_reports/prune_root_reports) - sans cette purge,
+ils s'accumuleraient indefiniment puisque chaque clic sur Comparer en cree
+un nouveau, archive ou non.
 """
 import glob
 import os
@@ -69,6 +75,38 @@ def archive_report(report_path: str, country: str, trigger: str, sequence: str, 
             pass
 
     return dest_path
+
+
+def list_root_reports() -> list:
+    """Rapports "bruts" generes a la racine de OUTPUT_DIR (un par clic sur
+    Comparer, voir qa.report.save_report/save_consolidated_report), avant
+    tout archivage/classification - jamais dans un sous-dossier
+    Pays/Trigger/Sequence (voir sequence_dir). Du plus recent au plus ancien."""
+    return sorted(
+        glob.glob(os.path.join(OUTPUT_DIR, "*.xlsx")),
+        key=os.path.getmtime,
+        reverse=True
+    )
+
+
+def prune_root_reports(keep: int = KEEP_REPORTS) -> None:
+    """
+    Ne garde que les `keep` rapports les plus recents a la racine de
+    OUTPUT_DIR. Ces fichiers sont generes a chaque comparaison (voir
+    qa.report.save_report/save_consolidated_report, qui appellent cette
+    fonction juste apres chaque ecriture) et s'accumuleraient sinon
+    indefiniment, contrairement aux rapports archives dans un dossier de
+    sequence (deja soumis a la meme regle KEEP_REPORTS via archive_report).
+    Purge inconditionnelle, meme si le run correspondant n'a jamais ete
+    archive : le rapport reste telechargeable depuis l'app tant qu'il n'a
+    pas ete supprime, comme n'importe quel fichier de temp/ (voir
+    qa.cleanup). Ne touche jamais aux sous-dossiers Pays/Trigger/Sequence.
+    """
+    for old_file in list_root_reports()[keep:]:
+        try:
+            os.remove(old_file)
+        except OSError:
+            pass
 
 
 def delete_sequence_dir(country: str, trigger: str, sequence: str) -> None:

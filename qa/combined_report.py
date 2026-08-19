@@ -13,7 +13,7 @@ from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.dataframe import dataframe_to_rows
 
-from qa.archive import archive_report, list_reports
+from qa.archive import archive_report, list_reports, prune_root_reports
 from qa.config import OUTPUT_DIR
 from qa.report import status_fill_color, write_summary_sheet
 
@@ -87,6 +87,7 @@ def build_combined_report(country: str, trigger: str, sequence: str):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     flat_path = os.path.join(OUTPUT_DIR, f"QA_COMBINED_{sequence.replace(' ', '_')}_{timestamp}.xlsx")
     wb.save(flat_path)
+    prune_root_reports()
 
     final_path = archive_report(flat_path, country, trigger, sequence, mode="combined")
 

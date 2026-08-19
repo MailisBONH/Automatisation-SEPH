@@ -1,3 +1,6 @@
+import os
+import time
+
 import pandas as pd
 import pytest
 
@@ -339,6 +342,13 @@ class TestOpenExcelFileCache:
         assert first.sheet_names == ["First"]
 
         pd.DataFrame({"a": [1]}).to_excel(path, sheet_name="Second", index=False)
+        # Force un mtime distinct du premier ecrit : sur un systeme de
+        # fichiers a resolution grossiere (ou sous charge), deux ecritures
+        # rapprochees peuvent partager le meme mtime_ns - la seule autre
+        # partie de la cle (la taille) pourrait alors coincider par hasard
+        # et faire ce test flaky. On ne teste pas la precision de l'horloge
+        # du systeme de fichiers, juste que la cle change bien avec elle.
+        os.utime(path, (time.time() + 5, time.time() + 5))
         second = _open_excel_file(str(path))
 
         assert second.sheet_names == ["Second"]
