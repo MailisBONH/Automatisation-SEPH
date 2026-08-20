@@ -24,6 +24,7 @@ Interface Streamlit + moteur de comparaison Python, avec export du résultat en 
 - [Notification Teams (optionnelle, non activée par défaut)](#notification-teams-optionnelle-non-activée-par-défaut)
 - [Nettoyage automatique des fichiers temporaires](#nettoyage-automatique-des-fichiers-temporaires)
 - [Configuration](#configuration)
+- [Documentation Confluence](#documentation-confluence)
 - [Limitations connues / roadmap](#limitations-connues--roadmap)
 
 ## Fonctionnalités
@@ -481,6 +482,19 @@ Les réglages globaux sont centralisés dans [`qa/config.py`](qa/config.py) :
 | `UNCLASSIFIED_LABEL` | Nom de dossier utilisé si pays/trigger/séquence est vide | `"Non classé"` |
 | `REGRESSION_ALERT_THRESHOLD` | Baisse de score (points de %) au-delà de laquelle une régression est signalée (voir `qa.history.find_regression`) | `5` |
 | `TEAMS_WEBHOOK_URL` | URL du webhook entrant Teams pour la notification automatique (`qa.notifications`), configurable via la variable d'environnement `QA_TEAMS_WEBHOOK_URL` — vide = notification désactivée | `""` |
+
+## Documentation Confluence
+
+Le dossier [`docs/`](docs/) contient 4 documents destinés aux pages Confluence du projet, au format `.docx` (import natif via **Créer > Importer un document Word** dans l'espace Confluence — le copier-coller de Markdown ou de HTML n'est pas interprété par l'éditeur Confluence) :
+
+| Document | Public visé | Contenu |
+|---|---|---|
+| `Documentation Fonctionnelle - QA Email Automation.docx` | QA, métier | Fonctionnement détaillé du moteur (extraction, matching, seuils, types d'écarts, criticité) + inventaire de toutes les fonctionnalités, existantes et ajoutées depuis la version d'origine |
+| `Stratégie d'Automatisation de la Validation des Templates AEM.docx` | Management, PM | Vision, couverture de test, architecture, KPIs, roadmap |
+| `Guide Dev - Automatisation Template AEM.docx` | Développeurs AEM | Classes `audit-component-*`, zones `text-contribution`, checklist avant livraison |
+| `Guide PO - Automatisation Excel.docx` | Product Owners | Structure attendue du référentiel Excel (wording et UTM), lint automatique |
+
+Ces documents sont revérifiés contre le code au moment de leur rédaction (seuils, noms d'`Error Type`, colonnes de rapport...) — à remettre à jour si le comportement du moteur change. Le dossier [`docs/schemas-strategie/`](docs/schemas-strategie/) contient les schémas de la stratégie en PNG séparés, à glisser-déposer directement sur une page Confluence si l'import du `.docx` ne ramène pas les images intégrées.
 
 ## Limitations connues / roadmap
 
