@@ -25,6 +25,7 @@ from qa.history import (
     load_sequence_history,
     rewrite_classification,
 )
+from qa.report_diff import load_last_two_reports_diff
 
 st.set_page_config(page_title="Historique QA", layout="wide")
 
@@ -170,6 +171,76 @@ def folder_grid(items, key_prefix):
     return chosen
 
 
+def _diff_entries_to_df(entries, mode):
+    """Convertit une liste d'entrees {"previous", "current"} (voir
+    qa.report_diff.diff_reports) en DataFrame affichable. label_col/sub_col
+    identifient la ligne (Component/Element en wording, classe attendue/
+    section source en url) ; previous ou current peut etre None (ajout/
+    suppression), jamais les deux."""
+    label_col, sub_col = ("Component Name", "Element") if mode == "wording" else ("Expected Class", "Source Section")
+    rows = []
+    for entry in entries:
+        previous, current = entry["previous"], entry["current"]
+        base = current or previous
+        rows.append({
+            label_col: base.get(label_col, ""),
+            sub_col: base.get(sub_col, ""),
+            "Statut avant": previous.get("Status", "") if previous else "—",
+            "Statut après": current.get("Status", "") if current else "—",
+            "Erreur avant": (previous.get("Error Type") or "") if previous else "",
+            "Erreur après": (current.get("Error Type") or "") if current else "",
+            "Texte avant": (previous.get("HTML Wording") or "") if previous else "",
+            "Texte après": (current.get("HTML Wording") or "") if current else "",
+        })
+    return pd.DataFrame(rows)
+
+
+def render_report_diff(country, trigger, sequence):
+    """
+    Diff entre les 2 derniers rapports archives (wording et/ou url) d'une
+    sequence - voir qa.report_diff.load_last_two_reports_diff. Complementaire
+    au score global deja suivi ci-dessus : identifie precisement QUELS
+    composants/wordings/URLs ont regresse, ete corriges ou change de nature,
+    plutot que juste "le score a baisse de X points". Purement local (relit
+    des rapports Excel deja generes sur disque, aucun appel reseau).
+    """
+    any_diff = False
+    for mode in ("wording", "url"):
+        diff = load_last_two_reports_diff(country, trigger, sequence, mode)
+        if diff is None:
+            continue
+        any_diff = True
+
+        st.markdown(f"**{MODE_LABELS[mode]}**")
+
+        total_changes = sum(len(diff[k]) for k in ("regressed", "fixed", "changed", "added", "removed"))
+        unchanged = diff["unchanged_ok"] + diff["unchanged_ko"]
+        if not total_changes:
+            st.caption(f"Aucun changement depuis le rapport précédent ({unchanged} ligne(s) identiques).")
+            continue
+
+        st.caption(
+            f"{len(diff['regressed'])} régression(s), {len(diff['fixed'])} correction(s), "
+            f"{len(diff['changed'])} changement(s), {len(diff['added'])} ajout(s), "
+            f"{len(diff['removed'])} suppression(s) — {unchanged} ligne(s) inchangée(s)."
+        )
+
+        sections = [
+            ("⚠️ Régressions (était OK, maintenant KO)", diff["regressed"]),
+            ("✅ Corrections (était KO, maintenant OK)", diff["fixed"]),
+            ("🔄 Changements (KO avant et après, mais différemment)", diff["changed"]),
+            ("➕ Nouveaux éléments", diff["added"]),
+            ("➖ Éléments disparus", diff["removed"]),
+        ]
+        for title, category_entries in sections:
+            if category_entries:
+                st.write(title)
+                st.dataframe(_diff_entries_to_df(category_entries, mode), use_container_width=True, hide_index=True)
+
+    if not any_diff:
+        st.caption("Moins de 2 rapports archivés pour cette séquence — rien à comparer encore.")
+
+
 # =========================
 # NAVIGATION
 # =========================
@@ -252,6 +323,17 @@ else:
         )
     else:
         st.caption("Aucun historique de score pour cette séquence.")
+
+    # =========================
+    # DIFF ENTRE LES 2 DERNIERS RAPPORTS
+    # =========================
+    st.divider()
+    with st.expander("🔍 Comparer les 2 derniers rapports"):
+        st.caption(
+            "Détail des changements entre le rapport le plus récent et le précédent — "
+            "quels composants/wordings/URLs précis ont régressé, été corrigés, ou changé de nature."
+        )
+        render_report_diff(country, trigger, sequence)
 
     # =========================
     # GESTION (renommer/fusionner, supprimer)

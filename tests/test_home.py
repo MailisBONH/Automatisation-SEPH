@@ -19,7 +19,7 @@ import pandas as pd
 import pytest
 from streamlit.testing.v1 import AppTest
 
-from conftest import make_wording_workbook
+from conftest import make_details_report, make_wording_workbook
 
 HOME_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "home.py")
 
@@ -276,23 +276,11 @@ class TestDoArchive:
         redirect_find_regression = lambda *a, path=self.history_path, **k: real_find_regression(*a, path=path, **k)
         monkeypatch.setattr(home, "find_regression", redirect_find_regression)
 
-    def _make_details_report(self, path, rows):
-        from openpyxl import Workbook
-
-        wb = Workbook()
-        ws = wb.active
-        ws.title = "Details"
-        headers = list(rows[0].keys())
-        ws.append(headers)
-        for row in rows:
-            ws.append([row[h] for h in headers])
-        wb.save(path)
-
     def test_archives_a_single_run_and_records_its_score_in_history(self, tmp_path):
         from qa.history import load_sequence_history
 
         report_path = tmp_path / "report.xlsx"
-        self._make_details_report(str(report_path), [{"Status": "OK"}, {"Status": "KO"}])
+        make_details_report(str(report_path), [{"Status": "OK"}, {"Status": "KO"}])
         last_run = {
             "kind": "single", "mode": "wording", "sequence": "SEQ 1 NON LOYAL",
             "results": [{"Status": "OK"}, {"Status": "KO"}], "report_path": str(report_path),
@@ -333,9 +321,9 @@ class TestDoArchive:
         from qa.history import load_sequence_history
 
         wording_report = tmp_path / "wording.xlsx"
-        self._make_details_report(str(wording_report), [{"Status": "OK"}])
+        make_details_report(str(wording_report), [{"Status": "OK"}])
         url_report = tmp_path / "url.xlsx"
-        self._make_details_report(str(url_report), [{"Status": "OK"}])
+        make_details_report(str(url_report), [{"Status": "OK"}])
 
         # normalize_sequence_name reduit "SEQ 1 NON LOYAL"/"SEQ 1 NON FID" au
         # meme "SEQ 1" : les deux tombent dans le meme dossier de sequence,
@@ -359,7 +347,7 @@ class TestDoArchive:
         report_path = tmp_path / "report.xlsx"
         rows = [{"Status": "OK"}, {"Status": "KO", "Error Type": "Minor typo"},
                 {"Status": "KO", "Error Type": "Minor typo"}, {"Status": "KO", "Error Type": "Content mismatch"}]
-        self._make_details_report(str(report_path), rows)
+        make_details_report(str(report_path), rows)
         last_run = {
             "kind": "single", "mode": "wording", "sequence": "SEQ 1 NON LOYAL",
             "results": rows, "report_path": str(report_path),
@@ -373,7 +361,7 @@ class TestDoArchive:
 
     def test_returns_empty_list_when_no_regression(self, tmp_path):
         report_path = tmp_path / "report.xlsx"
-        self._make_details_report(str(report_path), [{"Status": "OK"}, {"Status": "KO"}])
+        make_details_report(str(report_path), [{"Status": "OK"}, {"Status": "KO"}])
         last_run = {
             "kind": "single", "mode": "wording", "sequence": "SEQ 1 NON LOYAL",
             "results": [{"Status": "OK"}, {"Status": "KO"}], "report_path": str(report_path),
@@ -385,7 +373,7 @@ class TestDoArchive:
 
     def test_returns_a_regression_when_score_drops_significantly(self, tmp_path):
         first_report = tmp_path / "first.xlsx"
-        self._make_details_report(str(first_report), [{"Status": "OK"}] * 10)
+        make_details_report(str(first_report), [{"Status": "OK"}] * 10)
         first_run = {
             "kind": "single", "mode": "wording", "sequence": "SEQ 1 NON LOYAL",
             "results": [{"Status": "OK"}] * 10, "report_path": str(first_report),
@@ -394,7 +382,7 @@ class TestDoArchive:
 
         second_report = tmp_path / "second.xlsx"
         second_rows = [{"Status": "OK"}] * 2 + [{"Status": "KO"}] * 8
-        self._make_details_report(str(second_report), second_rows)
+        make_details_report(str(second_report), second_rows)
         second_run = {
             "kind": "single", "mode": "wording", "sequence": "SEQ 1 NON LOYAL",
             "results": second_rows, "report_path": str(second_report),

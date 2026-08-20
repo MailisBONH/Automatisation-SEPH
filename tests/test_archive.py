@@ -1,11 +1,10 @@
-import itertools
 import os
 import time
-from datetime import datetime as real_datetime
 
 import pytest
 
 import qa.archive as archive
+from conftest import fake_incrementing_datetime
 
 
 @pytest.fixture(autouse=True)
@@ -20,21 +19,6 @@ def _make_report(tmp_path, name="report.xlsx"):
     path = tmp_path / name
     path.write_bytes(b"fake xlsx content")
     return str(path)
-
-
-def _fake_incrementing_datetime(monkeypatch):
-    """Remplace qa.archive.datetime par un objet dont .now() avance d'une
-    seconde a chaque appel : evite que des archive_report() rapides (fichier
-    de test minuscule, pas de vrai parsing Excel) ne produisent le meme nom
-    de fichier (timestamp a la seconde pres) et ne s'ecrasent entre eux."""
-    counter = itertools.count()
-
-    class FakeDateTime:
-        @staticmethod
-        def now():
-            return real_datetime(2026, 1, 1, 0, 0, next(counter) % 60)
-
-    monkeypatch.setattr(archive, "datetime", FakeDateTime)
 
 
 class TestSafeFolderName:
@@ -66,7 +50,7 @@ class TestArchiveReportAndListReports:
         assert dest != report
 
     def test_list_reports_filters_by_mode(self, tmp_path, isolated_output, monkeypatch):
-        _fake_incrementing_datetime(monkeypatch)
+        fake_incrementing_datetime(monkeypatch)
         report = _make_report(tmp_path)
 
         archive.archive_report(report, "Germany", "Revamp Inac", "SEQ 1", mode="wording")
@@ -80,7 +64,7 @@ class TestArchiveReportAndListReports:
         assert archive.list_reports("Germany", "Revamp Inac", "SEQ 1") == []
 
     def test_rotation_keeps_only_last_two_per_type(self, tmp_path, isolated_output, monkeypatch):
-        _fake_incrementing_datetime(monkeypatch)
+        fake_incrementing_datetime(monkeypatch)
         report = _make_report(tmp_path)
 
         # archive_report() trie par mtime reel du fichier (pas par le
@@ -104,7 +88,7 @@ class TestArchiveReportAndListReports:
         assert os.path.exists(paths[3])
 
     def test_rotation_does_not_affect_other_types(self, tmp_path, isolated_output, monkeypatch):
-        _fake_incrementing_datetime(monkeypatch)
+        fake_incrementing_datetime(monkeypatch)
         report = _make_report(tmp_path)
 
         for _ in range(3):
@@ -132,7 +116,7 @@ class TestDeleteSequenceDir:
 
 class TestMoveSequenceDir:
     def test_renames_sequence_folder(self, tmp_path, isolated_output, monkeypatch):
-        _fake_incrementing_datetime(monkeypatch)
+        fake_incrementing_datetime(monkeypatch)
         report = _make_report(tmp_path)
         archive.archive_report(report, "Germany", "Revamp Inac", "SEQ 1 NON FID", mode="url")
 
@@ -146,7 +130,7 @@ class TestMoveSequenceDir:
         assert len(moved) == 1
 
     def test_merges_into_existing_destination_without_overwriting(self, tmp_path, isolated_output, monkeypatch):
-        _fake_incrementing_datetime(monkeypatch)
+        fake_incrementing_datetime(monkeypatch)
         report_a = _make_report(tmp_path, "a.xlsx")
         report_b = _make_report(tmp_path, "b.xlsx")
 
@@ -244,7 +228,7 @@ class TestListAndPruneRootReports:
         assert len(archive.list_root_reports()) == archive.KEEP_REPORTS
 
     def test_prune_root_reports_never_touches_archived_subfolder_reports(self, tmp_path, isolated_output, monkeypatch):
-        _fake_incrementing_datetime(monkeypatch)
+        fake_incrementing_datetime(monkeypatch)
         report = _make_report(tmp_path)
         for _ in range(5):
             archive.archive_report(report, "Germany", "Revamp Inac", "SEQ 1", mode="wording")

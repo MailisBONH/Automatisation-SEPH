@@ -14,6 +14,7 @@ import os
 import streamlit as st
 from streamlit.testing.v1 import AppTest
 
+from conftest import fake_incrementing_datetime, make_details_report
 from qa.archive import archive_report, list_reports
 from qa.history import load_sequence_history, record_run
 
@@ -243,6 +244,90 @@ class TestDeleteSequence:
         # Plus aucune sequence classee du tout (c'etait la seule) : l'arbre
         # est vide, la page retombe sur l'etat "Aucun rapport archive".
         assert any("Aucun rapport archivé" in i.value for i in at.info)
+
+
+class TestReportDiffPanel:
+    """Panneau "🔍 Comparer les 2 derniers rapports" (voir
+    qa.report_diff.load_last_two_reports_diff) - deja visible sans avoir a
+    deplier l'expander (AppTest rend l'arbre complet, voir les autres
+    classes de ce fichier qui accedent deja au contenu de l'expander
+    "Gérer cette séquence" sans le deplier)."""
+
+    def _navigate_to_sequence(self, at):
+        at.button(key="nav_country_France").click().run()
+        at.button(key="nav_trigger_revamp_inac").click().run()
+        at.button(key="nav_sequence_SEQ 1").click().run()
+
+    def test_fewer_than_two_reports_shows_nothing_to_compare(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        record_run(
+            "SEQ 1", "wording", total=10, ok=8, ko=2, score=80.0,
+            country="France", trigger="revamp_inac", sequence="SEQ 1",
+        )
+        report = tmp_path / "report.xlsx"
+        make_details_report(report, [{"Status": "OK", "Component Name": "Header", "Element": "Title",
+                                       "Source Sheet": "SEQ 1"}])
+        archive_report(str(report), "France", "revamp_inac", "SEQ 1", mode="wording")
+
+        at = _run_page()
+        self._navigate_to_sequence(at)
+
+        assert not at.exception
+        assert any("rien à comparer encore" in c.value for c in at.caption)
+
+    def test_regression_between_the_two_latest_reports_is_shown(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        fake_incrementing_datetime(monkeypatch)
+        record_run(
+            "SEQ 1", "wording", total=1, ok=0, ko=1, score=0.0,
+            country="France", trigger="revamp_inac", sequence="SEQ 1",
+        )
+
+        older = tmp_path / "older.xlsx"
+        make_details_report(older, [{
+            "Component Name": "Header", "Element": "Title", "Source Sheet": "SEQ 1",
+            "Status": "OK", "Error Type": "", "HTML Wording": "Bonjour",
+        }])
+        archive_report(str(older), "France", "revamp_inac", "SEQ 1", mode="wording")
+
+        newer = tmp_path / "newer.xlsx"
+        make_details_report(newer, [{
+            "Component Name": "Header", "Element": "Title", "Source Sheet": "SEQ 1",
+            "Status": "KO", "Error Type": "Content mismatch", "HTML Wording": "Bonsoir",
+        }])
+        archive_report(str(newer), "France", "revamp_inac", "SEQ 1", mode="wording")
+
+        at = _run_page()
+        self._navigate_to_sequence(at)
+
+        assert not at.exception
+        assert any("1 régression(s)" in c.value for c in at.caption)
+        diff_table = next(df for df in at.dataframe if "Component Name" in df.value.columns)
+        assert diff_table.value.iloc[0]["Statut avant"] == "OK"
+        assert diff_table.value.iloc[0]["Statut après"] == "KO"
+
+    def test_two_identical_reports_show_no_changes(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        fake_incrementing_datetime(monkeypatch)
+        record_run(
+            "SEQ 1", "wording", total=1, ok=1, ko=0, score=100.0,
+            country="France", trigger="revamp_inac", sequence="SEQ 1",
+        )
+
+        row = {
+            "Component Name": "Header", "Element": "Title", "Source Sheet": "SEQ 1",
+            "Status": "OK", "Error Type": "", "HTML Wording": "Bonjour",
+        }
+        for _ in range(2):
+            path = tmp_path / f"report_{_}.xlsx"
+            make_details_report(path, [row])
+            archive_report(str(path), "France", "revamp_inac", "SEQ 1", mode="wording")
+
+        at = _run_page()
+        self._navigate_to_sequence(at)
+
+        assert not at.exception
+        assert any("Aucun changement depuis le rapport précédent" in c.value for c in at.caption)
 
 
 class TestLegacyMigrationBanner:

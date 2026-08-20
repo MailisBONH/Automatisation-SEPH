@@ -1,9 +1,9 @@
 import pandas as pd
 import pytest
-from openpyxl import Workbook
 
 import qa.archive as archive
 import qa.combined_report as combined_report
+from conftest import make_details_report as _make_details_report
 
 
 @pytest.fixture(autouse=True)
@@ -12,19 +12,6 @@ def isolated_output(tmp_path, monkeypatch):
     monkeypatch.setattr(archive, "OUTPUT_DIR", output_dir)
     monkeypatch.setattr(combined_report, "OUTPUT_DIR", output_dir)
     return tmp_path
-
-
-def _make_details_report(path, rows):
-    """Classeur minimal avec un onglet 'Details' (comme qa.report.save_report),
-    pour servir de rapport wording/url deja archive."""
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Details"
-    headers = list(rows[0].keys()) if rows else ["Status"]
-    ws.append(headers)
-    for row in rows:
-        ws.append([row[h] for h in headers])
-    wb.save(path)
 
 
 class TestBuildCombinedReport:

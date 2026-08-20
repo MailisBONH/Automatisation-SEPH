@@ -11,7 +11,53 @@ automatiquement par pytest, ce qui suffit a rendre `from conftest import ...`
 resolvable depuis n'importe quel fichier de tests/ (pas de package
 tests/__init__.py, voir pytest.ini).
 """
+import itertools
+from datetime import datetime as real_datetime
+
 import pandas as pd
+
+import qa.archive as archive
+
+
+def make_details_report(path, rows):
+    """
+    Classeur minimal avec un seul onglet 'Details' (comme
+    qa.report.save_report), pour servir de rapport wording/url deja archive
+    dans un test - sans passer par le vrai pipeline de QA. Partage entre
+    tests/test_home.py, tests/test_combined_report.py et
+    tests/test_report_diff.py, qui en avaient chacun leur propre copie quasi
+    identique avant cette factorisation.
+    """
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Details"
+    headers = list(rows[0].keys()) if rows else ["Status"]
+    ws.append(headers)
+    for row in rows:
+        ws.append([row[h] for h in headers])
+    wb.save(path)
+
+
+def fake_incrementing_datetime(monkeypatch):
+    """
+    Remplace qa.archive.datetime par un objet dont .now() avance d'une
+    seconde a chaque appel : evite que plusieurs archive_report() rapides
+    (fichier de test minuscule, pas de vrai parsing Excel) ne produisent le
+    meme nom de fichier (timestamp a la seconde pres, voir
+    qa.archive.archive_report) et ne s'ecrasent silencieusement entre eux.
+    Partagee entre tests/test_archive.py et tests/test_report_diff.py, qui
+    archivent tous les deux plusieurs rapports de suite dans un meme test.
+    """
+    counter = itertools.count()
+
+    class FakeDateTime:
+        @staticmethod
+        def now():
+            return real_datetime(2026, 1, 1, 0, 0, next(counter) % 60)
+
+    monkeypatch.setattr(archive, "datetime", FakeDateTime)
 
 
 def make_wording_workbook(tmp_path, sheets: dict, filename="wording.xlsx", wording_column="TRANSLATION"):

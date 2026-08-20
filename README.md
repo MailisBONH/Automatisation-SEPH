@@ -19,6 +19,7 @@ Interface Streamlit + moteur de comparaison Python, avec export du résultat en 
 - [Comment fonctionne la QA URL](#comment-fonctionne-la-qa-url)
 - [Rapport de sortie](#rapport-de-sortie)
 - [Historique par pays / trigger / séquence](#historique-par-pays--trigger--séquence)
+- [Diff entre les 2 derniers rapports archivés](#diff-entre-les-2-derniers-rapports-archivés)
 - [Statistiques d'erreurs et alerte de régression](#statistiques-derreurs-et-alerte-de-régression)
 - [Notification Teams (optionnelle, non activée par défaut)](#notification-teams-optionnelle-non-activée-par-défaut)
 - [Nettoyage automatique des fichiers temporaires](#nettoyage-automatique-des-fichiers-temporaires)
@@ -48,6 +49,7 @@ Interface Streamlit + moteur de comparaison Python, avec export du résultat en 
 - **Fichiers temporaires isolés par session** : chaque session de navigateur utilise ses propres fichiers dans `temp/`, deux analyses lancées en parallèle ne s'écrasent plus.
 - **Historique par pays / trigger / séquence** : chaque comparaison est archivée automatiquement (pays et trigger détectés depuis le contenu du classeur) dans une arborescence de dossiers navigable depuis une page dédiée, avec rapport combiné Wording + URL et graphique d'évolution du score — voir [Historique par pays / trigger / séquence](#historique-par-pays--trigger--séquence).
 - **Statistiques d'erreurs agrégées** : la page Historique affiche, en plus de l'évolution du score par séquence, les types d'erreur les plus fréquents sur l'ensemble de l'historique classé et leur évolution mois par mois (`qa/history.aggregate_error_types`/`error_type_monthly_trend`) — utile pour repérer un problème récurrent (ex. un type de faute qui revient sur plusieurs campagnes) plutôt qu'un incident isolé. Les runs archivés avant cette fonctionnalité n'ont pas de détail par type d'erreur.
+- **Diff entre les 2 derniers rapports archivés** : identifie précisément quels composants/wordings/URLs ont régressé, été corrigés, ou changé de nature d'un run à l'autre (`qa/report_diff.py`) — au-delà du score global déjà suivi, purement local (relit des rapports Excel déjà générés) — voir [Diff entre les 2 derniers rapports archivés](#diff-entre-les-2-derniers-rapports-archivés).
 - **Alerte de régression** : à chaque archivage, le score du run est comparé au dernier score archivé pour la même séquence et le même mode (`qa/history.find_regression`) ; une baisse d'au moins `REGRESSION_ALERT_THRESHOLD` points déclenche un avertissement dans l'app et dans la notification Teams (voir ci-dessous).
 - **Lint du référentiel Excel** : le diagnostic à l'upload signale aussi les wordings vides, les anomalies d'espacement invisibles à l'œil (espace en début/fin, double espace, espace insécable) et les blocs conditionnels AEM mal formés (balises `<%`/`%>` non équilibrées) — voir `qa/diagnostics.find_empty_wordings`/`find_whitespace_anomalies`/`find_unbalanced_aem_blocks`.
 - **Notification Teams** (optionnelle, **non activée par défaut**) : si un webhook Teams est configuré (`QA_TEAMS_WEBHOOK_URL`), chaque run archivé envoie un résumé (scores par séquence, régressions éventuelles) sur le canal configuré — silencieusement désactivé si la variable n'est pas définie (cas par défaut). Voir [Notification Teams](#notification-teams-optionnelle-non-activée-par-défaut) pour la configurer.
@@ -73,7 +75,9 @@ qa/
 ├── classification.py               Détection best-effort pays/trigger + normalisation des noms de séquence (FID/LOYAL)
 ├── archive.py                       Classement des rapports dans output/<Pays>/<Trigger>/<Séquence>/, rotation par type
 ├── combined_report.py                Fusion des derniers rapports Wording + URL d'une séquence en un rapport combiné
-├── history.py                        Historique local des scores (record_run, load_history, build_history_tree, rewrite/delete_classification, prune_history...)
+├── history.py                        Historique local des scores (record_run, load_history, build_history_tree, rewrite/delete_classification, prune_history, aggregate_error_types/error_type_monthly_trend, find_regression...)
+├── report_diff.py                     Diff entre les 2 derniers rapports archivés d'une séquence (diff_reports, load_last_two_reports_diff)
+├── notifications.py                    Notification Teams best-effort à chaque run archivé (send_teams_notification)
 ├── cleanup.py                         Suppression automatique des fichiers de temp/ plus vieux que 24h
 └── report.py                        Génération des rapports Excel (save_report, save_consolidated_report, sort_results_by_html_order réutilisée par home.py pour l'aperçu)
 temp/                       Fichiers uploadés temporairement, isolés par session (non versionné)
@@ -372,9 +376,25 @@ Accessible via le bouton **📈 Historique** en haut à droite de l'outil (page 
 1. **Vue d'ensemble** en haut de page : un tableau récapitulatif de toutes les séquences archivées (Pays, Trigger, Séquence, date du dernier test, type, % OK, nombre de tests), avant même de naviguer par dossiers — utile pour repérer en un coup d'œil une séquence qui régresse sans avoir à la chercher dans l'arborescence.
 2. **Statistiques des erreurs** (voir [section dédiée](#statistiques-derreurs-et-alerte-de-régression) ci-dessous) : un panneau dépliable juste après la vue d'ensemble, agrégeant les types d'erreur les plus fréquents sur tout l'historique.
 3. Navigation par dossiers **Pays → Trigger → Séquence**.
-4. Dans le dossier final : les rapports disponibles groupés par type (Wording / URL / Combiné), un graphique d'évolution du **% de OK** depuis le premier test (une courbe par type), et un panneau **"⚙️ Gérer cette séquence"** :
+4. Dans le dossier final : les rapports disponibles groupés par type (Wording / URL / Combiné), un graphique d'évolution du **% de OK** depuis le premier test (une courbe par type), un panneau **"🔍 Comparer les 2 derniers rapports"** (voir [section dédiée](#diff-entre-les-2-derniers-rapports-archivés) ci-dessous), et un panneau **"⚙️ Gérer cette séquence"** :
    - **Renommer / fusionner** : corrige une mauvaise détection automatique (pays/trigger) ou fusionne deux séquences classées séparément par erreur — déplace les rapports Excel et réécrit l'historique vers le nouveau (Pays, Trigger, Séquence) en un clic.
    - **Supprimer** : retire définitivement la séquence (rapports Excel **et** historique des scores) — protégé par une case à cocher de confirmation, le bouton restant désactivé tant qu'elle n'est pas cochée.
+
+## Diff entre les 2 derniers rapports archivés
+
+Le score global (`% OK`) et les statistiques d'erreurs (voir ci-dessus) disent QUE quelque chose a changé, pas QUOI précisément. Le panneau **"🔍 Comparer les 2 derniers rapports"** de la page Historique répond à cette question en relisant les deux derniers rapports Excel archivés (Wording et/ou URL, déjà conservés sur disque — voir [Rotation des rapports](#rotation-des-rapports-qaarchivepy)) et en les comparant ligne à ligne (`qa/report_diff.py`, purement local : aucun appel réseau, contrairement à la vérification HTTP des liens abandonnée précédemment).
+
+Chaque ligne est identifiée par une clé stable entre les deux rapports (`Component Name` + `Element` + `Source Sheet` en mode Wording ; la classe attendue du bloc UTM + la section source en mode URL, ou le lien HTML lui-même pour une ligne `Unexpected URL (not in Excel)` sans classe attendue), puis classée :
+
+| Catégorie | Signification |
+|---|---|
+| ⚠️ Régressions | était `OK`, est maintenant `KO` |
+| ✅ Corrections | était `KO`, est maintenant `OK` |
+| 🔄 Changements | `KO` avant et après, mais `Error Type` ou wording/URL trouvé différent (ex. une faute remplacée par une autre) |
+| ➕ Nouveaux éléments | clé présente seulement dans le rapport le plus récent (nouveau composant/URL) |
+| ➖ Éléments disparus | clé présente seulement dans le rapport précédent |
+
+Les lignes strictement identiques d'un rapport à l'autre ne sont pas détaillées, seulement comptées ("X ligne(s) inchangée(s)"). Nécessite au moins 2 rapports archivés du même type pour cette séquence (sinon un message l'indique) — comme la rotation ne garde que les 2 plus récents par type (`KEEP_REPORTS`), le diff porte toujours sur "le dernier run vs celui juste avant", jamais plus loin dans le temps.
 
 ## Statistiques d'erreurs et alerte de régression
 
