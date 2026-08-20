@@ -19,6 +19,8 @@ Interface Streamlit + moteur de comparaison Python, avec export du résultat en 
 - [Comment fonctionne la QA URL](#comment-fonctionne-la-qa-url)
 - [Rapport de sortie](#rapport-de-sortie)
 - [Historique par pays / trigger / séquence](#historique-par-pays--trigger--séquence)
+- [Statistiques d'erreurs et alerte de régression](#statistiques-derreurs-et-alerte-de-régression)
+- [Notification Teams (optionnelle, non activée par défaut)](#notification-teams-optionnelle-non-activée-par-défaut)
 - [Nettoyage automatique des fichiers temporaires](#nettoyage-automatique-des-fichiers-temporaires)
 - [Configuration](#configuration)
 - [Limitations connues / roadmap](#limitations-connues--roadmap)
@@ -45,6 +47,10 @@ Interface Streamlit + moteur de comparaison Python, avec export du résultat en 
 - **Logs de debug dans l'UI** : le détail de l'extraction (auparavant visible seulement dans la console du serveur) est affiché dans un expander repliable après chaque comparaison, et a été réduit à l'essentiel (plus de trace ligne par ligne de chaque texte extrait).
 - **Fichiers temporaires isolés par session** : chaque session de navigateur utilise ses propres fichiers dans `temp/`, deux analyses lancées en parallèle ne s'écrasent plus.
 - **Historique par pays / trigger / séquence** : chaque comparaison est archivée automatiquement (pays et trigger détectés depuis le contenu du classeur) dans une arborescence de dossiers navigable depuis une page dédiée, avec rapport combiné Wording + URL et graphique d'évolution du score — voir [Historique par pays / trigger / séquence](#historique-par-pays--trigger--séquence).
+- **Statistiques d'erreurs agrégées** : la page Historique affiche, en plus de l'évolution du score par séquence, les types d'erreur les plus fréquents sur l'ensemble de l'historique classé et leur évolution mois par mois (`qa/history.aggregate_error_types`/`error_type_monthly_trend`) — utile pour repérer un problème récurrent (ex. un type de faute qui revient sur plusieurs campagnes) plutôt qu'un incident isolé. Les runs archivés avant cette fonctionnalité n'ont pas de détail par type d'erreur.
+- **Alerte de régression** : à chaque archivage, le score du run est comparé au dernier score archivé pour la même séquence et le même mode (`qa/history.find_regression`) ; une baisse d'au moins `REGRESSION_ALERT_THRESHOLD` points déclenche un avertissement dans l'app et dans la notification Teams (voir ci-dessous).
+- **Lint du référentiel Excel** : le diagnostic à l'upload signale aussi les wordings vides, les anomalies d'espacement invisibles à l'œil (espace en début/fin, double espace, espace insécable) et les blocs conditionnels AEM mal formés (balises `<%`/`%>` non équilibrées) — voir `qa/diagnostics.find_empty_wordings`/`find_whitespace_anomalies`/`find_unbalanced_aem_blocks`.
+- **Notification Teams** (optionnelle, **non activée par défaut**) : si un webhook Teams est configuré (`QA_TEAMS_WEBHOOK_URL`), chaque run archivé envoie un résumé (scores par séquence, régressions éventuelles) sur le canal configuré — silencieusement désactivé si la variable n'est pas définie (cas par défaut). Voir [Notification Teams](#notification-teams-optionnelle-non-activée-par-défaut) pour la configurer.
 
 ## Architecture du projet
 
@@ -364,10 +370,62 @@ Dès que les rapports Wording **et** URL sont disponibles pour une séquence, un
 Accessible via le bouton **📈 Historique** en haut à droite de l'outil (page Streamlit séparée, `pages/1_Historique.py`) :
 
 1. **Vue d'ensemble** en haut de page : un tableau récapitulatif de toutes les séquences archivées (Pays, Trigger, Séquence, date du dernier test, type, % OK, nombre de tests), avant même de naviguer par dossiers — utile pour repérer en un coup d'œil une séquence qui régresse sans avoir à la chercher dans l'arborescence.
-2. Navigation par dossiers **Pays → Trigger → Séquence**.
-3. Dans le dossier final : les rapports disponibles groupés par type (Wording / URL / Combiné), un graphique d'évolution du **% de OK** depuis le premier test (une courbe par type), et un panneau **"⚙️ Gérer cette séquence"** :
+2. **Statistiques des erreurs** (voir [section dédiée](#statistiques-derreurs-et-alerte-de-régression) ci-dessous) : un panneau dépliable juste après la vue d'ensemble, agrégeant les types d'erreur les plus fréquents sur tout l'historique.
+3. Navigation par dossiers **Pays → Trigger → Séquence**.
+4. Dans le dossier final : les rapports disponibles groupés par type (Wording / URL / Combiné), un graphique d'évolution du **% de OK** depuis le premier test (une courbe par type), et un panneau **"⚙️ Gérer cette séquence"** :
    - **Renommer / fusionner** : corrige une mauvaise détection automatique (pays/trigger) ou fusionne deux séquences classées séparément par erreur — déplace les rapports Excel et réécrit l'historique vers le nouveau (Pays, Trigger, Séquence) en un clic.
    - **Supprimer** : retire définitivement la séquence (rapports Excel **et** historique des scores) — protégé par une case à cocher de confirmation, le bouton restant désactivé tant qu'elle n'est pas cochée.
+
+## Statistiques d'erreurs et alerte de régression
+
+Deux fonctionnalités complémentaires, toutes deux basées sur `output/history.jsonl` (aucune configuration requise, actives dès qu'un run est archivé) :
+
+### Statistiques d'erreurs agrégées
+
+Chaque run archivé enregistre désormais la répartition de ses KO par `Error Type` (`qa/history.record_run`, paramètre `error_types`, voir aussi le mode `"combined"` qui cumule les répartitions Wording + URL). La page Historique affiche, dans le panneau dépliable **"📊 Statistiques des erreurs (toutes séquences)"** :
+
+- un graphique en barres des types d'erreur les plus fréquents sur **tout l'historique classé**, toutes séquences confondues (`qa/history.aggregate_error_types`) ;
+- un graphique d'évolution mensuelle des 8 types d'erreur les plus fréquents (`qa/history.error_type_monthly_trend`).
+
+Utile pour repérer un problème récurrent (ex. un type de faute qui revient sur plusieurs campagnes ou marchés) plutôt qu'un incident isolé sur une seule séquence. Les runs archivés **avant** cette fonctionnalité n'ont pas ce détail (le panneau l'indique explicitement plutôt que d'afficher un graphique vide sans explication).
+
+### Alerte de régression
+
+À chaque archivage, `qa/history.find_regression` compare le score du run courant au **dernier** score archivé pour la même (Pays, Trigger, Séquence, mode) — appelé avant l'enregistrement du run courant, pour ne jamais se comparer à lui-même. Si le score a baissé d'au moins `REGRESSION_ALERT_THRESHOLD` points de pourcentage (5 par défaut, voir [Configuration](#configuration)), un avertissement apparaît :
+
+- dans l'app, juste après la confirmation d'archivage (`⚠️ Régression détectée sur <séquence> (<mode>) : X% → Y%`) ;
+- dans la notification Teams si elle est configurée (voir ci-dessous).
+
+La comparaison se fait **par mode** (`wording`/`url`/`combined` séparément) : un score wording n'est jamais comparé à un score url de la même séquence.
+
+## Notification Teams (optionnelle, non activée par défaut)
+
+> ⚠️ Cette fonctionnalité est **documentée mais pas encore configurée/testée** dans ce déploiement — elle reste inactive tant que `QA_TEAMS_WEBHOOK_URL` n'est pas définie (aucun impact si vous ne l'activez pas).
+
+Si un webhook Teams est configuré, chaque run archivé envoie automatiquement un message récapitulatif sur le canal Teams choisi (`qa/notifications.send_teams_notification`) : score par séquence/mode, et régression(s) éventuelle(s) (voir ci-dessus). L'envoi est *best-effort* : une notification manquée (webhook mal configuré, Teams indisponible, réseau coupé) n'interrompt jamais l'archivage ni la QA elle-même.
+
+### Configurer le webhook Teams — étape par étape
+
+Microsoft retire progressivement les anciens connecteurs Teams ("Webhook entrant" via **Connecteurs**, désactivation prévue mi-2026) au profit des **Workflows** (Power Automate) — la procédure ci-dessous utilise cette méthode actuelle et supportée.
+
+1. Dans Teams, allez sur le **canal** où vous voulez recevoir les notifications QA.
+2. Survolez le nom du canal → **`···`** (plus d'options) → **Workflows**.
+3. Recherchez le modèle **"Send webhook alerts to a channel"** et sélectionnez-le.
+4. Vérifiez le nom de l'équipe/canal proposés (déjà pré-remplis), puis **Créer/Save**.
+5. Une fois le workflow créé, cliquez sur **Copier le lien du webhook** (*Copy webhook link*) — sauvegardez cette URL immédiatement (souvent non réaffichable ensuite).
+6. Définissez la variable d'environnement `QA_TEAMS_WEBHOOK_URL` avec cette URL, **dans l'environnement qui lance Streamlit** :
+   ```bash
+   # PowerShell, session courante
+   $env:QA_TEAMS_WEBHOOK_URL = "https://<url-copiée-à-l'étape-5>"
+   ```
+   ```bash
+   # Persistant (variable utilisateur Windows) - nécessite de rouvrir le terminal après
+   setx QA_TEAMS_WEBHOOK_URL "https://<url-copiée-à-l'étape-5>"
+   ```
+7. Relancez `streamlit run app.py` **depuis ce même terminal** (la variable doit être visible au démarrage du process Python).
+8. Lancez une comparaison et laissez l'archivage se faire (automatique, ou via la pop-up pays/trigger) : un message doit apparaître sur le canal Teams en quelques secondes.
+
+**Si rien n'apparaît :** vérifiez que la variable est bien vue par Python dans ce terminal (`python -c "import os; print(os.environ.get('QA_TEAMS_WEBHOOK_URL'))"` doit afficher l'URL, pas `None`), et que le workflow est actif côté Teams (**`···`** → Workflows → **Gérer vos workflows**, pas en pause).
 
 ## Nettoyage automatique des fichiers temporaires
 
@@ -401,6 +459,8 @@ Les réglages globaux sont centralisés dans [`qa/config.py`](qa/config.py) :
 | `LANGUAGE_TO_COUNTRY` | Mots-clés de langue (colonne wording) → pays, pour la détection automatique | `GERMAN`→Germany, `FRENCH`→France, `DUTCH`/`FLEMISH`→Belgium... |
 | `DOMAIN_TO_COUNTRY` | Suffixes de domaine (URLs de l'onglet UTM) → pays, en repli si la langue n'a rien donné | `de`→Germany, `fr`→France, `be`→Belgium... |
 | `UNCLASSIFIED_LABEL` | Nom de dossier utilisé si pays/trigger/séquence est vide | `"Non classé"` |
+| `REGRESSION_ALERT_THRESHOLD` | Baisse de score (points de %) au-delà de laquelle une régression est signalée (voir `qa.history.find_regression`) | `5` |
+| `TEAMS_WEBHOOK_URL` | URL du webhook entrant Teams pour la notification automatique (`qa.notifications`), configurable via la variable d'environnement `QA_TEAMS_WEBHOOK_URL` — vide = notification désactivée | `""` |
 
 ## Limitations connues / roadmap
 

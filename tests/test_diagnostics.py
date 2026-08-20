@@ -1,4 +1,11 @@
-from qa.diagnostics import find_duplicate_components, find_unused_excel_classes, find_wrong_language_wordings
+from qa.diagnostics import (
+    find_duplicate_components,
+    find_empty_wordings,
+    find_unbalanced_aem_blocks,
+    find_unused_excel_classes,
+    find_whitespace_anomalies,
+    find_wrong_language_wordings,
+)
 
 
 def excel_row(wording="text", technical=None, component="Comp"):
@@ -62,6 +69,67 @@ class TestFindDuplicateComponents:
             excel_row(component="LEGAL NOTICE", technical=None),
         ]
         assert find_duplicate_components(excel_wordings) == []
+
+
+class TestFindEmptyWordings:
+    def test_empty_string_is_flagged(self):
+        excel_wordings = [excel_row(wording="", component="A")]
+        assert find_empty_wordings(excel_wordings) == [{"Component": "A", "Element": "Elem"}]
+
+    def test_whitespace_only_is_flagged(self):
+        excel_wordings = [excel_row(wording="   ", component="A")]
+        assert find_empty_wordings(excel_wordings) == [{"Component": "A", "Element": "Elem"}]
+
+    def test_real_text_is_not_flagged(self):
+        excel_wordings = [excel_row(wording="Bonjour", component="A")]
+        assert find_empty_wordings(excel_wordings) == []
+
+
+class TestFindWhitespaceAnomalies:
+    def test_leading_trailing_whitespace_is_flagged(self):
+        excel_wordings = [excel_row(wording=" Bonjour ", component="A")]
+        anomalies = find_whitespace_anomalies(excel_wordings)
+        assert any(a["issue"] == "espace en début/fin" for a in anomalies)
+
+    def test_double_space_is_flagged(self):
+        excel_wordings = [excel_row(wording="Bonjour  le monde", component="A")]
+        anomalies = find_whitespace_anomalies(excel_wordings)
+        assert any(a["issue"] == "double espace" for a in anomalies)
+
+    def test_non_breaking_space_is_flagged(self):
+        excel_wordings = [excel_row(wording="Bonjour\xa0le monde", component="A")]
+        anomalies = find_whitespace_anomalies(excel_wordings)
+        assert any(a["issue"] == "espace insécable" for a in anomalies)
+
+    def test_clean_text_is_not_flagged(self):
+        excel_wordings = [excel_row(wording="Bonjour le monde", component="A")]
+        assert find_whitespace_anomalies(excel_wordings) == []
+
+    def test_empty_wording_is_skipped(self):
+        # Deja couvert par find_empty_wordings - ne doit pas en plus
+        # ressortir ici comme une "anomalie d'espacement".
+        excel_wordings = [excel_row(wording="", component="A")]
+        assert find_whitespace_anomalies(excel_wordings) == []
+
+    def test_multiple_issues_produce_multiple_entries(self):
+        excel_wordings = [excel_row(wording=" Bonjour  le monde", component="A")]
+        anomalies = find_whitespace_anomalies(excel_wordings)
+        assert {a["issue"] for a in anomalies} == {"espace en début/fin", "double espace"}
+
+
+class TestFindUnbalancedAemBlocks:
+    def test_matching_tags_are_not_flagged(self):
+        excel_wordings = [excel_row(wording="<% if(x){ %>A<% } %>", component="A")]
+        assert find_unbalanced_aem_blocks(excel_wordings) == []
+
+    def test_missing_closing_tag_is_flagged(self):
+        excel_wordings = [excel_row(wording="<% if(x){ %>A<% } ", component="A")]
+        result = find_unbalanced_aem_blocks(excel_wordings)
+        assert result == [{"Component": "A", "Element": "Elem", "Wording": "<% if(x){ %>A<% } "}]
+
+    def test_plain_text_is_not_flagged(self):
+        excel_wordings = [excel_row(wording="Bonjour le monde", component="A")]
+        assert find_unbalanced_aem_blocks(excel_wordings) == []
 
 
 GERMAN_SENTENCES = [

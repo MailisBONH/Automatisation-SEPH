@@ -247,6 +247,12 @@ class TestDoArchive:
     absent -> _do_archive retombe sur qa.report.save_report, qui ecrirait
     sinon dans le vrai output/ et le vrai output/history.jsonl - voir le
     mode "batch", ou report_path est justement None).
+
+    home.find_regression (voir qa.history.find_regression, appele par
+    _do_archive AVANT chaque record_run pour detecter une regression de
+    score) lit aussi l'historique par son propre chemin par defaut - doit
+    etre redirige vers le meme tmp_path que record_run, sinon il lirait le
+    vrai output/history.jsonl du projet a chaque test.
     """
 
     @pytest.fixture(autouse=True)
@@ -254,6 +260,7 @@ class TestDoArchive:
         import qa.archive as archive_module
         import qa.combined_report as combined_report_module
         import qa.report as report_module
+        from qa.history import find_regression as real_find_regression
         from qa.history import record_run as real_record_run
 
         monkeypatch.setattr(archive_module, "OUTPUT_DIR", str(tmp_path / "output"))
@@ -265,6 +272,9 @@ class TestDoArchive:
         redirect_record_run = lambda *a, path=self.history_path, **k: real_record_run(*a, path=path, **k)
         monkeypatch.setattr(home, "record_run", redirect_record_run)
         monkeypatch.setattr(report_module, "record_run", redirect_record_run)
+
+        redirect_find_regression = lambda *a, path=self.history_path, **k: real_find_regression(*a, path=path, **k)
+        monkeypatch.setattr(home, "find_regression", redirect_find_regression)
 
     def _make_details_report(self, path, rows):
         from openpyxl import Workbook
@@ -342,6 +352,59 @@ class TestDoArchive:
 
         entries = load_sequence_history("Germany", "Revamp Inac", "SEQ 1", path=self.history_path)
         assert any(e["mode"] == "combined" and e["score"] == 100.0 for e in entries)
+
+    def test_records_error_type_breakdown(self, tmp_path):
+        from qa.history import load_sequence_history
+
+        report_path = tmp_path / "report.xlsx"
+        rows = [{"Status": "OK"}, {"Status": "KO", "Error Type": "Minor typo"},
+                {"Status": "KO", "Error Type": "Minor typo"}, {"Status": "KO", "Error Type": "Content mismatch"}]
+        self._make_details_report(str(report_path), rows)
+        last_run = {
+            "kind": "single", "mode": "wording", "sequence": "SEQ 1 NON LOYAL",
+            "results": rows, "report_path": str(report_path),
+        }
+
+        home._do_archive(last_run, "Germany", "Revamp Inac")
+
+        entries = load_sequence_history("Germany", "Revamp Inac", "SEQ 1", path=self.history_path)
+        wording_entry = next(e for e in entries if e["mode"] == "wording")
+        assert wording_entry["error_types"] == {"Minor typo": 2, "Content mismatch": 1}
+
+    def test_returns_empty_list_when_no_regression(self, tmp_path):
+        report_path = tmp_path / "report.xlsx"
+        self._make_details_report(str(report_path), [{"Status": "OK"}, {"Status": "KO"}])
+        last_run = {
+            "kind": "single", "mode": "wording", "sequence": "SEQ 1 NON LOYAL",
+            "results": [{"Status": "OK"}, {"Status": "KO"}], "report_path": str(report_path),
+        }
+
+        regressions = home._do_archive(last_run, "Germany", "Revamp Inac")
+
+        assert regressions == []
+
+    def test_returns_a_regression_when_score_drops_significantly(self, tmp_path):
+        first_report = tmp_path / "first.xlsx"
+        self._make_details_report(str(first_report), [{"Status": "OK"}] * 10)
+        first_run = {
+            "kind": "single", "mode": "wording", "sequence": "SEQ 1 NON LOYAL",
+            "results": [{"Status": "OK"}] * 10, "report_path": str(first_report),
+        }
+        home._do_archive(first_run, "Germany", "Revamp Inac")
+
+        second_report = tmp_path / "second.xlsx"
+        second_rows = [{"Status": "OK"}] * 2 + [{"Status": "KO"}] * 8
+        self._make_details_report(str(second_report), second_rows)
+        second_run = {
+            "kind": "single", "mode": "wording", "sequence": "SEQ 1 NON LOYAL",
+            "results": second_rows, "report_path": str(second_report),
+        }
+
+        regressions = home._do_archive(second_run, "Germany", "Revamp Inac")
+
+        assert len(regressions) == 1
+        assert regressions[0]["previous_score"] == 100.0
+        assert regressions[0]["current_score"] == 20.0
 
 
 def _make_combined_excel(tmp_path, filename="combined.xlsx"):

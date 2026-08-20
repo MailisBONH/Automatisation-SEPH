@@ -9,7 +9,7 @@ import threading
 from collections import defaultdict
 from datetime import datetime, timedelta
 
-from qa.config import HISTORY_RETENTION_DAYS, OUTPUT_DIR
+from qa.config import HISTORY_RETENTION_DAYS, OUTPUT_DIR, REGRESSION_ALERT_THRESHOLD
 
 HISTORY_PATH = os.path.join(OUTPUT_DIR, "history.jsonl")
 
@@ -27,7 +27,7 @@ def _parse_timestamp(timestamp: str) -> datetime:
 
 def record_run(sheet: str, mode: str, total: int, ok: int, ko: int, score: float,
                 country: str = None, trigger: str = None, sequence: str = None,
-                path: str = HISTORY_PATH) -> None:
+                error_types: dict = None, path: str = HISTORY_PATH) -> None:
     """Ajoute une ligne d'historique pour ce run. N'echoue jamais bruyamment :
     l'historique est une fonctionnalite de confort, pas critique pour la QA.
 
@@ -37,7 +37,14 @@ def record_run(sheet: str, mode: str, total: int, ok: int, ko: int, score: float
     seulement celles-ci) qui alimentent la page Historique par pays/trigger/
     sequence. L'appel "brut" fait par qa.report a chaque run (sans ces
     champs) continue d'alimenter le mini-graphique par onglet affiche
-    immediatement apres une comparaison."""
+    immediatement apres une comparaison.
+
+    error_types (optionnel, {"Error Type": count}) : repartition des KO de ce
+    run par type d'erreur, fournie par home._do_archive. Comme country/
+    trigger/sequence, stockee seulement si non vide - alimente les stats
+    agregees de la page Historique (voir aggregate_error_types/
+    error_type_monthly_trend). Les entrees anterieures a cette fonctionnalite
+    n'ont pas cette cle."""
     entry = {
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "sheet": sheet,
@@ -53,6 +60,8 @@ def record_run(sheet: str, mode: str, total: int, ok: int, ko: int, score: float
         entry["trigger"] = trigger
     if sequence:
         entry["sequence"] = sequence
+    if error_types:
+        entry["error_types"] = dict(error_types)
     with _LOCK:
         try:
             directory = os.path.dirname(path)
@@ -122,6 +131,64 @@ def load_sequence_history(country: str, trigger: str, sequence: str, path: str =
         e for e in load_classified_history(path)
         if e["country"] == country and e["trigger"] == trigger and e["sequence"] == sequence
     ]
+
+
+def aggregate_error_types(entries: list) -> dict:
+    """Additionne les compteurs error_types (voir record_run) de plusieurs
+    entrees archivees en un seul dict {Error Type: count total} - utilise
+    par la page Historique pour la vue d'ensemble des types d'erreur les
+    plus frequents. Les entrees sans error_types (runs anterieurs a cette
+    fonctionnalite, ou combines sans propre compteur) sont ignorees
+    silencieusement plutot que de lever une erreur."""
+    totals = defaultdict(int)
+    for e in entries:
+        for error_type, count in (e.get("error_types") or {}).items():
+            totals[error_type] += count
+    return dict(totals)
+
+
+def error_type_monthly_trend(entries: list) -> list:
+    """Agrege les error_types de plusieurs entrees par mois calendaire
+    (a partir des 7 premiers caracteres du timestamp, "YYYY-MM"), pour
+    tracer l'evolution des types d'erreur dans le temps (page Historique).
+    Retourne une liste de {period: "YYYY-MM", error_type, count}, triee
+    chronologiquement par period."""
+    buckets = defaultdict(lambda: defaultdict(int))
+    for e in entries:
+        error_types = e.get("error_types") or {}
+        if not error_types:
+            continue
+        period = e["timestamp"][:7]
+        for error_type, count in error_types.items():
+            buckets[period][error_type] += count
+
+    rows = []
+    for period in sorted(buckets):
+        for error_type, count in buckets[period].items():
+            rows.append({"period": period, "error_type": error_type, "count": count})
+    return rows
+
+
+def find_regression(country: str, trigger: str, sequence: str, mode: str, current_score: float,
+                     threshold: float = REGRESSION_ALERT_THRESHOLD, path: str = HISTORY_PATH) -> dict:
+    """Compare current_score au dernier score archive pour (country, trigger,
+    sequence, mode) - a appeler AVANT record_run du run courant, sinon le
+    run se comparerait a lui-meme (il serait deja la "derniere" entree).
+    Filtre par mode : un score wording et un score url ne sont pas
+    comparables entre eux, meme sequence ou pas.
+
+    Retourne {"previous_score", "current_score", "delta"} si le score a
+    baisse d'au moins `threshold` points de pourcentage, sinon None (pas
+    d'historique prealable pour ce mode, ou pas de regression)."""
+    entries = [e for e in load_sequence_history(country, trigger, sequence, path=path) if e.get("mode") == mode]
+    if not entries:
+        return None
+
+    previous_score = entries[-1]["score"]
+    delta = current_score - previous_score
+    if delta <= -threshold:
+        return {"previous_score": previous_score, "current_score": current_score, "delta": delta}
+    return None
 
 
 def _rewrite_entries(path: str, transform) -> None:

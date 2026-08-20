@@ -38,6 +38,17 @@ LANGUAGE_DETECTION_MIN_CLUSTER_SIZE = 2
 # dela de cette limite.
 HISTORY_RETENTION_DAYS = 365
 
+# Alerte de regression (voir qa.history.find_regression) : baisse de score
+# (en points de pourcentage) au-dela de laquelle un run archive declenche un
+# avertissement dans l'UI et dans la notification Teams (si configuree).
+REGRESSION_ALERT_THRESHOLD = 5
+
+# Notification Teams automatique a chaque run archive (voir
+# qa.notifications) : URL d'un webhook entrant Teams, configurable sans
+# toucher au code via la variable d'environnement QA_TEAMS_WEBHOOK_URL. Vide
+# par defaut => notification desactivee (no-op silencieux, jamais d'erreur).
+TEAMS_WEBHOOK_URL = os.environ.get("QA_TEAMS_WEBHOOK_URL", "").strip()
+
 WORDING_COLUMN_NAME = "TRANSLATION"       # Mot-clé (insensible à la casse) de la colonne wording dans l'Excel
 CAMPAIGN_KEYWORD = "HugPlan S1 Bronze"    # Mot-clé pour sélectionner l'onglet dans l'Excel
 MIN_TEXT_LENGTH = 3

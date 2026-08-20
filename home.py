@@ -5,11 +5,19 @@ import io
 import re
 import uuid
 import contextlib
+from collections import Counter
 from qa.archive import archive_report
 from qa.classification import detect_classification, normalize_sequence_name, resolve_sequence_alias
 from qa.cleanup import cleanup_old_temp_files_throttled
 from qa.combined_report import build_combined_report
-from qa.diagnostics import find_duplicate_components, find_unused_excel_classes, find_wrong_language_wordings
+from qa.diagnostics import (
+    find_duplicate_components,
+    find_empty_wordings,
+    find_unbalanced_aem_blocks,
+    find_unused_excel_classes,
+    find_whitespace_anomalies,
+    find_wrong_language_wordings,
+)
 from qa.engine import QA_RUN_READ_ERRORS, run_qa, run_qa_for_sequence
 from qa.excel_loader import (
     EXCEL_READ_ERRORS,
@@ -20,8 +28,9 @@ from qa.excel_loader import (
     load_excel_wordings,
     load_generic_wordings,
 )
-from qa.history import record_run
+from qa.history import find_regression, record_run
 from qa.html_extraction import load_and_extract_html_texts
+from qa.notifications import send_teams_notification
 from qa.report import URL_HEADER_LABELS, save_consolidated_report, save_report, sort_results_by_html_order
 
 from datetime import datetime
@@ -509,8 +518,21 @@ def _do_archive(last_run, country, trigger):
     dossiers distincts. Des que les deux types sont presents pour une
     sequence, un rapport combine Wording+URL est (re)genere (voir
     qa.combined_report) et son propre score est aussi archive dans
-    l'historique (mode="combined")."""
+    l'historique (mode="combined").
+
+    Au passage : calcule la repartition par type d'erreur de chaque item
+    (voir qa.history.aggregate_error_types/error_type_monthly_trend, page
+    Historique), detecte une eventuelle regression de score par rapport au
+    dernier run archive du meme (pays, trigger, sequence, mode) (voir
+    qa.history.find_regression - appele AVANT chaque record_run, sinon le
+    run courant se comparerait a lui-meme), et notifie un webhook Teams si
+    configure (qa.notifications.send_teams_notification, no-op silencieux
+    sinon). Retourne la liste des regressions detectees (eventuellement
+    vide), affichee par l'appelant (voir ensure_archived)."""
     resolved_sequences = set()
+    regressions = []
+    summary_lines = []
+    combined_error_types = {}
 
     for item in _run_items(last_run):
         sequence = resolve_sequence_alias(country, trigger, normalize_sequence_name(item["sequence"]))
@@ -521,21 +543,51 @@ def _do_archive(last_run, country, trigger):
         ok = sum(1 for r in rows if r["Status"] == "OK")
         score = round(ok / total * 100, 2) if total else 0
 
+        error_types = Counter(r["Error Type"] for r in rows if r["Status"] == "KO" and r.get("Error Type"))
+        combined_error_types.setdefault(sequence, Counter()).update(error_types)
+
+        regression = find_regression(country, trigger, sequence, item["mode"], score)
+        if regression:
+            regressions.append({"sequence": sequence, "mode": item["mode"], **regression})
+
+        summary_lines.append(f"- **{item['sequence']}** ({item['mode']}) : {score}% ({ok}/{total} OK)")
+
         report_path = item["report_path"] or save_report(rows, item["sequence"], mode=item["mode"])
         archive_report(report_path, country, trigger, sequence, mode=item["mode"])
         record_run(
             item["sequence"], item["mode"], total, ok, total - ok, score,
-            country=country, trigger=trigger, sequence=sequence
+            country=country, trigger=trigger, sequence=sequence, error_types=dict(error_types),
         )
 
     for sequence in resolved_sequences:
         combined_path, combined_stats = build_combined_report(country, trigger, sequence)
         if combined_stats:
+            combined_regression = find_regression(country, trigger, sequence, "combined", combined_stats["score"])
+            if combined_regression:
+                regressions.append({"sequence": sequence, "mode": "combined", **combined_regression})
+            summary_lines.append(
+                f"- **{sequence}** (combined) : {combined_stats['score']}% "
+                f"({combined_stats['ok']}/{combined_stats['total']} OK)"
+            )
             record_run(
                 sequence, "combined",
                 combined_stats["total"], combined_stats["ok"], combined_stats["ko"], combined_stats["score"],
-                country=country, trigger=trigger, sequence=sequence
+                country=country, trigger=trigger, sequence=sequence,
+                error_types=dict(combined_error_types.get(sequence, {})),
             )
+
+    notification_lines = list(summary_lines)
+    if regressions:
+        notification_lines.append("")
+        notification_lines.append("⚠️ **Régression(s) détectée(s) :**")
+        for r in regressions:
+            notification_lines.append(
+                f"- {r['sequence']} ({r['mode']}) : {r['previous_score']}% → {r['current_score']}% "
+                f"({r['delta']:+.1f} pts)"
+            )
+    send_teams_notification(f"QA {country} / {trigger}", "\n".join(notification_lines))
+
+    return regressions
 
 
 @st.dialog("📁 Informations manquantes pour l'historique")
@@ -558,8 +610,8 @@ def _prompt_missing_classification(last_run, guess, sequences):
             if not country or not trigger:
                 st.error("Les deux champs sont obligatoires.")
             else:
-                _do_archive(last_run, country, trigger)
-                st.session_state[archive_key] = {"country": country, "trigger": trigger}
+                regressions = _do_archive(last_run, country, trigger) or []
+                st.session_state[archive_key] = {"country": country, "trigger": trigger, "regressions": regressions}
                 st.rerun()
     with col2:
         if st.button("Ne pas archiver", use_container_width=True):
@@ -594,8 +646,8 @@ def ensure_archived(last_run):
     sequences = [i["sequence"] for i in items]
 
     if country and trigger:
-        _do_archive(last_run, country, trigger)
-        st.session_state[archive_key] = {"country": country, "trigger": trigger}
+        regressions = _do_archive(last_run, country, trigger) or []
+        st.session_state[archive_key] = {"country": country, "trigger": trigger, "regressions": regressions}
     else:
         _prompt_missing_classification(last_run, guess, sequences)
 
@@ -949,6 +1001,34 @@ if excel_path and not batch_mode and not missing_keyword:
                             f"⚠️ {len(language_mismatches)} wording(s) semblent dans une langue différente "
                             f"de la langue dominante (`{language_mismatches[0]['expected_lang']}`) — "
                             f"probablement collés depuis une autre campagne/marché : {preview}{more}"
+                        )
+
+                    empty_wordings = find_empty_wordings(combined_wordings)
+                    if empty_wordings:
+                        details = "; ".join(f"**{w['Component']}** / {w['Element']}" for w in empty_wordings[:10])
+                        more = f" (+{len(empty_wordings) - 10} autre(s))" if len(empty_wordings) > 10 else ""
+                        st.warning(
+                            f"⚠️ {len(empty_wordings)} wording(s) vide(s) dans le référentiel : {details}{more}"
+                        )
+
+                    whitespace_issues = find_whitespace_anomalies(combined_wordings)
+                    if whitespace_issues:
+                        details = "; ".join(
+                            f"**{w['Component']}** / {w['Element']} ({w['issue']})" for w in whitespace_issues[:10]
+                        )
+                        more = f" (+{len(whitespace_issues) - 10} autre(s))" if len(whitespace_issues) > 10 else ""
+                        st.warning(
+                            f"⚠️ {len(whitespace_issues)} wording(s) avec une anomalie d'espacement "
+                            f"(souvent invisible dans Excel) : {details}{more}"
+                        )
+
+                    unbalanced_blocks = find_unbalanced_aem_blocks(combined_wordings)
+                    if unbalanced_blocks:
+                        details = "; ".join(f"**{w['Component']}** / {w['Element']}" for w in unbalanced_blocks[:10])
+                        more = f" (+{len(unbalanced_blocks) - 10} autre(s))" if len(unbalanced_blocks) > 10 else ""
+                        st.warning(
+                            f"⚠️ {len(unbalanced_blocks)} wording(s) avec un bloc conditionnel AEM mal formé "
+                            f"(balises `<%`/`%>` non équilibrées) : {details}{more}"
                         )
 
                     if html_path:
@@ -1349,3 +1429,8 @@ if last_run:
             f"📁 Archivé automatiquement dans l'historique sous "
             f"**{archived_state['country']} / {archived_state['trigger']}**."
         )
+        for r in archived_state.get("regressions") or []:
+            st.warning(
+                f"⚠️ Régression détectée sur **{r['sequence']}** ({r['mode']}) : "
+                f"{r['previous_score']}% → {r['current_score']}% ({r['delta']:+.1f} pts)"
+            )

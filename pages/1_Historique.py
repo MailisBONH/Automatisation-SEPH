@@ -17,8 +17,11 @@ import streamlit as st
 from qa.archive import delete_sequence_dir, list_reports, move_sequence_dir
 from qa.classification import migrate_legacy_loyalty_sequences
 from qa.history import (
+    aggregate_error_types,
     build_history_tree,
     delete_classification,
+    error_type_monthly_trend,
+    load_classified_history,
     load_sequence_history,
     rewrite_classification,
 )
@@ -91,6 +94,42 @@ def _overview_rows(tree):
 with st.expander("📊 Vue d'ensemble (toutes les séquences)", expanded=nav["sequence"] is None):
     overview_df = pd.DataFrame(_overview_rows(tree)).sort_values("Dernier test", ascending=False)
     st.dataframe(overview_df, use_container_width=True, hide_index=True)
+
+# =========================
+# STATISTIQUES D'ERREURS AGREGEES (toutes sequences, toute la periode)
+# =========================
+with st.expander("📊 Statistiques des erreurs (toutes séquences)", expanded=False):
+    all_classified_entries = load_classified_history()
+    error_totals = aggregate_error_types(all_classified_entries)
+
+    if error_totals:
+        totals_df = pd.DataFrame(
+            sorted(error_totals.items(), key=lambda kv: kv[1], reverse=True),
+            columns=["Error Type", "Count"]
+        )
+        fig_totals = px.bar(
+            totals_df, x="Count", y="Error Type", orientation="h",
+            title="Types d'erreur les plus fréquents (historique complet)"
+        )
+        fig_totals.update_yaxes(categoryorder="total ascending")
+        st.plotly_chart(fig_totals, use_container_width=True)
+
+        top_types = set(totals_df["Error Type"].head(8))
+        trend_rows = [r for r in error_type_monthly_trend(all_classified_entries) if r["error_type"] in top_types]
+        if trend_rows:
+            trend_df = pd.DataFrame(trend_rows)
+            fig_trend = px.line(
+                trend_df, x="period", y="count", color="error_type", markers=True,
+                title="Évolution mensuelle des types d'erreur les plus fréquents",
+                labels={"period": "Mois", "count": "Occurrences", "error_type": "Type d'erreur"}
+            )
+            st.plotly_chart(fig_trend, use_container_width=True)
+    else:
+        st.caption(
+            "Aucune statistique d'erreur disponible pour l'instant — ce panneau se remplit à partir des "
+            "prochains runs archivés (les runs déjà archivés avant cette fonctionnalité n'ont pas de détail "
+            "par type d'erreur)."
+        )
 
 st.divider()
 

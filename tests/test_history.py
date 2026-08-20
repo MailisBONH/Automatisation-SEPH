@@ -2,8 +2,11 @@ import json
 from datetime import datetime
 
 from qa.history import (
+    aggregate_error_types,
     build_history_tree,
     delete_classification,
+    error_type_monthly_trend,
+    find_regression,
     load_classified_history,
     load_history,
     load_sequence_history,
@@ -66,6 +69,102 @@ class TestRecordAndLoadHistory:
         assert entries[1]["country"] == "Germany"
         assert entries[1]["trigger"] == "Revamp Inac"
         assert entries[1]["sequence"] == "SEQ 1 NON LOYAL"
+
+    def test_error_types_stored_only_when_non_empty(self, tmp_path):
+        path = str(tmp_path / "history.jsonl")
+
+        record_run("SEQ 1", "wording", total=10, ok=8, ko=2, score=80.0, path=path)
+        record_run(
+            "SEQ 1", "wording", total=10, ok=8, ko=2, score=80.0, path=path,
+            error_types={"Minor typo": 1, "Content mismatch": 1}
+        )
+        record_run("SEQ 1", "wording", total=10, ok=8, ko=2, score=80.0, path=path, error_types={})
+
+        entries = load_history(path=path)
+        assert "error_types" not in entries[0]
+        assert entries[1]["error_types"] == {"Minor typo": 1, "Content mismatch": 1}
+        assert "error_types" not in entries[2]
+
+
+class TestAggregateErrorTypes:
+    def test_sums_across_entries(self):
+        entries = [
+            {"error_types": {"Minor typo": 2, "Content mismatch": 1}},
+            {"error_types": {"Minor typo": 1}},
+        ]
+        assert aggregate_error_types(entries) == {"Minor typo": 3, "Content mismatch": 1}
+
+    def test_entries_without_error_types_are_ignored(self):
+        entries = [{"score": 50.0}, {"error_types": {}}, {"error_types": {"Minor typo": 1}}]
+        assert aggregate_error_types(entries) == {"Minor typo": 1}
+
+    def test_empty_input_returns_empty_dict(self):
+        assert aggregate_error_types([]) == {}
+
+
+class TestErrorTypeMonthlyTrend:
+    def test_groups_by_calendar_month(self):
+        entries = [
+            {"timestamp": "2026-01-05 10:00:00", "error_types": {"Minor typo": 2}},
+            {"timestamp": "2026-01-20 10:00:00", "error_types": {"Minor typo": 1, "Content mismatch": 1}},
+            {"timestamp": "2026-02-01 10:00:00", "error_types": {"Minor typo": 5}},
+        ]
+
+        trend = error_type_monthly_trend(entries)
+
+        by_period = {(r["period"], r["error_type"]): r["count"] for r in trend}
+        assert by_period[("2026-01", "Minor typo")] == 3
+        assert by_period[("2026-01", "Content mismatch")] == 1
+        assert by_period[("2026-02", "Minor typo")] == 5
+        # Triee chronologiquement par period.
+        assert [r["period"] for r in trend] == sorted(r["period"] for r in trend)
+
+    def test_entries_without_error_types_are_skipped(self):
+        entries = [{"timestamp": "2026-01-05 10:00:00"}, {"timestamp": "2026-01-05 10:00:00", "error_types": {}}]
+        assert error_type_monthly_trend(entries) == []
+
+
+class TestFindRegression:
+    def test_no_prior_history_returns_none(self, tmp_path):
+        path = str(tmp_path / "history.jsonl")
+        assert find_regression("Germany", "T", "SEQ 1", "wording", 80.0, path=path) is None
+
+    def test_score_drop_above_threshold_is_flagged(self, tmp_path):
+        path = str(tmp_path / "history.jsonl")
+        record_run("SEQ 1", "wording", 10, 9, 1, 90.0, path=path, country="Germany", trigger="T", sequence="SEQ 1")
+
+        result = find_regression("Germany", "T", "SEQ 1", "wording", 80.0, threshold=5, path=path)
+        assert result == {"previous_score": 90.0, "current_score": 80.0, "delta": -10.0}
+
+    def test_score_drop_below_threshold_is_not_flagged(self, tmp_path):
+        path = str(tmp_path / "history.jsonl")
+        record_run("SEQ 1", "wording", 10, 9, 1, 90.0, path=path, country="Germany", trigger="T", sequence="SEQ 1")
+
+        assert find_regression("Germany", "T", "SEQ 1", "wording", 87.0, threshold=5, path=path) is None
+
+    def test_score_improvement_is_not_flagged(self, tmp_path):
+        path = str(tmp_path / "history.jsonl")
+        record_run("SEQ 1", "wording", 10, 5, 5, 50.0, path=path, country="Germany", trigger="T", sequence="SEQ 1")
+
+        assert find_regression("Germany", "T", "SEQ 1", "wording", 90.0, threshold=5, path=path) is None
+
+    def test_filters_by_mode(self, tmp_path):
+        path = str(tmp_path / "history.jsonl")
+        record_run("SEQ 1", "url", 10, 9, 1, 90.0, path=path, country="Germany", trigger="T", sequence="SEQ 1")
+
+        # Aucun historique "wording" pour cette sequence, seulement "url" -
+        # ne doit pas comparer un score wording a un score url.
+        assert find_regression("Germany", "T", "SEQ 1", "wording", 10.0, threshold=5, path=path) is None
+
+    def test_compares_against_the_last_entry_only(self, tmp_path):
+        path = str(tmp_path / "history.jsonl")
+        record_run("SEQ 1", "wording", 10, 3, 7, 30.0, path=path, country="Germany", trigger="T", sequence="SEQ 1")
+        record_run("SEQ 1", "wording", 10, 9, 1, 90.0, path=path, country="Germany", trigger="T", sequence="SEQ 1")
+
+        # Le dernier run (90.0) sert de reference, pas le premier (30.0).
+        assert find_regression("Germany", "T", "SEQ 1", "wording", 89.0, threshold=5, path=path) is None
+        result = find_regression("Germany", "T", "SEQ 1", "wording", 80.0, threshold=5, path=path)
+        assert result["previous_score"] == 90.0
 
 
 class TestClassifiedHistory:

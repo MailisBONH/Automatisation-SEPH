@@ -49,6 +49,66 @@ def find_duplicate_components(excel_wordings: list) -> list:
     )
 
 
+def find_empty_wordings(excel_wordings: list) -> list:
+    """
+    Wordings dont le texte de reference est vide ou ne contient que des
+    espaces - une cellule laissee vide par erreur dans le referentiel
+    (traduction jamais faite, ligne ajoutee sans contenu). Independant du
+    HTML : detectable a la seule lecture de l'Excel.
+    """
+    return [
+        {"Component": w.get("Component"), "Element": w.get("Element")}
+        for w in excel_wordings
+        if not str(w.get("Wording", "")).strip()
+    ]
+
+
+def find_whitespace_anomalies(excel_wordings: list) -> list:
+    """
+    Wordings dont le texte brut porte une anomalie d'espacement qui passe
+    facilement inapercue a la relecture visuelle d'une cellule Excel :
+    espace(s) en debut/fin, double espace interne, ou espace insecable
+    (\\xa0, souvent colle involontairement lors d'un copier-coller depuis
+    Word/un CMS). Retourne une liste de {Component, Element, Wording, issue}
+    (une entree par anomalie, un wording peut donc apparaitre plusieurs fois
+    s'il cumule plusieurs anomalies).
+    """
+    anomalies = []
+    for w in excel_wordings:
+        text = str(w.get("Wording", ""))
+        if not text:
+            continue
+        issues = []
+        if text != text.strip():
+            issues.append("espace en début/fin")
+        if "  " in text.strip():
+            issues.append("double espace")
+        if "\xa0" in text:
+            issues.append("espace insécable")
+        for issue in issues:
+            anomalies.append({
+                "Component": w.get("Component"), "Element": w.get("Element"),
+                "Wording": text, "issue": issue,
+            })
+    return anomalies
+
+
+def find_unbalanced_aem_blocks(excel_wordings: list) -> list:
+    """
+    Wordings dont le nombre de balises AEM ouvrantes ('<%') et fermantes
+    ('%>') ne correspond pas - signe frequent d'un bloc conditionnel
+    <% if %>...<% } %> mal recopie (balise oubliee/tronquee lors d'un
+    copier-coller depuis le gabarit) qui produirait un texte incoherent une
+    fois deplie par qa.text_utils.expand_conditional_variants().
+    """
+    anomalies = []
+    for w in excel_wordings:
+        text = str(w.get("Wording", ""))
+        if text.count("<%") != text.count("%>"):
+            anomalies.append({"Component": w.get("Component"), "Element": w.get("Element"), "Wording": text})
+    return anomalies
+
+
 def find_wrong_language_wordings(
     excel_wordings: list,
     min_text_length: int = LANGUAGE_DETECTION_MIN_TEXT_LENGTH,
