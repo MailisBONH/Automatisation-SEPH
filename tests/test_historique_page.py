@@ -36,6 +36,45 @@ class TestEmptyHistory:
         assert any("Aucun rapport archivé" in info.value for info in at.info)
 
 
+class TestHistoryExport:
+    """Boutons d'export de l'historique complet (voir qa.history.
+    export_history_csv/export_history_excel), dans le panneau "Vue
+    d'ensemble"."""
+
+    def test_export_buttons_are_present_and_exception_free(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        record_run(
+            "SEQ 1", "wording", total=10, ok=8, ko=2, score=80.0,
+            country="France", trigger="revamp_inac", sequence="SEQ 1",
+        )
+
+        at = _run_page()
+
+        assert not at.exception
+        export_buttons = [b for b in at.get("download_button") if b.label in ("⬇️ Excel (.xlsx)", "⬇️ CSV")]
+        assert len(export_buttons) == 2
+
+
+class TestManualReportDiffPanel:
+    """Panneau "📤 Comparer deux rapports Excel (upload manuel)" - seul son
+    etat par defaut (aucun fichier uploade) est verifiable via AppTest :
+    l'upload de fichier lui-meme n'est pas simulable par ce harnais de test
+    (meme limitation documentee pour home.py, voir TestHomeAppSmoke)."""
+
+    def test_shows_the_mode_selector_and_upload_prompt_by_default(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        record_run(
+            "SEQ 1", "wording", total=10, ok=8, ko=2, score=80.0,
+            country="France", trigger="revamp_inac", sequence="SEQ 1",
+        )
+
+        at = _run_page()
+
+        assert not at.exception
+        assert at.radio(key="manual_diff_mode").options == ["Wording", "URL"]
+        assert any("Uploadez les 2 rapports" in c.value for c in at.caption)
+
+
 class TestPopulatedHistory:
     def test_overview_table_lists_the_recorded_sequence(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
@@ -172,7 +211,11 @@ class TestReportDownloads:
 
         assert not at.exception
         assert not any("Aucun rapport disponible" in c.value for c in at.caption)
-        download_buttons = at.get("download_button")
+        # La page a aussi 2 boutons d'export de l'historique complet (Excel/CSV,
+        # voir "Vue d'ensemble") - on cible specifiquement le bouton du rapport
+        # archive (prefixe "QA_" par qa.archive.archive_report) plutot que de
+        # compter tous les download_button de la page.
+        download_buttons = [b for b in at.get("download_button") if b.label.startswith("⬇️ QA_")]
         assert len(download_buttons) == 1
         assert list_reports("France", "revamp_inac", "SEQ 1", mode="wording")[0].endswith(
             os.path.basename(download_buttons[0].label.replace("⬇️ ", ""))
@@ -327,7 +370,7 @@ class TestReportDiffPanel:
         self._navigate_to_sequence(at)
 
         assert not at.exception
-        assert any("Aucun changement depuis le rapport précédent" in c.value for c in at.caption)
+        assert any("Aucun changement entre les deux rapports" in c.value for c in at.caption)
 
 
 class TestLegacyMigrationBanner:

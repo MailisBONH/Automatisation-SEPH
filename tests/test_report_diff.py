@@ -5,7 +5,7 @@ import pytest
 
 import qa.archive as archive
 from conftest import fake_incrementing_datetime, make_details_report
-from qa.report_diff import diff_reports, load_last_two_reports_diff
+from qa.report_diff import diff_reports, diff_uploaded_reports, load_last_two_reports_diff
 
 
 def wording_row(component="Header", element="Title", source_sheet="SEQ 1", status="OK",
@@ -201,5 +201,75 @@ class TestLoadLastTwoReportsDiff:
         archive.archive_report(str(newer), "Germany", "Revamp Inac", "SEQ 1", mode="url")
 
         diff = load_last_two_reports_diff("Germany", "Revamp Inac", "SEQ 1", "url")
+
+        assert len(diff["regressed"]) == 1
+
+
+class TestDiffUploadedReports:
+    """diff_uploaded_reports : meme moteur que load_last_two_reports_diff,
+    mais a partir de 2 fichiers quelconques (pas d'archivage requis) -
+    utilise directement des chemins de fichiers ici (un upload Streamlit se
+    comporte comme un objet fichier standard pour pandas.read_excel, pas
+    besoin de le simuler specifiquement)."""
+
+    def test_diffs_two_arbitrary_wording_reports(self, tmp_path):
+        previous_path = tmp_path / "previous.xlsx"
+        make_details_report(previous_path, [wording_row(status="OK")])
+
+        current_path = tmp_path / "current.xlsx"
+        make_details_report(current_path, [wording_row(status="KO", error_type="Content mismatch",
+                                                          html_wording="Bonsoir")])
+
+        diff = diff_uploaded_reports(str(previous_path), str(current_path), "wording")
+
+        assert len(diff["regressed"]) == 1
+
+    def test_normalizes_french_url_headers(self, tmp_path):
+        previous_path = tmp_path / "previous.xlsx"
+        make_details_report(previous_path, [{
+            "Section (FID/NON FID)": "", "Classe attendue (Excel)": "HEADER",
+            "Classe trouvée (HTML)": "audit-component-header",
+            "URL attendue (Excel)": "https://example.com/", "URL trouvée (HTML)": "https://example.com/",
+            "Status": "OK", "Raison": "", "Similarité (%)": "100%", "Occurrences (HTML)": 1,
+        }])
+
+        current_path = tmp_path / "current.xlsx"
+        make_details_report(current_path, [{
+            "Section (FID/NON FID)": "", "Classe attendue (Excel)": "HEADER",
+            "Classe trouvée (HTML)": "", "URL attendue (Excel)": "https://example.com/",
+            "URL trouvée (HTML)": "", "Status": "KO", "Raison": "URL not found",
+            "Similarité (%)": "0%", "Occurrences (HTML)": 0,
+        }])
+
+        diff = diff_uploaded_reports(str(previous_path), str(current_path), "url")
+
+        assert len(diff["regressed"]) == 1
+
+    def test_missing_details_sheet_raises_a_clear_error(self, tmp_path):
+        from openpyxl import Workbook
+
+        not_a_report = tmp_path / "not_a_report.xlsx"
+        wb = Workbook()
+        wb.active.title = "Summary"
+        wb.save(not_a_report)
+
+        valid_report = tmp_path / "valid.xlsx"
+        make_details_report(valid_report, [wording_row(status="OK")])
+
+        with pytest.raises(ValueError, match="Details"):
+            diff_uploaded_reports(str(not_a_report), str(valid_report), "wording")
+
+    def test_can_accept_file_like_objects_not_just_paths(self, tmp_path):
+        # Un upload Streamlit se comporte comme un objet fichier binaire
+        # (methode .read()), pas comme un chemin - verifie que
+        # pandas.read_excel s'en sort tout aussi bien.
+        previous_path = tmp_path / "previous.xlsx"
+        make_details_report(previous_path, [wording_row(status="OK")])
+        current_path = tmp_path / "current.xlsx"
+        make_details_report(current_path, [wording_row(status="KO", error_type="Minor typo",
+                                                          html_wording="Bonjou")])
+
+        with open(previous_path, "rb") as previous_file, open(current_path, "rb") as current_file:
+            diff = diff_uploaded_reports(previous_file, current_file, "wording")
 
         assert len(diff["regressed"]) == 1

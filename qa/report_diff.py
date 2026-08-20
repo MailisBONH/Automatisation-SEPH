@@ -28,6 +28,29 @@ def _normalize_url_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df.rename(columns=_URL_LABEL_TO_KEY)
 
 
+def _load_details_df(path_or_buffer, mode: str) -> pd.DataFrame:
+    """
+    Lit l'onglet "Details" d'un rapport QA - un chemin de fichier ou un
+    objet fichier (ex. un upload Streamlit) - et normalise les colonnes
+    url (voir _normalize_url_columns). Partagee par load_last_two_reports_diff
+    (rapports archives) et diff_uploaded_reports (upload manuel, ou la
+    robustesse importe plus : n'importe quel fichier peut etre depose).
+
+    Leve un ValueError explicite si l'onglet "Details" est introuvable -
+    ex. un rapport combine (onglets Wording/URL separes, pas de "Details"
+    unique) ou un fichier qui n'est pas un rapport QA du tout.
+    """
+    try:
+        df = pd.read_excel(path_or_buffer, sheet_name="Details", engine="openpyxl")
+    except ValueError as e:
+        raise ValueError(f"Onglet \"Details\" introuvable dans ce fichier : {e}") from e
+
+    df = df.fillna("")
+    if mode == "url":
+        df = _normalize_url_columns(df)
+    return df
+
+
 def _row_key(row: dict, mode: str) -> tuple:
     """
     Identifie une ligne de rapport a travers 2 runs, independamment de son
@@ -130,11 +153,26 @@ def load_last_two_reports_diff(country: str, trigger: str, sequence: str, mode: 
     if len(reports) < 2:
         return None
 
-    current_df = pd.read_excel(reports[0], sheet_name="Details", engine="openpyxl").fillna("")
-    previous_df = pd.read_excel(reports[1], sheet_name="Details", engine="openpyxl").fillna("")
+    current_df = _load_details_df(reports[0], mode)
+    previous_df = _load_details_df(reports[1], mode)
 
-    if mode == "url":
-        current_df = _normalize_url_columns(current_df)
-        previous_df = _normalize_url_columns(previous_df)
+    return diff_reports(previous_df.to_dict("records"), current_df.to_dict("records"), mode)
+
+
+def diff_uploaded_reports(previous_file, current_file, mode: str) -> dict:
+    """
+    Comme load_last_two_reports_diff, mais a partir de 2 rapports Excel
+    quelconques (chemins ou objets fichier, ex. un upload Streamlit)
+    plutot que des rapports archives sous (country, trigger, sequence) -
+    utile pour comparer un rapport garde de cote au-dela de la retention
+    automatique (voir KEEP_REPORTS dans qa/config.py) ou recu d'un tiers.
+
+    Contrairement a load_last_two_reports_diff, ne retourne jamais None :
+    l'appelant fournit deja les 2 fichiers, il n'y a pas de "moins de 2
+    disponibles" a gerer ici. Leve un ValueError (voir _load_details_df) si
+    l'un des deux n'a pas d'onglet "Details" lisible.
+    """
+    previous_df = _load_details_df(previous_file, mode)
+    current_df = _load_details_df(current_file, mode)
 
     return diff_reports(previous_df.to_dict("records"), current_df.to_dict("records"), mode)

@@ -21,11 +21,13 @@ from qa.history import (
     build_history_tree,
     delete_classification,
     error_type_monthly_trend,
+    export_history_csv,
+    export_history_excel,
     load_classified_history,
     load_sequence_history,
     rewrite_classification,
 )
-from qa.report_diff import load_last_two_reports_diff
+from qa.report_diff import diff_uploaded_reports, load_last_two_reports_diff
 
 st.set_page_config(page_title="Historique QA", layout="wide")
 
@@ -60,9 +62,12 @@ if not tree:
     )
     st.stop()
 
+all_classified_entries = load_classified_history()
+
 
 # =========================
-# VUE D'ENSEMBLE
+# DEFINITIONS (regroupees avant tout rendu, car appelees dans plusieurs
+# sections de la page qui s'executent de haut en bas comme un script)
 # =========================
 def _latest_relevant_entry(entries):
     """Prefere la derniere entree 'combined' (vue la plus complete d'une
@@ -92,15 +97,163 @@ def _overview_rows(tree):
     return rows
 
 
+def folder_grid(items, key_prefix):
+    """Affiche une grille de boutons "dossier", retourne l'item choisi (ou None)."""
+    chosen = None
+    cols = st.columns(4)
+    for i, item in enumerate(sorted(items)):
+        with cols[i % 4]:
+            if st.button(f"📁 {item}", key=f"{key_prefix}_{item}", use_container_width=True):
+                chosen = item
+    return chosen
+
+
+def _diff_entries_to_df(entries, mode):
+    """Convertit une liste d'entrees {"previous", "current"} (voir
+    qa.report_diff.diff_reports) en DataFrame affichable. label_col/sub_col
+    identifient la ligne (Component/Element en wording, classe attendue/
+    section source en url) ; previous ou current peut etre None (ajout/
+    suppression), jamais les deux."""
+    label_col, sub_col = ("Component Name", "Element") if mode == "wording" else ("Expected Class", "Source Section")
+    rows = []
+    for entry in entries:
+        previous, current = entry["previous"], entry["current"]
+        base = current or previous
+        rows.append({
+            label_col: base.get(label_col, ""),
+            sub_col: base.get(sub_col, ""),
+            "Statut avant": previous.get("Status", "") if previous else "—",
+            "Statut après": current.get("Status", "") if current else "—",
+            "Erreur avant": (previous.get("Error Type") or "") if previous else "",
+            "Erreur après": (current.get("Error Type") or "") if current else "",
+            "Texte avant": (previous.get("HTML Wording") or "") if previous else "",
+            "Texte après": (current.get("HTML Wording") or "") if current else "",
+        })
+    return pd.DataFrame(rows)
+
+
+def _render_diff_result(mode, diff):
+    """
+    Affiche un diff deja calcule (voir qa.report_diff.diff_reports) :
+    resume chiffre + un tableau par categorie non vide. Partagee entre le
+    panneau "2 derniers rapports archives" (render_report_diff) et le
+    panneau d'upload manuel (render_manual_report_diff), pour que les deux
+    presentent un diff exactement de la meme facon.
+    """
+    total_changes = sum(len(diff[k]) for k in ("regressed", "fixed", "changed", "added", "removed"))
+    unchanged = diff["unchanged_ok"] + diff["unchanged_ko"]
+    if not total_changes:
+        st.caption(f"Aucun changement entre les deux rapports ({unchanged} ligne(s) identiques).")
+        return
+
+    st.caption(
+        f"{len(diff['regressed'])} régression(s), {len(diff['fixed'])} correction(s), "
+        f"{len(diff['changed'])} changement(s), {len(diff['added'])} ajout(s), "
+        f"{len(diff['removed'])} suppression(s) — {unchanged} ligne(s) inchangée(s)."
+    )
+
+    sections = [
+        ("⚠️ Régressions (était OK, maintenant KO)", diff["regressed"]),
+        ("✅ Corrections (était KO, maintenant OK)", diff["fixed"]),
+        ("🔄 Changements (KO avant et après, mais différemment)", diff["changed"]),
+        ("➕ Nouveaux éléments", diff["added"]),
+        ("➖ Éléments disparus", diff["removed"]),
+    ]
+    for title, category_entries in sections:
+        if category_entries:
+            st.write(title)
+            st.dataframe(_diff_entries_to_df(category_entries, mode), use_container_width=True, hide_index=True)
+
+
+def render_report_diff(country, trigger, sequence):
+    """
+    Diff entre les 2 derniers rapports archives (wording et/ou url) d'une
+    sequence - voir qa.report_diff.load_last_two_reports_diff. Complementaire
+    au score global deja suivi ci-dessus : identifie precisement QUELS
+    composants/wordings/URLs ont regresse, ete corriges ou change de nature,
+    plutot que juste "le score a baisse de X points". Purement local (relit
+    des rapports Excel deja generes sur disque, aucun appel reseau).
+    """
+    any_diff = False
+    for mode in ("wording", "url"):
+        diff = load_last_two_reports_diff(country, trigger, sequence, mode)
+        if diff is None:
+            continue
+        any_diff = True
+        st.markdown(f"**{MODE_LABELS[mode]}**")
+        _render_diff_result(mode, diff)
+
+    if not any_diff:
+        st.caption("Moins de 2 rapports archivés pour cette séquence — rien à comparer encore.")
+
+
+def render_manual_report_diff():
+    """
+    Diff entre 2 rapports Excel quelconques uploades par l'utilisateur -
+    contrairement a render_report_diff (limite aux 2 derniers rapports
+    archives d'une sequence, eux-memes limites par KEEP_REPORTS), permet de
+    comparer n'importe quel rapport garde de cote (au-dela de la retention
+    automatique) ou recu d'un tiers.
+    """
+    mode_label = st.radio("Type de rapport", ["Wording", "URL"], horizontal=True, key="manual_diff_mode")
+    manual_mode = "wording" if mode_label == "Wording" else "url"
+
+    col_previous, col_current = st.columns(2)
+    with col_previous:
+        previous_file = st.file_uploader("Rapport précédent (.xlsx)", type=["xlsx"], key="manual_diff_previous")
+    with col_current:
+        current_file = st.file_uploader("Rapport actuel (.xlsx)", type=["xlsx"], key="manual_diff_current")
+
+    if not (previous_file and current_file):
+        st.caption("Uploadez les 2 rapports à comparer pour lancer la comparaison.")
+        return
+
+    try:
+        diff = diff_uploaded_reports(previous_file, current_file, manual_mode)
+    except ValueError as e:
+        st.error(f"❌ {e}")
+        return
+
+    _render_diff_result(manual_mode, diff)
+
+
 with st.expander("📊 Vue d'ensemble (toutes les séquences)", expanded=nav["sequence"] is None):
     overview_df = pd.DataFrame(_overview_rows(tree)).sort_values("Dernier test", ascending=False)
     st.dataframe(overview_df, use_container_width=True, hide_index=True)
+
+    st.caption("Exporter tout l'historique classé (toutes séquences, tous les runs) pour analyse externe :")
+    export_cols = st.columns(2)
+    with export_cols[0]:
+        st.download_button(
+            "⬇️ Excel (.xlsx)",
+            data=export_history_excel(all_classified_entries),
+            file_name="qa_history_export.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+    with export_cols[1]:
+        st.download_button(
+            "⬇️ CSV",
+            data=export_history_csv(all_classified_entries),
+            file_name="qa_history_export.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+# =========================
+# COMPARAISON MANUELLE DE 2 RAPPORTS UPLOADES
+# =========================
+with st.expander("📤 Comparer deux rapports Excel (upload manuel)", expanded=False):
+    st.caption(
+        "Compare 2 rapports QA quelconques, pas seulement les 2 derniers archivés d'une séquence — "
+        "utile pour un rapport gardé de côté au-delà de la rétention automatique, ou reçu d'un tiers."
+    )
+    render_manual_report_diff()
 
 # =========================
 # STATISTIQUES D'ERREURS AGREGEES (toutes sequences, toute la periode)
 # =========================
 with st.expander("📊 Statistiques des erreurs (toutes séquences)", expanded=False):
-    all_classified_entries = load_classified_history()
     error_totals = aggregate_error_types(all_classified_entries)
 
     if error_totals:
@@ -158,88 +311,6 @@ with crumb_cols[2]:
         st.rerun()
 
 st.divider()
-
-
-def folder_grid(items, key_prefix):
-    """Affiche une grille de boutons "dossier", retourne l'item choisi (ou None)."""
-    chosen = None
-    cols = st.columns(4)
-    for i, item in enumerate(sorted(items)):
-        with cols[i % 4]:
-            if st.button(f"📁 {item}", key=f"{key_prefix}_{item}", use_container_width=True):
-                chosen = item
-    return chosen
-
-
-def _diff_entries_to_df(entries, mode):
-    """Convertit une liste d'entrees {"previous", "current"} (voir
-    qa.report_diff.diff_reports) en DataFrame affichable. label_col/sub_col
-    identifient la ligne (Component/Element en wording, classe attendue/
-    section source en url) ; previous ou current peut etre None (ajout/
-    suppression), jamais les deux."""
-    label_col, sub_col = ("Component Name", "Element") if mode == "wording" else ("Expected Class", "Source Section")
-    rows = []
-    for entry in entries:
-        previous, current = entry["previous"], entry["current"]
-        base = current or previous
-        rows.append({
-            label_col: base.get(label_col, ""),
-            sub_col: base.get(sub_col, ""),
-            "Statut avant": previous.get("Status", "") if previous else "—",
-            "Statut après": current.get("Status", "") if current else "—",
-            "Erreur avant": (previous.get("Error Type") or "") if previous else "",
-            "Erreur après": (current.get("Error Type") or "") if current else "",
-            "Texte avant": (previous.get("HTML Wording") or "") if previous else "",
-            "Texte après": (current.get("HTML Wording") or "") if current else "",
-        })
-    return pd.DataFrame(rows)
-
-
-def render_report_diff(country, trigger, sequence):
-    """
-    Diff entre les 2 derniers rapports archives (wording et/ou url) d'une
-    sequence - voir qa.report_diff.load_last_two_reports_diff. Complementaire
-    au score global deja suivi ci-dessus : identifie precisement QUELS
-    composants/wordings/URLs ont regresse, ete corriges ou change de nature,
-    plutot que juste "le score a baisse de X points". Purement local (relit
-    des rapports Excel deja generes sur disque, aucun appel reseau).
-    """
-    any_diff = False
-    for mode in ("wording", "url"):
-        diff = load_last_two_reports_diff(country, trigger, sequence, mode)
-        if diff is None:
-            continue
-        any_diff = True
-
-        st.markdown(f"**{MODE_LABELS[mode]}**")
-
-        total_changes = sum(len(diff[k]) for k in ("regressed", "fixed", "changed", "added", "removed"))
-        unchanged = diff["unchanged_ok"] + diff["unchanged_ko"]
-        if not total_changes:
-            st.caption(f"Aucun changement depuis le rapport précédent ({unchanged} ligne(s) identiques).")
-            continue
-
-        st.caption(
-            f"{len(diff['regressed'])} régression(s), {len(diff['fixed'])} correction(s), "
-            f"{len(diff['changed'])} changement(s), {len(diff['added'])} ajout(s), "
-            f"{len(diff['removed'])} suppression(s) — {unchanged} ligne(s) inchangée(s)."
-        )
-
-        sections = [
-            ("⚠️ Régressions (était OK, maintenant KO)", diff["regressed"]),
-            ("✅ Corrections (était KO, maintenant OK)", diff["fixed"]),
-            ("🔄 Changements (KO avant et après, mais différemment)", diff["changed"]),
-            ("➕ Nouveaux éléments", diff["added"]),
-            ("➖ Éléments disparus", diff["removed"]),
-        ]
-        for title, category_entries in sections:
-            if category_entries:
-                st.write(title)
-                st.dataframe(_diff_entries_to_df(category_entries, mode), use_container_width=True, hide_index=True)
-
-    if not any_diff:
-        st.caption("Moins de 2 rapports archivés pour cette séquence — rien à comparer encore.")
-
 
 # =========================
 # NAVIGATION

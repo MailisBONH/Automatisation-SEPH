@@ -20,6 +20,7 @@ Interface Streamlit + moteur de comparaison Python, avec export du résultat en 
 - [Rapport de sortie](#rapport-de-sortie)
 - [Historique par pays / trigger / séquence](#historique-par-pays--trigger--séquence)
 - [Diff entre les 2 derniers rapports archivés](#diff-entre-les-2-derniers-rapports-archivés)
+- [Export de l'historique complet](#export-de-lhistorique-complet)
 - [Statistiques d'erreurs et alerte de régression](#statistiques-derreurs-et-alerte-de-régression)
 - [Notification Teams (optionnelle, non activée par défaut)](#notification-teams-optionnelle-non-activée-par-défaut)
 - [Nettoyage automatique des fichiers temporaires](#nettoyage-automatique-des-fichiers-temporaires)
@@ -50,7 +51,8 @@ Interface Streamlit + moteur de comparaison Python, avec export du résultat en 
 - **Fichiers temporaires isolés par session** : chaque session de navigateur utilise ses propres fichiers dans `temp/`, deux analyses lancées en parallèle ne s'écrasent plus.
 - **Historique par pays / trigger / séquence** : chaque comparaison est archivée automatiquement (pays et trigger détectés depuis le contenu du classeur) dans une arborescence de dossiers navigable depuis une page dédiée, avec rapport combiné Wording + URL et graphique d'évolution du score — voir [Historique par pays / trigger / séquence](#historique-par-pays--trigger--séquence).
 - **Statistiques d'erreurs agrégées** : la page Historique affiche, en plus de l'évolution du score par séquence, les types d'erreur les plus fréquents sur l'ensemble de l'historique classé et leur évolution mois par mois (`qa/history.aggregate_error_types`/`error_type_monthly_trend`) — utile pour repérer un problème récurrent (ex. un type de faute qui revient sur plusieurs campagnes) plutôt qu'un incident isolé. Les runs archivés avant cette fonctionnalité n'ont pas de détail par type d'erreur.
-- **Diff entre les 2 derniers rapports archivés** : identifie précisément quels composants/wordings/URLs ont régressé, été corrigés, ou changé de nature d'un run à l'autre (`qa/report_diff.py`) — au-delà du score global déjà suivi, purement local (relit des rapports Excel déjà générés) — voir [Diff entre les 2 derniers rapports archivés](#diff-entre-les-2-derniers-rapports-archivés).
+- **Diff entre les 2 derniers rapports archivés** (et diff manuel entre 2 rapports quelconques uploadés) : identifie précisément quels composants/wordings/URLs ont régressé, été corrigés, ou changé de nature d'un run à l'autre (`qa/report_diff.py`) — au-delà du score global déjà suivi, purement local (relit des rapports Excel déjà générés) — voir [Diff entre les 2 derniers rapports archivés](#diff-entre-les-2-derniers-rapports-archivés).
+- **Export de l'historique complet** (Excel/CSV) : pour analyse externe (Power BI, Excel) au-delà des graphiques Streamlit — voir [Export de l'historique complet](#export-de-lhistorique-complet).
 - **Alerte de régression** : à chaque archivage, le score du run est comparé au dernier score archivé pour la même séquence et le même mode (`qa/history.find_regression`) ; une baisse d'au moins `REGRESSION_ALERT_THRESHOLD` points déclenche un avertissement dans l'app et dans la notification Teams (voir ci-dessous).
 - **Lint du référentiel Excel** : le diagnostic à l'upload signale aussi les wordings vides, les anomalies d'espacement invisibles à l'œil (espace en début/fin, double espace, espace insécable) et les blocs conditionnels AEM mal formés (balises `<%`/`%>` non équilibrées) — voir `qa/diagnostics.find_empty_wordings`/`find_whitespace_anomalies`/`find_unbalanced_aem_blocks`.
 - **Notification Teams** (optionnelle, **non activée par défaut**) : si un webhook Teams est configuré (`QA_TEAMS_WEBHOOK_URL`), chaque run archivé envoie un résumé (scores par séquence, régressions éventuelles) sur le canal configuré — silencieusement désactivé si la variable n'est pas définie (cas par défaut). Voir [Notification Teams](#notification-teams-optionnelle-non-activée-par-défaut) pour la configurer.
@@ -374,10 +376,11 @@ Dès que les rapports Wording **et** URL sont disponibles pour une séquence, un
 
 Accessible via le bouton **📈 Historique** en haut à droite de l'outil (page Streamlit séparée, `pages/1_Historique.py`) :
 
-1. **Vue d'ensemble** en haut de page : un tableau récapitulatif de toutes les séquences archivées (Pays, Trigger, Séquence, date du dernier test, type, % OK, nombre de tests), avant même de naviguer par dossiers — utile pour repérer en un coup d'œil une séquence qui régresse sans avoir à la chercher dans l'arborescence.
-2. **Statistiques des erreurs** (voir [section dédiée](#statistiques-derreurs-et-alerte-de-régression) ci-dessous) : un panneau dépliable juste après la vue d'ensemble, agrégeant les types d'erreur les plus fréquents sur tout l'historique.
-3. Navigation par dossiers **Pays → Trigger → Séquence**.
-4. Dans le dossier final : les rapports disponibles groupés par type (Wording / URL / Combiné), un graphique d'évolution du **% de OK** depuis le premier test (une courbe par type), un panneau **"🔍 Comparer les 2 derniers rapports"** (voir [section dédiée](#diff-entre-les-2-derniers-rapports-archivés) ci-dessous), et un panneau **"⚙️ Gérer cette séquence"** :
+1. **Vue d'ensemble** en haut de page : un tableau récapitulatif de toutes les séquences archivées (Pays, Trigger, Séquence, date du dernier test, type, % OK, nombre de tests), avant même de naviguer par dossiers — utile pour repérer en un coup d'œil une séquence qui régresse sans avoir à la chercher dans l'arborescence. Deux boutons **⬇️ Excel (.xlsx)** / **⬇️ CSV** exportent tout l'historique classé (toutes séquences, tous les runs) — voir [Export de l'historique complet](#export-de-lhistorique-complet).
+2. **Comparer deux rapports Excel (upload manuel)** : compare 2 rapports quelconques uploadés (pas seulement les 2 derniers archivés d'une séquence) — voir [section dédiée](#diff-entre-les-2-derniers-rapports-archivés) ci-dessous.
+3. **Statistiques des erreurs** (voir [section dédiée](#statistiques-derreurs-et-alerte-de-régression) ci-dessous) : un panneau dépliable, agrégeant les types d'erreur les plus fréquents sur tout l'historique.
+4. Navigation par dossiers **Pays → Trigger → Séquence**.
+5. Dans le dossier final : les rapports disponibles groupés par type (Wording / URL / Combiné), un graphique d'évolution du **% de OK** depuis le premier test (une courbe par type), un panneau **"🔍 Comparer les 2 derniers rapports"** (voir [section dédiée](#diff-entre-les-2-derniers-rapports-archivés) ci-dessous), et un panneau **"⚙️ Gérer cette séquence"** :
    - **Renommer / fusionner** : corrige une mauvaise détection automatique (pays/trigger) ou fusionne deux séquences classées séparément par erreur — déplace les rapports Excel et réécrit l'historique vers le nouveau (Pays, Trigger, Séquence) en un clic.
    - **Supprimer** : retire définitivement la séquence (rapports Excel **et** historique des scores) — protégé par une case à cocher de confirmation, le bouton restant désactivé tant qu'elle n'est pas cochée.
 
@@ -396,6 +399,21 @@ Chaque ligne est identifiée par une clé stable entre les deux rapports (`Compo
 | ➖ Éléments disparus | clé présente seulement dans le rapport précédent |
 
 Les lignes strictement identiques d'un rapport à l'autre ne sont pas détaillées, seulement comptées ("X ligne(s) inchangée(s)"). Nécessite au moins 2 rapports archivés du même type pour cette séquence (sinon un message l'indique) — comme la rotation ne garde que les 2 plus récents par type (`KEEP_REPORTS`), le diff porte toujours sur "le dernier run vs celui juste avant", jamais plus loin dans le temps.
+
+### Comparer deux rapports Excel uploadés manuellement
+
+Le panneau **"📤 Comparer deux rapports Excel (upload manuel)"**, en haut de la page Historique (indépendant de la navigation Pays/Trigger/Séquence), applique le même moteur (`qa/report_diff.diff_uploaded_reports`) à **2 rapports quelconques uploadés** plutôt qu'aux 2 derniers archivés d'une séquence — utile pour comparer un rapport gardé de côté au-delà de la rétention automatique (`KEEP_REPORTS`), ou reçu d'un tiers (autre poste, autre session).
+
+- Choisir le type de rapport (**Wording** ou **URL**) — les deux fichiers doivent être du même type, le moteur ne le détecte pas automatiquement (comme partout ailleurs dans l'outil, la sélection reste explicite plutôt que déduite).
+- Uploader le rapport précédent puis le rapport actuel (`.xlsx`) : le résultat s'affiche avec la même mise en forme (résumé chiffré + tableau par catégorie) que le diff automatique ci-dessus.
+- Si l'un des deux fichiers n'a pas d'onglet `"Details"` lisible (ex. un rapport combiné, qui a des onglets `Wording`/`URL` séparés plutôt qu'un `Details` unique, ou un fichier qui n'est pas un rapport QA) : message d'erreur explicite plutôt qu'une exception brute.
+
+## Export de l'historique complet
+
+Le bouton **⬇️ Excel (.xlsx)** ou **⬇️ CSV** dans le panneau "Vue d'ensemble" de la page Historique exporte tout l'historique **classé** (toutes séquences, tous les runs archivés — voir `qa/history.export_history_excel`/`export_history_csv`), pour une analyse externe (Power BI, Excel) au-delà des graphiques Streamlit déjà disponibles dans l'app.
+
+- Colonnes : `timestamp`, `country`, `trigger`, `sequence`, `mode`, `total`, `ok`, `ko`, `score`, `error_types` (le détail par type d'erreur d'un run, voir [Statistiques d'erreurs](#statistiques-derreurs-et-alerte-de-régression), sérialisé en JSON dans une seule colonne — le jeu de types d'erreur varie d'une ligne à l'autre, l'aplatir produirait une colonne différente par type rencontré sur tout l'historique).
+- L'export CSV est encodé en **UTF-8 avec BOM** (`utf-8-sig`) : sans ce détail, un CSV contenant des caractères accentués s'ouvre avec des caractères corrompus (ex. `Ã©` au lieu de `é`) dans une ouverture directe par Excel — piège courant d'un export CSV en français. L'export Excel n'a par nature aucun problème d'encodage.
 
 ## Statistiques d'erreurs et alerte de régression
 

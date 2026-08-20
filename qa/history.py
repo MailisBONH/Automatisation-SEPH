@@ -3,11 +3,14 @@ Historique local des scores de QA, pour visualiser l'evolution d'une
 sequence/campagne d'un run a l'autre. Stocke en JSON Lines (un run par
 ligne) dans output/history.jsonl - non versionne, comme le reste de output/.
 """
+import io
 import json
 import os
 import threading
 from collections import defaultdict
 from datetime import datetime, timedelta
+
+import pandas as pd
 
 from qa.config import HISTORY_RETENTION_DAYS, OUTPUT_DIR, REGRESSION_ALERT_THRESHOLD
 
@@ -167,6 +170,62 @@ def error_type_monthly_trend(entries: list) -> list:
         for error_type, count in buckets[period].items():
             rows.append({"period": period, "error_type": error_type, "count": count})
     return rows
+
+
+_EXPORT_COLUMNS = ["timestamp", "country", "trigger", "sequence", "mode", "total", "ok", "ko", "score", "error_types"]
+
+
+def _history_export_dataframe(entries: list):
+    """
+    Prepare une DataFrame exportable (voir export_history_csv/
+    export_history_excel) a partir d'entrees d'historique classees (voir
+    load_classified_history). error_types (dict, voir record_run) est
+    serialise en JSON dans sa propre colonne plutot qu'aplati en colonnes
+    dynamiques - le jeu de types d'erreur varie d'une ligne a l'autre, un
+    aplatissement produirait une colonne differente par type d'erreur
+    rencontre sur l'ensemble de l'historique.
+    """
+    rows = [
+        {
+            "timestamp": e.get("timestamp", ""),
+            "country": e.get("country", ""),
+            "trigger": e.get("trigger", ""),
+            "sequence": e.get("sequence", ""),
+            "mode": e.get("mode", ""),
+            "total": e.get("total", ""),
+            "ok": e.get("ok", ""),
+            "ko": e.get("ko", ""),
+            "score": e.get("score", ""),
+            "error_types": json.dumps(e.get("error_types") or {}, ensure_ascii=False),
+        }
+        for e in entries
+    ]
+    return pd.DataFrame(rows, columns=_EXPORT_COLUMNS)
+
+
+def export_history_csv(entries: list) -> bytes:
+    """
+    Exporte une liste d'entrees d'historique (voir load_classified_history)
+    en CSV, pour analyse externe (Excel, Power BI...) au-dela des
+    graphiques de la page Historique. Encodage utf-8-sig (avec BOM) : sans
+    lui, Excel (notamment en configuration française) interprete le
+    fichier avec le mauvais jeu de caracteres a l'ouverture directe et
+    affiche les accents corrompus (ex. "Ã©" au lieu de "é") - piege courant
+    d'un export CSV en français.
+    """
+    return _history_export_dataframe(entries).to_csv(index=False).encode("utf-8-sig")
+
+
+def export_history_excel(entries: list) -> bytes:
+    """
+    Classeur Excel (.xlsx) equivalent a export_history_csv - pas de piege
+    d'encodage/delimiteur puisque le format est natif, et coherent avec le
+    reste de l'outil qui produit toujours des rapports .xlsx.
+    """
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        _history_export_dataframe(entries).to_excel(writer, index=False, sheet_name="Historique")
+    return buffer.getvalue()
 
 
 def find_regression(country: str, trigger: str, sequence: str, mode: str, current_score: float,

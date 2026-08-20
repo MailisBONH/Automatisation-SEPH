@@ -1,11 +1,16 @@
+import io
 import json
 from datetime import datetime
+
+import pandas as pd
 
 from qa.history import (
     aggregate_error_types,
     build_history_tree,
     delete_classification,
     error_type_monthly_trend,
+    export_history_csv,
+    export_history_excel,
     find_regression,
     load_classified_history,
     load_history,
@@ -430,3 +435,55 @@ class TestPruneHistory:
         # (2016-01-01), les deux plus vieilles sont supprimees.
         assert len(remaining) == 2
         assert remaining[0]["timestamp"] == "2016-01-01 00:00:00"
+
+
+class TestExportHistory:
+    def _entries(self):
+        return [
+            {
+                "timestamp": "2026-01-05 10:00:00", "country": "Germany", "trigger": "Revamp Inac",
+                "sequence": "SEQ 1", "mode": "wording", "total": 10, "ok": 8, "ko": 2, "score": 80.0,
+                "error_types": {"Minor typo": 1, "Content mismatch": 1},
+            },
+            {
+                "timestamp": "2026-02-01 10:00:00", "country": "France", "trigger": "Revamp Inac",
+                "sequence": "SEQ 2", "mode": "url", "total": 5, "ok": 5, "ko": 0, "score": 100.0,
+            },
+        ]
+
+    def test_csv_export_round_trips_the_core_columns(self):
+        csv_bytes = export_history_csv(self._entries())
+
+        df = pd.read_csv(io.BytesIO(csv_bytes), encoding="utf-8-sig")
+
+        assert list(df["country"]) == ["Germany", "France"]
+        assert list(df["sequence"]) == ["SEQ 1", "SEQ 2"]
+        assert list(df["score"]) == [80.0, 100.0]
+
+    def test_csv_export_uses_a_bom_for_excel_compatibility(self):
+        csv_bytes = export_history_csv(self._entries())
+        assert csv_bytes.startswith(b"\xef\xbb\xbf")
+
+    def test_csv_export_serializes_error_types_as_json(self):
+        csv_bytes = export_history_csv(self._entries())
+        df = pd.read_csv(io.BytesIO(csv_bytes), encoding="utf-8-sig")
+
+        assert json.loads(df["error_types"].iloc[0]) == {"Minor typo": 1, "Content mismatch": 1}
+        # Entree sans error_types du tout -> objet JSON vide, pas une valeur manquante.
+        assert json.loads(df["error_types"].iloc[1]) == {}
+
+    def test_excel_export_is_readable_and_matches_the_csv_content(self):
+        excel_bytes = export_history_excel(self._entries())
+
+        df = pd.read_excel(io.BytesIO(excel_bytes), sheet_name="Historique", engine="openpyxl")
+
+        assert list(df["country"]) == ["Germany", "France"]
+        assert list(df["score"]) == [80.0, 100.0]
+
+    def test_empty_history_still_produces_a_valid_header_only_export(self):
+        csv_bytes = export_history_csv([])
+        df = pd.read_csv(io.BytesIO(csv_bytes), encoding="utf-8-sig")
+        assert list(df.columns) == [
+            "timestamp", "country", "trigger", "sequence", "mode", "total", "ok", "ko", "score", "error_types",
+        ]
+        assert len(df) == 0
