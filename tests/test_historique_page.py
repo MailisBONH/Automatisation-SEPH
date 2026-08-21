@@ -142,11 +142,13 @@ class TestPopulatedHistory:
         at.button(key="nav_sequence_SEQ 1").click().run()
 
         # Formulaire "Renommer / fusionner" : 3 champs texte (Pays, Trigger,
-        # Séquence, dans cet ordre d'apparition) pré-remplis avec les valeurs
-        # actuelles - on ne change que le pays.
-        at.text_input[0].set_value("Germany")
-        at.text_input[1].set_value("revamp_inac")
-        at.text_input[2].set_value("SEQ 1")
+        # Séquence) pré-remplis avec les valeurs actuelles - on ne change que
+        # le pays. Cibles par clé (pas par position) : la page a par ailleurs
+        # un champ de recherche (barre "Vue d'ensemble") qui n'a pas de
+        # relation d'ordre garantie avec ce formulaire.
+        at.text_input(key="rename_country").set_value("Germany")
+        at.text_input(key="rename_trigger").set_value("revamp_inac")
+        at.text_input(key="rename_sequence").set_value("SEQ 1")
         # Le bouton "Supprimer" (index suivant) est desactive tant que la
         # case de confirmation n'est pas cochee, mais AppTest ne fait pas
         # respecter cet etat cote client - on cible explicitement le bouton
@@ -238,7 +240,7 @@ class TestRenameFormValidation:
 
         at = _run_page()
         submit_button = self._navigate_to_sequence(at)
-        at.text_input[2].set_value("")  # Séquence vidée
+        at.text_input(key="rename_sequence").set_value("")  # Séquence vidée
         submit_button.click().run()
 
         assert not at.exception

@@ -19,6 +19,7 @@ from qa.diagnostics import (
     find_wrong_language_wordings,
 )
 from qa.engine import QA_RUN_READ_ERRORS, run_qa, run_qa_for_sequence
+from qa.example_workbook import build_example_workbook_bytes
 from qa.excel_loader import (
     EXCEL_READ_ERRORS,
     _open_excel_file,
@@ -219,7 +220,7 @@ def _render_summary_and_charts(df):
     ) if total else 0
 
     st.metric(
-        "QA Success Rate",
+        "Taux de réussite QA",
         f"{success_rate}%"
     )
 
@@ -286,6 +287,17 @@ def _render_table(results, mode, key_suffix):
     metriques ni bouton de telechargement (voir render_results_block /
     render_grouped_results pour la vue complete)."""
     _, df_display = _prepare_display_df(results, mode)
+
+    show_only_errors = st.checkbox(
+        "🔎 Afficher uniquement les erreurs (KO)",
+        key=f"filter_ko_{key_suffix}"
+    )
+    if show_only_errors:
+        df_display = df_display[df_display["Status"] == "KO"]
+
+    if df_display.empty:
+        st.caption("Aucune erreur — tous les éléments sont OK. 🎉" if show_only_errors else "Aucun résultat.")
+        return
 
     html_renderer = JsCode("""
     class HtmlCellRenderer {
@@ -654,6 +666,33 @@ def ensure_archived(last_run):
 
 NO_SELECTION = "— Sélectionnez —"
 
+
+def _guess_sequence_choice(filename, options):
+    """Suggestion (jamais une pre-selection silencieuse, voir NO_SELECTION)
+    de la sequence la plus probable pour un fichier HTML uploade en mode
+    batch, a partir de la ressemblance entre son nom de fichier et le nom de
+    sequence - affichee en caption sous le menu deroulant tant qu'aucun
+    choix n'a ete fait, pour accelerer l'association sans jamais decider a
+    la place de l'utilisateur (une suggestion peut se tromper, une
+    pre-selection silencieuse ferait lancer la comparaison sur la mauvaise
+    campagne sans que personne ne s'en aperçoive)."""
+    base = re.sub(r"[^a-z0-9]", "", os.path.splitext(filename)[0].lower())
+    if not base:
+        return None
+
+    best_option, best_score = None, 0.0
+    for option in options:
+        normalized_option = re.sub(r"[^a-z0-9]", "", option.lower())
+        if not normalized_option:
+            continue
+        score = difflib.SequenceMatcher(None, base, normalized_option).ratio()
+        if normalized_option in base or base in normalized_option:
+            score = max(score, 0.9)
+        if score > best_score:
+            best_option, best_score = option, score
+
+    return best_option if best_score >= 0.6 else None
+
 st.set_page_config(page_title="QA Email Tool", layout="wide")
 
 header_col1, header_col2 = st.columns([5, 1])
@@ -672,6 +711,30 @@ session_id = st.session_state["session_id"]
 # reellement le dossier qu'une fois par heure au plus, voir qa.cleanup).
 cleanup_old_temp_files_throttled()
 
+with st.expander("❓ Comment utiliser cet outil ?"):
+    st.markdown(
+        "1. Choisissez le **type de test** (Wording, URL, ou les deux).\n"
+        "2. Glissez-déposez le **fichier HTML** de l'email et le **fichier Excel** référentiel.\n"
+        "3. Une fois l'Excel chargé, sélectionnez la **campagne/séquence** à tester dans le "
+        "menu déroulant qui apparaît.\n"
+        "4. Cliquez sur **🔍 Comparer**.\n"
+        "5. Le résultat affiche un taux de réussite, le détail ligne par ligne (vert = OK, "
+        "rouge = KO), et un bouton pour télécharger le rapport Excel complet.\n\n"
+        "Chaque comparaison est automatiquement archivée dans la page **📈 Historique** "
+        "(en haut à droite), qui garde une trace de l'évolution du score dans le temps."
+    )
+    st.caption(
+        "Vous ne savez pas à quoi doit ressembler le fichier Excel référentiel ? "
+        "Téléchargez un exemple minimal pour voir la structure attendue (onglet par "
+        "séquence pour le wording, onglet contenant \"UTM\" pour les URL trackées)."
+    )
+    st.download_button(
+        "📥 Télécharger un exemple de fichier Excel",
+        data=build_example_workbook_bytes(),
+        file_name="exemple_referentiel_qa.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
 # =========================
 # MODE (Wording / URL)
 # =========================
@@ -679,21 +742,35 @@ mode = st.radio(
     "Type de test",
     ["Wording", "URL", "Wording + URL"],
     index=0,  # par défaut wording
-    horizontal=True
+    horizontal=True,
+    help=(
+        "**Wording** : compare les textes de l'email au référentiel Excel.\n\n"
+        "**URL** : vérifie que les liens de l'email pointent vers les bonnes URL trackées.\n\n"
+        "**Wording + URL** : lance les deux vérifications en même temps sur le même email."
+    )
 )
 
 test_wording = mode in ("Wording", "Wording + URL")
 test_url = mode in ("URL", "Wording + URL")
 
 batch_mode = st.checkbox(
-    "📦 Traiter plusieurs séquences en une fois (même Excel, plusieurs HTML)"
+    "📦 Traiter plusieurs séquences en une fois (même Excel, plusieurs HTML)",
+    help=(
+        "À cocher si vous avez plusieurs emails HTML à tester d'un coup pour la même "
+        "campagne (un seul fichier Excel, un HTML par séquence)."
+    )
 )
 
 include_generic = False
 if test_wording:
     include_generic = st.checkbox(
         "🧩 Les composants génériques (footer, mentions légales, fidélité...) "
-        "sont dans un onglet séparé de l'Excel"
+        "sont dans un onglet séparé de l'Excel",
+        help=(
+            "À cocher si le référentiel Excel de cette campagne ne répète pas, dans chaque "
+            "séquence, les composants communs à toutes les séquences (footer, mentions "
+            "légales...) : ils seront ajoutés automatiquement depuis leur onglet dédié."
+        )
     )
     if include_generic:
         st.caption(
@@ -709,7 +786,8 @@ col4, col5 = st.columns(2)
 with col4:
     excel_file = st.file_uploader(
         "📊 Drag & drop Excel",
-        type=["xlsx"]
+        type=["xlsx"],
+        help="Le classeur référentiel validé par les équipes marketing (format .xlsx)."
     )
 
 with col5:
@@ -717,13 +795,15 @@ with col5:
         html_files = st.file_uploader(
             "📄 Drag & drop plusieurs fichiers HTML (un par séquence)",
             type=["html"],
-            accept_multiple_files=True
+            accept_multiple_files=True,
+            help="Un fichier HTML par séquence à tester (export \"view-source\" AEM ou HTML brut)."
         )
         html_file = None
     else:
         html_file = st.file_uploader(
             "📄 Drag & drop HTML",
-            type=["html"]
+            type=["html"],
+            help="L'export HTML de l'email à vérifier (export \"view-source\" AEM ou HTML brut)."
         )
         html_files = None
 
@@ -794,6 +874,10 @@ if batch_mode and mode == "Wording + URL":
                         format_func=lambda x: wording_sheet_labels.get(x, x),
                         key=f"wseq_{f.name}"
                     )
+                    if w_choice == NO_SELECTION:
+                        w_guess = _guess_sequence_choice(f.name, wording_sheet_names)
+                        if w_guess:
+                            st.caption(f"💡 Suggestion d'après le nom du fichier : {wording_sheet_labels.get(w_guess, w_guess)}")
                 with col_b:
                     if url_sequence_names:
                         u_choice = st.selectbox(
@@ -802,6 +886,10 @@ if batch_mode and mode == "Wording + URL":
                             format_func=lambda x: url_sequence_labels.get(x, x),
                             key=f"useq_{f.name}"
                         )
+                        if u_choice == NO_SELECTION:
+                            u_guess = _guess_sequence_choice(f.name, url_sequence_names)
+                            if u_guess:
+                                st.caption(f"💡 Suggestion d'après le nom du fichier : {url_sequence_labels.get(u_guess, u_guess)}")
                     else:
                         u_choice = w_choice  # onglet UTM a sequence unique : reutilise la sequence wording
 
@@ -846,7 +934,11 @@ elif batch_mode:
                     format_func=lambda x: sequence_labels.get(x, x),
                     key=f"seq_choice_{f.name}"
                 )
-                if choice != NO_SELECTION:
+                if choice == NO_SELECTION:
+                    guess = _guess_sequence_choice(f.name, sequence_options)
+                    if guess:
+                        st.caption(f"💡 Suggestion d'après le nom du fichier : {sequence_labels.get(guess, guess)}")
+                else:
                     sequence_assignments.append((f, choice))
 
             unassigned = len(html_files) - len(sequence_assignments)
@@ -874,7 +966,8 @@ else:
             wording_keyword = st.selectbox(
                 "Onglet Excel (campagne)",
                 [NO_SELECTION] + sheet_names,
-                format_func=lambda x: sheet_labels.get(x, x)
+                format_func=lambda x: sheet_labels.get(x, x),
+                help="L'onglet du classeur Excel qui contient le wording de la séquence à tester."
             )
             if wording_keyword == NO_SELECTION:
                 wording_keyword = ""
@@ -901,7 +994,8 @@ else:
             url_keyword = st.selectbox(
                 "Séquence (onglet UTM)",
                 [NO_SELECTION] + sequence_options,
-                format_func=lambda x: sequence_labels.get(x, x)
+                format_func=lambda x: sequence_labels.get(x, x),
+                help="La section de l'onglet UTM correspondant à la séquence à tester."
             )
             if url_keyword == NO_SELECTION:
                 url_keyword = ""
@@ -1073,36 +1167,35 @@ if st.button(button_label):
             )
             st.stop()
 
-        st.info("Analyse en cours... 🔄")
-
         wording_results_by_sequence = {}
         url_results_by_sequence = {}
         debug_buf = io.StringIO()
 
-        with contextlib.redirect_stdout(debug_buf):
-            for f, w_seq, u_seq in combined_sequence_assignments:
+        with st.spinner("Analyse en cours..."):
+            with contextlib.redirect_stdout(debug_buf):
+                for f, w_seq, u_seq in combined_sequence_assignments:
 
-                batch_html_path = _write_batch_html(f, session_id)
+                    batch_html_path = _write_batch_html(f, session_id)
 
-                print(f"\n{'=' * 20} {w_seq} / {u_seq} ({f.name}) {'=' * 20}")
+                    print(f"\n{'=' * 20} {w_seq} / {u_seq} ({f.name}) {'=' * 20}")
 
-                w_results = _run_batch_qa(
-                    batch_html_path, excel_path, w_seq, "wording", include_generic,
-                    label=f"Wording {w_seq} ({f.name})"
-                )
-                if w_results is not None:
-                    wording_results_by_sequence[w_seq] = w_results
+                    w_results = _run_batch_qa(
+                        batch_html_path, excel_path, w_seq, "wording", include_generic,
+                        label=f"Wording {w_seq} ({f.name})"
+                    )
+                    if w_results is not None:
+                        wording_results_by_sequence[w_seq] = w_results
 
-                # include_generic ne s'applique qu'au wording (case a cocher
-                # non affichee du tout en mode url, voir plus haut) - jamais
-                # la valeur (potentiellement True) choisie pour la moitie
-                # wording de ce meme run combine.
-                u_results = _run_batch_qa(
-                    batch_html_path, excel_path, u_seq, "url", False,
-                    label=f"URL {u_seq} ({f.name})"
-                )
-                if u_results is not None:
-                    url_results_by_sequence[u_seq] = u_results
+                    # include_generic ne s'applique qu'au wording (case a cocher
+                    # non affichee du tout en mode url, voir plus haut) - jamais
+                    # la valeur (potentiellement True) choisie pour la moitie
+                    # wording de ce meme run combine.
+                    u_results = _run_batch_qa(
+                        batch_html_path, excel_path, u_seq, "url", False,
+                        label=f"URL {u_seq} ({f.name})"
+                    )
+                    if u_results is not None:
+                        url_results_by_sequence[u_seq] = u_results
 
         if wording_results_by_sequence or url_results_by_sequence:
 
@@ -1170,24 +1263,23 @@ if st.button(button_label):
             )
             st.stop()
 
-        st.info("Analyse en cours... 🔄")
-
         results_by_sequence = {}
         debug_buf = io.StringIO()
 
-        with contextlib.redirect_stdout(debug_buf):
-            for f, seq_name in sequence_assignments:
+        with st.spinner("Analyse en cours..."):
+            with contextlib.redirect_stdout(debug_buf):
+                for f, seq_name in sequence_assignments:
 
-                batch_html_path = _write_batch_html(f, session_id)
+                    batch_html_path = _write_batch_html(f, session_id)
 
-                print(f"\n{'=' * 20} {seq_name} ({f.name}) {'=' * 20}")
+                    print(f"\n{'=' * 20} {seq_name} ({f.name}) {'=' * 20}")
 
-                seq_results = _run_batch_qa(
-                    batch_html_path, excel_path, seq_name, qa_mode, include_generic,
-                    label=f"{seq_name} ({f.name})"
-                )
-                if seq_results is not None:
-                    results_by_sequence[seq_name] = seq_results
+                    seq_results = _run_batch_qa(
+                        batch_html_path, excel_path, seq_name, qa_mode, include_generic,
+                        label=f"{seq_name} ({f.name})"
+                    )
+                    if seq_results is not None:
+                        results_by_sequence[seq_name] = seq_results
 
         if results_by_sequence:
 
@@ -1232,93 +1324,97 @@ if st.button(button_label):
             st.error("Merci de sélectionner une campagne/séquence dans la liste déroulante.")
             st.stop()
 
-        st.info("Analyse en cours... 🔄")
+        with st.spinner("Analyse en cours..."):
+            # appel backend
+            try:
+                if test_wording and test_url:
+                    # Wording + URL : les deux pipelines tournent sur le meme
+                    # HTML/Excel (un seul email peut etre teste sur les deux
+                    # aspects a la fois), avec chacun son propre onglet/sequence.
+                    (wording_results, wording_report_path, wording_sheet_name), wording_logs = run_with_debug_capture(
+                        run_qa,
+                        html_file=html_path,
+                        excel_file=excel_path,
+                        keyword=wording_keyword,
+                        mode="wording",
+                        include_generic=include_generic
+                    )
+                    (url_results, url_report_path, url_sheet_name), url_logs = run_with_debug_capture(
+                        run_qa,
+                        html_file=html_path,
+                        excel_file=excel_path,
+                        keyword=url_keyword,
+                        mode="url"
+                    )
 
-        # appel backend
-        try:
-            if test_wording and test_url:
-                # Wording + URL : les deux pipelines tournent sur le meme
-                # HTML/Excel (un seul email peut etre teste sur les deux
-                # aspects a la fois), avec chacun son propre onglet/sequence.
-                (wording_results, wording_report_path, wording_sheet_name), wording_logs = run_with_debug_capture(
-                    run_qa,
-                    html_file=html_path,
-                    excel_file=excel_path,
-                    keyword=wording_keyword,
-                    mode="wording",
-                    include_generic=include_generic
+                    today = datetime.now().strftime("%Y-%m-%d")
+                    safe_wording_name = re.sub(r"[^\w\-]", "_", wording_sheet_name)
+                    safe_url_name = re.sub(r"[^\w\-]", "_", url_sheet_name)
+
+                    st.session_state["last_run"] = {
+                        "kind": "combined_test",
+                        "excel_path": excel_path,
+                        "title": "Comparaison terminée (Wording + URL)",
+                        "wording_results": wording_results,
+                        "wording_report_path": wording_report_path,
+                        "wording_sequence": wording_keyword,
+                        "wording_download_filename": f"qa_report_wording_{safe_wording_name}_{today}.xlsx",
+                        "url_results": url_results,
+                        "url_report_path": url_report_path,
+                        # onglet UTM plat (pas de decoupage en sequences, voir
+                        # url_ready) : url_keyword est vide, on reutilise la
+                        # sequence wording (meme sequence testee des deux cotes).
+                        "url_sequence": url_keyword or wording_keyword,
+                        "url_download_filename": f"qa_report_url_{safe_url_name}_{today}.xlsx",
+                        "debug_logs": f"--- Wording ---\n{wording_logs}\n\n--- URL ---\n{url_logs}",
+                    }
+
+                else:
+                    qa_mode = "wording" if test_wording else "url"
+                    keyword = wording_keyword if test_wording else url_keyword
+
+                    (results, report_path, sheet_name), debug_logs = run_with_debug_capture(
+                        run_qa,
+                        html_file=html_path,
+                        excel_file=excel_path,
+                        keyword=keyword,
+                        mode=qa_mode,
+                        include_generic=include_generic
+                    )
+
+                    today = datetime.now().strftime("%Y-%m-%d")
+
+                    safe_sheet_name = re.sub(r"[^\w\-]", "_", sheet_name)
+
+                    st.session_state["last_run"] = {
+                        "kind": "single",
+                        "mode": qa_mode,
+                        "excel_path": excel_path,
+                        "title": "Comparaison terminée",
+                        "download_filename": f"qa_report_{safe_sheet_name}_{today}.xlsx",
+                        "report_path": report_path,
+                        "results": results,
+                        "sheet_name": sheet_name,
+                        # keyword == la sequence choisie par l'utilisateur (onglet UTM
+                        # en mode url, ou onglet Excel en mode wording - dans ce cas
+                        # identique a sheet_name). En mode url, sheet_name est le nom
+                        # de l'onglet UTM (souvent unique, partage par toutes les
+                        # sequences) : ce n'est PAS la sequence, il ne faut pas s'en
+                        # servir pour le classement par sequence dans l'historique -
+                        # sauf si keyword est vide (onglet UTM plat, voir url_ready),
+                        # auquel cas c'est le seul nom disponible.
+                        "sequence": keyword or sheet_name,
+                        "debug_logs": debug_logs,
+                    }
+
+            except QA_RUN_READ_ERRORS as e:
+                st.session_state.pop("last_run", None)
+                st.error(
+                    "❌ Impossible d'analyser ces fichiers. Vérifiez qu'il s'agit bien d'un "
+                    "export HTML valide (\"view-source\" AEM ou HTML brut) et d'un classeur "
+                    "Excel non corrompu, puis réessayez."
                 )
-                (url_results, url_report_path, url_sheet_name), url_logs = run_with_debug_capture(
-                    run_qa,
-                    html_file=html_path,
-                    excel_file=excel_path,
-                    keyword=url_keyword,
-                    mode="url"
-                )
-
-                today = datetime.now().strftime("%Y-%m-%d")
-                safe_wording_name = re.sub(r"[^\w\-]", "_", wording_sheet_name)
-                safe_url_name = re.sub(r"[^\w\-]", "_", url_sheet_name)
-
-                st.session_state["last_run"] = {
-                    "kind": "combined_test",
-                    "excel_path": excel_path,
-                    "title": "Comparaison terminée (Wording + URL)",
-                    "wording_results": wording_results,
-                    "wording_report_path": wording_report_path,
-                    "wording_sequence": wording_keyword,
-                    "wording_download_filename": f"qa_report_wording_{safe_wording_name}_{today}.xlsx",
-                    "url_results": url_results,
-                    "url_report_path": url_report_path,
-                    # onglet UTM plat (pas de decoupage en sequences, voir
-                    # url_ready) : url_keyword est vide, on reutilise la
-                    # sequence wording (meme sequence testee des deux cotes).
-                    "url_sequence": url_keyword or wording_keyword,
-                    "url_download_filename": f"qa_report_url_{safe_url_name}_{today}.xlsx",
-                    "debug_logs": f"--- Wording ---\n{wording_logs}\n\n--- URL ---\n{url_logs}",
-                }
-
-            else:
-                qa_mode = "wording" if test_wording else "url"
-                keyword = wording_keyword if test_wording else url_keyword
-
-                (results, report_path, sheet_name), debug_logs = run_with_debug_capture(
-                    run_qa,
-                    html_file=html_path,
-                    excel_file=excel_path,
-                    keyword=keyword,
-                    mode=qa_mode,
-                    include_generic=include_generic
-                )
-
-                today = datetime.now().strftime("%Y-%m-%d")
-
-                safe_sheet_name = re.sub(r"[^\w\-]", "_", sheet_name)
-
-                st.session_state["last_run"] = {
-                    "kind": "single",
-                    "mode": qa_mode,
-                    "excel_path": excel_path,
-                    "title": "Comparaison terminée",
-                    "download_filename": f"qa_report_{safe_sheet_name}_{today}.xlsx",
-                    "report_path": report_path,
-                    "results": results,
-                    "sheet_name": sheet_name,
-                    # keyword == la sequence choisie par l'utilisateur (onglet UTM
-                    # en mode url, ou onglet Excel en mode wording - dans ce cas
-                    # identique a sheet_name). En mode url, sheet_name est le nom
-                    # de l'onglet UTM (souvent unique, partage par toutes les
-                    # sequences) : ce n'est PAS la sequence, il ne faut pas s'en
-                    # servir pour le classement par sequence dans l'historique -
-                    # sauf si keyword est vide (onglet UTM plat, voir url_ready),
-                    # auquel cas c'est le seul nom disponible.
-                    "sequence": keyword or sheet_name,
-                    "debug_logs": debug_logs,
-                }
-
-        except QA_RUN_READ_ERRORS as e:
-            st.session_state.pop("last_run", None)
-            st.error(str(e))
+                st.caption(f"Détail technique : {e}")
 
     else:
         st.session_state.pop("last_run", None)
@@ -1357,23 +1453,23 @@ if last_run:
 
         st.metric("Score combiné (Wording + URL)", f"{combined_score}%")
 
-        render_results_block(
-            last_run["wording_results"],
-            last_run["wording_report_path"],
-            "📝 Résultats Wording",
-            last_run["wording_download_filename"],
-            mode="wording"
-        )
-
-        st.divider()
-
-        render_results_block(
-            last_run["url_results"],
-            last_run["url_report_path"],
-            "🔗 Résultats URL",
-            last_run["url_download_filename"],
-            mode="url"
-        )
+        tab_wording, tab_url = st.tabs(["📝 Résultats Wording", "🔗 Résultats URL"])
+        with tab_wording:
+            render_results_block(
+                last_run["wording_results"],
+                last_run["wording_report_path"],
+                "📝 Résultats Wording",
+                last_run["wording_download_filename"],
+                mode="wording"
+            )
+        with tab_url:
+            render_results_block(
+                last_run["url_results"],
+                last_run["url_report_path"],
+                "🔗 Résultats URL",
+                last_run["url_download_filename"],
+                mode="url"
+            )
 
     elif last_run["kind"] == "combined_batch":
         st.subheader("Récapitulatif par séquence")
@@ -1386,7 +1482,25 @@ if last_run:
             pair["url_sequence"]: pair["url_rows"] for pair in last_run["pairs"] if pair["url_rows"]
         }
 
-        if last_run["wording_report_path"]:
+        if last_run["wording_report_path"] and last_run["url_report_path"]:
+            tab_wording, tab_url = st.tabs(["📝 Résultats Wording", "🔗 Résultats URL"])
+            with tab_wording:
+                render_grouped_results(
+                    wording_by_sequence,
+                    "wording",
+                    last_run["wording_report_path"],
+                    last_run["wording_download_filename"],
+                    "📝 Résultats Wording (toutes séquences)"
+                )
+            with tab_url:
+                render_grouped_results(
+                    url_by_sequence,
+                    "url",
+                    last_run["url_report_path"],
+                    last_run["url_download_filename"],
+                    "🔗 Résultats URL (toutes séquences)"
+                )
+        elif last_run["wording_report_path"]:
             render_grouped_results(
                 wording_by_sequence,
                 "wording",
@@ -1394,11 +1508,7 @@ if last_run:
                 last_run["wording_download_filename"],
                 "📝 Résultats Wording (toutes séquences)"
             )
-
-        if last_run["wording_report_path"] and last_run["url_report_path"]:
-            st.divider()
-
-        if last_run["url_report_path"]:
+        elif last_run["url_report_path"]:
             render_grouped_results(
                 url_by_sequence,
                 "url",

@@ -219,7 +219,31 @@ def render_manual_report_diff():
 
 with st.expander("📊 Vue d'ensemble (toutes les séquences)", expanded=nav["sequence"] is None):
     overview_df = pd.DataFrame(_overview_rows(tree)).sort_values("Dernier test", ascending=False)
-    st.dataframe(overview_df, use_container_width=True, hide_index=True)
+
+    search = st.text_input(
+        "🔍 Rechercher une séquence (pays, trigger ou nom de séquence)",
+        key="history_search",
+        placeholder="Ex : Germany, revamp_inac, SEQ 1..."
+    )
+
+    filtered_df = overview_df
+    if search:
+        mask = (
+            overview_df["Pays"].str.contains(search, case=False, na=False)
+            | overview_df["Trigger"].str.contains(search, case=False, na=False)
+            | overview_df["Séquence"].str.contains(search, case=False, na=False)
+        )
+        filtered_df = overview_df[mask]
+
+    st.dataframe(filtered_df, use_container_width=True, hide_index=True)
+
+    if search and filtered_df.empty:
+        st.caption("Aucune séquence ne correspond à cette recherche.")
+    elif search and len(filtered_df) == 1:
+        match = filtered_df.iloc[0]
+        if st.button(f"➡️ Aller à {match['Pays']} / {match['Trigger']} / {match['Séquence']}"):
+            nav["country"], nav["trigger"], nav["sequence"] = match["Pays"], match["Trigger"], match["Séquence"]
+            st.rerun()
 
     st.caption("Exporter tout l'historique classé (toutes séquences, tous les runs) pour analyse externe :")
     export_cols = st.columns(2)
@@ -419,11 +443,11 @@ else:
         with st.form(f"rename_form_{country}_{trigger}_{sequence}"):
             col1, col2, col3 = st.columns(3)
             with col1:
-                new_country = st.text_input("Pays", value=country)
+                new_country = st.text_input("Pays", value=country, key="rename_country")
             with col2:
-                new_trigger = st.text_input("Trigger", value=trigger)
+                new_trigger = st.text_input("Trigger", value=trigger, key="rename_trigger")
             with col3:
-                new_sequence = st.text_input("Séquence", value=sequence)
+                new_sequence = st.text_input("Séquence", value=sequence, key="rename_sequence")
 
             renamed = st.form_submit_button("💾 Renommer / fusionner")
 
