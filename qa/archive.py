@@ -44,12 +44,27 @@ def sequence_dir(country: str, trigger: str, sequence: str) -> str:
 def list_reports(country: str, trigger: str, sequence: str, mode: str = None) -> list:
     """Rapports existants pour cette sequence, du plus recent au plus ancien.
     mode (wording/url/combined) restreint aux rapports de ce type ; None
-    retourne tous les rapports du dossier quel que soit leur type."""
+    retourne tous les rapports du dossier quel que soit leur type.
+
+    Trie sur le nom de fichier (qui embarque le timestamp d'archivage,
+    "QA_<mode>_<sequence>_YYYYMMDD_HHMMSS.xlsx", voir archive_report),
+    jamais sur le mtime disque : archive_report copie le rapport avec
+    shutil.copy2, qui preserve le mtime du FICHIER SOURCE plutot que de
+    dater la copie a l'instant de l'archivage - deux rapports sources
+    generes a quelques millisecondes d'intervalle (cas courant en test,
+    possible aussi en usage reel avec des rapports pre-generes) peuvent
+    alors se retrouver avec un mtime identique ou inverse une fois copies,
+    et l'ordre que renverrait glob.glob sur une egalite de mtime n'est de
+    toute facon pas garanti par l'OS. Pour un (mode, sequence) fixe - le cas
+    de chaque appel ici, le mode et la sequence etant constants sur tous les
+    fichiers renvoyes par le glob - le nom de fichier trie alphabetiquement
+    equivaut a un tri chronologique correct, insensible a la resolution/au
+    comportement de copie du mtime."""
     dest_dir = sequence_dir(country, trigger, sequence)
     pattern = f"QA_{mode}_*.xlsx" if mode else "*.xlsx"
     return sorted(
         glob.glob(os.path.join(dest_dir, pattern)),
-        key=os.path.getmtime,
+        key=os.path.basename,
         reverse=True
     )
 
