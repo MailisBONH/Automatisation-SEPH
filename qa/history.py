@@ -1,11 +1,23 @@
 """
 Historique local des scores de QA, pour visualiser l'evolution d'une
-sequence/campagne d'un run a l'autre. Stocke en JSON Lines (un run par
-ligne) dans output/history.jsonl - non versionne, comme le reste de output/.
+sequence/campagne d'un run a l'autre. Stocke dans une base SQLite (stdlib
+sqlite3, pas de serveur a gerer) a output/history.db - non versionne, comme
+le reste de output/.
+
+Avant cette migration, l'historique etait stocke en JSON Lines
+(output/history.jsonl) : chaque renommage/fusion/suppression de sequence
+devait alors relire et reecrire le fichier entier (voir git history), ce qui
+devient progressivement plus lent a mesure que l'historique grossit sur
+plusieurs annees/pays. SQLite regle ca (UPDATE/DELETE cibles) sans rien
+ajouter a installer. Voir migrate_legacy_jsonl_history() pour la migration
+(unique, automatique, jamais destructive) d'une installation existante.
 """
+import contextlib
 import io
 import json
 import os
+import shutil
+import sqlite3
 import threading
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -14,93 +26,295 @@ import pandas as pd
 
 from qa.config import HISTORY_RETENTION_DAYS, OUTPUT_DIR, REGRESSION_ALERT_THRESHOLD
 
-HISTORY_PATH = os.path.join(OUTPUT_DIR, "history.jsonl")
+HISTORY_PATH = os.path.join(OUTPUT_DIR, "history.db")
+
+# Emplacement de l'ancien historique JSONL (avant la migration vers SQLite,
+# voir migrate_legacy_jsonl_history) - jamais ecrit par le code actuel, lu
+# uniquement pour la migration unique d'une installation existante.
+LEGACY_HISTORY_PATH = os.path.join(OUTPUT_DIR, "history.jsonl")
 
 # Streamlit sert chaque session utilisateur dans un thread du meme process :
 # un RLock (pas un Lock simple - record_run appelle prune_history, qui doit
 # pouvoir re-acquerir le verrou depuis le meme thread) protege les
-# operations de lecture-modification-ecriture sur HISTORY_PATH contre une
-# ecriture concurrente entre deux sessions qui archiveraient au meme moment.
+# operations d'ecriture contre une ecriture concurrente entre deux sessions
+# qui archiveraient au meme moment. SQLite gere deja son propre verrouillage
+# au niveau fichier, mais ce verrou applicatif evite les erreurs
+# "database is locked" en serialisant les acces depuis ce process.
 _LOCK = threading.RLock()
+
+# Sentinelle distincte de tout resultat reel (y compris None) pour que
+# record_run puisse detecter un echec d'ecriture via _with_connection sans
+# ambiguite (voir plus bas) - _with_connection retourne `default` sur erreur,
+# et un simple None serait indistinguable d'un succes qui ne retourne rien.
+_FAILED = object()
+
+# "trigger" est un mot reserve SQL (CREATE TRIGGER) : la colonne s'appelle
+# trigger_name en base pour eviter d'avoir a le quoter partout, mais la clef
+# exposee par l'API Python reste "trigger" (voir _row_to_entry) - purement
+# un detail de stockage interne, invisible de tous les appelants existants.
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    sheet TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    total INTEGER NOT NULL,
+    ok INTEGER NOT NULL,
+    ko INTEGER NOT NULL,
+    score REAL NOT NULL,
+    country TEXT,
+    trigger_name TEXT,
+    sequence TEXT,
+    error_types TEXT,
+    tested_by TEXT
+)
+"""
+
+
+def _connect(path: str) -> sqlite3.Connection:
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    conn = sqlite3.connect(path, timeout=10)
+    conn.execute("PRAGMA busy_timeout = 5000")
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _backup_path(path: str) -> str:
+    return path + ".bak"
+
+
+def _refresh_backup(path: str) -> None:
+    """Copie `path` vers son fichier `.bak` juste apres une ecriture reussie
+    (voir _with_connection) : permet a load_history de retomber sur la
+    derniere version connue-saine si le fichier principal devient illisible
+    entre deux ecritures (ex. synchronisation OneDrive interrompue en plein
+    ecriture, connue pour corrompre des fichiers SQLite ouverts - ce projet
+    vit justement dans un dossier synchronise). Best-effort : une erreur ici
+    ne doit jamais faire echouer l'ecriture qu'elle suit."""
+    try:
+        shutil.copy2(path, _backup_path(path))
+    except OSError:
+        pass
+
+
+def _with_connection(path: str, fn, default=None, mutates: bool = False):
+    """Ouvre une connexion SQLite sur `path`, execute `fn(conn)` sous
+    `_LOCK`, et retourne son resultat - ou `default` si la moindre erreur
+    survient (SQLite ou OS : fichier verrouille/corrompu par une
+    synchronisation OneDrive, permissions insuffisantes, etc.). Centralise
+    la gestion d'erreur de toutes les fonctions d'historique qui touchent la
+    base, pour qu'aucune ne rate l'OSError que `_connect` peut lever (voir
+    son os.makedirs) comme ne le faisait auparavant que record_run.
+    `mutates=True` rafraichit la sauvegarde .bak apres succes (voir
+    _refresh_backup) pour les fonctions qui modifient la base plutot que la
+    lisent seulement."""
+    with _LOCK:
+        try:
+            with contextlib.closing(_connect(path)) as conn:
+                conn.execute(_SCHEMA)
+                result = fn(conn)
+        except (sqlite3.Error, OSError):
+            return default
+        if mutates:
+            _refresh_backup(path)
+        return result
 
 
 def _parse_timestamp(timestamp: str) -> datetime:
     return datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
 
 
+def _row_to_entry(row: sqlite3.Row) -> dict:
+    """Reconstruit le dict expose par l'API (meme forme qu'avant la
+    migration SQLite) a partir d'une ligne de la table `runs` - les cles
+    optionnelles (country/trigger/sequence/error_types/tested_by) ne sont
+    presentes que si elles ont une valeur, comme le faisait record_run en
+    ne les ecrivant dans le JSON qu'a cette condition."""
+    entry = {
+        "timestamp": row["timestamp"],
+        "sheet": row["sheet"],
+        "mode": row["mode"],
+        "total": row["total"],
+        "ok": row["ok"],
+        "ko": row["ko"],
+        "score": row["score"],
+    }
+    if row["country"]:
+        entry["country"] = row["country"]
+    if row["trigger_name"]:
+        entry["trigger"] = row["trigger_name"]
+    if row["sequence"]:
+        entry["sequence"] = row["sequence"]
+    if row["error_types"]:
+        entry["error_types"] = json.loads(row["error_types"])
+    if row["tested_by"]:
+        entry["tested_by"] = row["tested_by"]
+    return entry
+
+
+def _load_legacy_jsonl(path: str) -> list:
+    """Relit un fichier a l'ancien format JSONL (une entree JSON par ligne),
+    en ignorant les lignes corrompues - meme tolerance que l'ancien
+    load_history. Utilise uniquement par migrate_legacy_jsonl_history()."""
+    entries = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return entries
+
+
+def migrate_legacy_jsonl_history(legacy_path: str = LEGACY_HISTORY_PATH, path: str = HISTORY_PATH) -> bool:
+    """
+    Migration unique et idempotente de l'ancien historique JSONL vers la
+    nouvelle base SQLite : n'agit que si `legacy_path` existe ENCORE et que
+    `path` n'existe pas deja (sinon deja migre, ou nouvelle installation
+    sans aucun historique) - reimporte alors chaque entree telle quelle
+    (tested_by absent sur toutes, cette colonne n'existait pas avant), puis
+    renomme l'ancien fichier en ".migrated" (jamais supprime, une purge
+    manuelle reste possible mais jamais automatique).
+
+    A appeler au demarrage de chaque page qui touche l'historique (voir
+    home.py et pages/1_Historique.py) plutot qu'a l'interieur de chaque
+    fonction de ce module : appeler ici, avant tout record_run/lecture,
+    garantit que la migration a lieu avant qu'un premier appel ne cree une
+    base vide a `path` (ce qui ferait passer ce garde-fou a False et
+    abandonnerait silencieusement l'historique existant). Idempotent et bon
+    marche (un seul os.path.exists) une fois migre : peut etre appele sans
+    condition a chaque rerun, comme migrate_legacy_loyalty_sequences.
+
+    Le garde-fou (`path` pas encore migre) et l'import sont faits sous le
+    meme `_LOCK` : Streamlit sert chaque session dans un thread du meme
+    process, donc deux sessions qui chargeraient l'app au tout premier
+    instant apres une mise a jour (avant que `path` n'existe) pourraient
+    sinon passer toutes les deux le garde-fou avant que l'une n'ait cree la
+    base, et importer chacune tout l'historique legacy en double (aucune
+    contrainte UNIQUE ne s'y opposerait). Verifier ET ecrire sous le meme
+    verrou empeche ce scenario.
+
+    Retourne True si une migration a effectivement eu lieu (pour informer
+    l'utilisateur, voir pages/1_Historique.py), False sinon.
+    """
+    with _LOCK:
+        if os.path.exists(path) or not os.path.exists(legacy_path):
+            return False
+
+        entries = _load_legacy_jsonl(legacy_path)
+
+        with contextlib.closing(_connect(path)) as conn:
+            conn.execute(_SCHEMA)
+            for entry in entries:
+                error_types = entry.get("error_types")
+                conn.execute(
+                    "INSERT INTO runs (timestamp, sheet, mode, total, ok, ko, score, "
+                    "country, trigger_name, sequence, error_types, tested_by) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        entry.get("timestamp"), entry.get("sheet"), entry.get("mode"),
+                        entry.get("total"), entry.get("ok"), entry.get("ko"), entry.get("score"),
+                        entry.get("country"), entry.get("trigger"), entry.get("sequence"),
+                        json.dumps(error_types, ensure_ascii=False) if error_types else None,
+                        entry.get("tested_by"),
+                    ),
+                )
+            conn.commit()
+        _refresh_backup(path)
+
+    try:
+        os.rename(legacy_path, legacy_path + ".migrated")
+    except OSError:
+        pass
+
+    return True
+
+
 def record_run(sheet: str, mode: str, total: int, ok: int, ko: int, score: float,
                 country: str = None, trigger: str = None, sequence: str = None,
-                error_types: dict = None, path: str = HISTORY_PATH) -> None:
+                error_types: dict = None, tested_by: str = None, path: str = HISTORY_PATH) -> None:
     """Ajoute une ligne d'historique pour ce run. N'echoue jamais bruyamment :
     l'historique est une fonctionnalite de confort, pas critique pour la QA.
 
     country/trigger/sequence ne sont renseignes que lors de l'archivage
-    manuel confirme par l'utilisateur (voir qa.archive et
-    render_archive_section dans app.py) : ce sont ces entrees-la (et
-    seulement celles-ci) qui alimentent la page Historique par pays/trigger/
-    sequence. L'appel "brut" fait par qa.report a chaque run (sans ces
-    champs) continue d'alimenter le mini-graphique par onglet affiche
-    immediatement apres une comparaison.
+    manuel confirme par l'utilisateur (voir qa.archive et home._do_archive) :
+    ce sont ces entrees-la (et seulement celles-ci) qui alimentent la page
+    Historique par pays/trigger/sequence. L'appel "brut" fait par qa.report
+    a chaque run (sans ces champs) continue d'alimenter le mini-graphique
+    par onglet affiche immediatement apres une comparaison.
 
     error_types (optionnel, {"Error Type": count}) : repartition des KO de ce
-    run par type d'erreur, fournie par home._do_archive. Comme country/
-    trigger/sequence, stockee seulement si non vide - alimente les stats
-    agregees de la page Historique (voir aggregate_error_types/
-    error_type_monthly_trend). Les entrees anterieures a cette fonctionnalite
-    n'ont pas cette cle."""
-    entry = {
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "sheet": sheet,
-        "mode": mode,
-        "total": total,
-        "ok": ok,
-        "ko": ko,
-        "score": score,
-    }
-    if country:
-        entry["country"] = country
-    if trigger:
-        entry["trigger"] = trigger
-    if sequence:
-        entry["sequence"] = sequence
-    if error_types:
-        entry["error_types"] = dict(error_types)
-    with _LOCK:
-        try:
-            directory = os.path.dirname(path)
-            if directory:
-                os.makedirs(directory, exist_ok=True)
-            with open(path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-        except OSError:
-            return
+    run par type d'erreur, fournie par home._do_archive. tested_by
+    (optionnel, nom de l'utilisateur qui a lance/archive ce run, voir
+    home._do_archive) : comme country/trigger/sequence/error_types, stocke
+    seulement si fourni - les entrees anterieures a ces fonctionnalites n'ont
+    pas ces colonnes renseignees."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    error_types_json = json.dumps(dict(error_types), ensure_ascii=False) if error_types else None
 
-        try:
-            prune_history(path=path)
-        except OSError:
-            pass
+    def _insert(conn):
+        conn.execute(
+            "INSERT INTO runs (timestamp, sheet, mode, total, ok, ko, score, "
+            "country, trigger_name, sequence, error_types, tested_by) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                timestamp, sheet, mode, total, ok, ko, score,
+                country or None, trigger or None, sequence or None,
+                error_types_json, tested_by or None,
+            ),
+        )
+        conn.commit()
+
+    # prune_history ne doit s'executer qu'apres un insert reussi (sinon rien
+    # de nouveau a purger) - _FAILED (distinct de tout resultat reel, y
+    # compris None) permet de le detecter via la valeur retournee par
+    # _with_connection plutot que via une exception (celle-ci est deja
+    # avalee par _with_connection lui-meme).
+    if _with_connection(path, _insert, default=_FAILED, mutates=True) is not _FAILED:
+        prune_history(path=path)
 
 
 def load_history(sheet: str = None, path: str = HISTORY_PATH) -> list:
     """Retourne les runs enregistres (tous, ou filtres sur sheet), dans
-    l'ordre chronologique. Liste vide si le fichier n'existe pas encore."""
-    with _LOCK:
-        if not os.path.exists(path):
-            return []
+    l'ordre chronologique (ordre d'insertion). Liste vide si la base
+    n'existe pas encore.
 
-        entries = []
-        with open(path, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if sheet is None or entry.get("sheet") == sheet:
-                    entries.append(entry)
+    Si elle existe mais est illisible/corrompue (ex. synchronisation
+    OneDrive interrompue en plein ecriture - ce projet vit dans un dossier
+    synchronise), retombe sur la derniere sauvegarde .bak connue-saine
+    (rafraichie apres chaque ecriture reussie, voir _refresh_backup) plutot
+    que de traiter tout l'historique comme perdu d'un coup : seule la perte
+    simultanee du fichier principal ET de sa sauvegarde retourne une liste
+    vide (best-effort, comme le reste de ce module : ne doit jamais faire
+    planter l'app)."""
+    if not os.path.exists(path):
+        return []
+
+    def _select(conn):
+        if sheet is None:
+            rows = conn.execute("SELECT * FROM runs ORDER BY id").fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM runs WHERE sheet = ? ORDER BY id", (sheet,)
+            ).fetchall()
+        return [_row_to_entry(row) for row in rows]
+
+    entries = _with_connection(path, _select)
+    if entries is not None:
         return entries
+
+    backup = _backup_path(path)
+    if os.path.exists(backup):
+        entries = _with_connection(backup, _select)
+        if entries is not None:
+            return entries
+
+    return []
 
 
 def load_classified_history(path: str = HISTORY_PATH) -> list:
@@ -112,14 +326,19 @@ def load_classified_history(path: str = HISTORY_PATH) -> list:
     ]
 
 
-def build_history_tree(path: str = HISTORY_PATH) -> dict:
+def build_history_tree(path: str = HISTORY_PATH, entries: list = None) -> dict:
     """
     { pays: { trigger: { sequence: [entries, tries par timestamp croissant] } } }
     Utilise par la page Historique pour la navigation par dossiers et pour
     tracer l'evolution du score/pourcentage de bugs d'une sequence.
-    """
+
+    `entries` (optionnel) : liste deja chargee (voir load_classified_history)
+    a regrouper, pour eviter une deuxieme lecture complete de la base quand
+    l'appelant a deja les entrees classees sous la main (voir
+    pages/1_Historique.py, qui a par ailleurs besoin de la liste a plat pour
+    les statistiques d'erreurs). Si omis, chargee ici comme avant."""
     tree = {}
-    for entry in load_classified_history(path):
+    for entry in entries if entries is not None else load_classified_history(path):
         (tree
             .setdefault(entry["country"], {})
             .setdefault(entry["trigger"], {})
@@ -172,7 +391,10 @@ def error_type_monthly_trend(entries: list) -> list:
     return rows
 
 
-_EXPORT_COLUMNS = ["timestamp", "country", "trigger", "sequence", "mode", "total", "ok", "ko", "score", "error_types"]
+_EXPORT_COLUMNS = [
+    "timestamp", "country", "trigger", "sequence", "mode", "total", "ok", "ko", "score",
+    "error_types", "tested_by",
+]
 
 
 def _history_export_dataframe(entries: list):
@@ -197,6 +419,7 @@ def _history_export_dataframe(entries: list):
             "ko": e.get("ko", ""),
             "score": e.get("score", ""),
             "error_types": json.dumps(e.get("error_types") or {}, ensure_ascii=False),
+            "tested_by": e.get("tested_by", ""),
         }
         for e in entries
     ]
@@ -250,39 +473,6 @@ def find_regression(country: str, trigger: str, sequence: str, mode: str, curren
     return None
 
 
-def _rewrite_entries(path: str, transform) -> None:
-    """Relit toutes les lignes de path, applique transform(entry) -> entry|None
-    a chaque entree deja classee (pays+trigger+sequence), puis reecrit le
-    fichier (entree ignoree si transform retourne None). Les lignes non-JSON
-    ou non classees sont recopiees telles quelles. No-op si le fichier
-    n'existe pas encore."""
-    with _LOCK:
-        if not os.path.exists(path):
-            return
-
-        lines = []
-        with open(path, encoding="utf-8") as f:
-            for raw_line in f:
-                raw_line = raw_line.strip()
-                if not raw_line:
-                    continue
-                try:
-                    entry = json.loads(raw_line)
-                except json.JSONDecodeError:
-                    lines.append(raw_line)
-                    continue
-
-                if entry.get("country") and entry.get("trigger") and entry.get("sequence"):
-                    entry = transform(entry)
-                    if entry is None:
-                        continue
-
-                lines.append(json.dumps(entry, ensure_ascii=False))
-
-        with open(path, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines) + ("\n" if lines else ""))
-
-
 def rewrite_classification(old_country: str, old_trigger: str, old_sequence: str,
                             new_country: str, new_trigger: str, new_sequence: str,
                             path: str = HISTORY_PATH) -> None:
@@ -291,15 +481,20 @@ def rewrite_classification(old_country: str, old_trigger: str, old_sequence: str
     reecrites vers (new_country, new_trigger, new_sequence). Utilise depuis
     la page Historique pour corriger une mauvaise detection automatique, ou
     fusionner un doublon (ex: une sequence normalisee differemment avant que
-    le recoupement ne soit possible, voir qa.classification)."""
-    def transform(entry):
-        if entry["country"] == old_country and entry["trigger"] == old_trigger and entry["sequence"] == old_sequence:
-            entry["country"] = new_country
-            entry["trigger"] = new_trigger
-            entry["sequence"] = new_sequence
-        return entry
+    le recoupement ne soit possible, voir qa.classification). No-op si la
+    base n'existe pas encore (rien a renommer)."""
+    if not os.path.exists(path):
+        return
 
-    _rewrite_entries(path, transform)
+    def _update(conn):
+        conn.execute(
+            "UPDATE runs SET country = ?, trigger_name = ?, sequence = ? "
+            "WHERE country = ? AND trigger_name = ? AND sequence = ?",
+            (new_country, new_trigger, new_sequence, old_country, old_trigger, old_sequence),
+        )
+        conn.commit()
+
+    _with_connection(path, _update, mutates=True)
 
 
 def prune_history(path: str = HISTORY_PATH, retention_days: int = HISTORY_RETENTION_DAYS,
@@ -316,64 +511,63 @@ def prune_history(path: str = HISTORY_PATH, retention_days: int = HISTORY_RETENT
     - aucune entree recente (sequence pas testee depuis plus de
       `retention_days` jours) : on garde seulement les 2 dernieres entrees
       au total, peu importe leur date.
-    Les entrees non classees et les lignes non-JSON sont toujours
-    conservees telles quelles (comme pour rewrite_classification /
-    delete_classification). Appelee automatiquement par record_run, mais
-    peut aussi etre invoquee directement (ex: nettoyage manuel).
+    Les entrees non classees sont toujours conservees telles quelles.
+    Appelee automatiquement par record_run, mais peut aussi etre invoquee
+    directement (ex: nettoyage manuel). No-op si la base n'existe pas
+    encore.
     """
-    with _LOCK:
-        if not os.path.exists(path):
-            return
+    if not os.path.exists(path):
+        return
 
-        now = now or datetime.now()
-        cutoff = now - timedelta(days=retention_days)
+    now = now or datetime.now()
+    cutoff = now - timedelta(days=retention_days)
 
-        with open(path, encoding="utf-8") as f:
-            raw_lines = [line.strip() for line in f if line.strip()]
-
-        parsed = []
-        for raw_line in raw_lines:
-            try:
-                parsed.append((raw_line, json.loads(raw_line)))
-            except json.JSONDecodeError:
-                parsed.append((raw_line, None))
+    def _prune(conn):
+        rows = conn.execute(
+            "SELECT id, timestamp, country, trigger_name, sequence FROM runs "
+            "WHERE country IS NOT NULL AND trigger_name IS NOT NULL AND sequence IS NOT NULL"
+        ).fetchall()
 
         groups = defaultdict(list)
-        for i, (_, entry) in enumerate(parsed):
-            if entry and entry.get("country") and entry.get("trigger") and entry.get("sequence"):
-                groups[(entry["country"], entry["trigger"], entry["sequence"])].append(i)
+        for row in rows:
+            groups[(row["country"], row["trigger_name"], row["sequence"])].append(row)
 
-        drop = set()
-        for indices in groups.values():
-            indices.sort(key=lambda i: parsed[i][1]["timestamp"])
-            recent = [i for i in indices if _parse_timestamp(parsed[i][1]["timestamp"]) >= cutoff]
+        drop_ids = set()
+        for group_rows in groups.values():
+            group_rows.sort(key=lambda r: _parse_timestamp(r["timestamp"]))
+            recent = [r for r in group_rows if _parse_timestamp(r["timestamp"]) >= cutoff]
 
             if len(recent) >= 2:
-                keep = set(recent)
+                keep_ids = {r["id"] for r in recent}
             elif len(recent) == 1:
-                pos = indices.index(recent[0])
-                keep = set(indices[max(0, pos - 1):pos + 1])
+                pos = group_rows.index(recent[0])
+                keep_ids = {r["id"] for r in group_rows[max(0, pos - 1):pos + 1]}
             else:
-                keep = set(indices[-2:])
+                keep_ids = {r["id"] for r in group_rows[-2:]}
 
-            drop.update(set(indices) - keep)
+            drop_ids.update({r["id"] for r in group_rows} - keep_ids)
 
-        if not drop:
-            return
+        if drop_ids:
+            conn.executemany("DELETE FROM runs WHERE id = ?", [(i,) for i in drop_ids])
+            conn.commit()
 
-        kept_lines = [raw_line for i, (raw_line, _) in enumerate(parsed) if i not in drop]
-        with open(path, "w", encoding="utf-8") as f:
-            f.write("\n".join(kept_lines) + ("\n" if kept_lines else ""))
+    _with_connection(path, _prune, mutates=True)
 
 
 def delete_classification(country: str, trigger: str, sequence: str, path: str = HISTORY_PATH) -> None:
     """Supprime de l'historique toutes les entrees classees sous (country,
     trigger, sequence). Ne touche pas aux rapports Excel archives (voir
     qa.archive.delete_sequence_dir) : les deux sont a appeler ensemble pour
-    supprimer une sequence entierement depuis la page Historique."""
-    def transform(entry):
-        if entry["country"] == country and entry["trigger"] == trigger and entry["sequence"] == sequence:
-            return None
-        return entry
+    supprimer une sequence entierement depuis la page Historique. No-op si
+    la base n'existe pas encore."""
+    if not os.path.exists(path):
+        return
 
-    _rewrite_entries(path, transform)
+    def _delete(conn):
+        conn.execute(
+            "DELETE FROM runs WHERE country = ? AND trigger_name = ? AND sequence = ?",
+            (country, trigger, sequence),
+        )
+        conn.commit()
+
+    _with_connection(path, _delete, mutates=True)

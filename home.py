@@ -1,10 +1,14 @@
 import streamlit as st
 import pandas as pd
+import getpass
+import html
 import os
 import io
 import re
+import threading
 import uuid
 import contextlib
+from concurrent.futures import ThreadPoolExecutor
 from collections import Counter
 from qa.archive import archive_report
 from qa.classification import detect_classification, normalize_sequence_name, resolve_sequence_alias
@@ -29,7 +33,7 @@ from qa.excel_loader import (
     load_excel_wordings,
     load_generic_wordings,
 )
-from qa.history import find_regression, record_run
+from qa.history import find_regression, migrate_legacy_jsonl_history, record_run
 from qa.html_extraction import load_and_extract_html_texts
 from qa.notifications import send_teams_notification
 from qa.report import URL_HEADER_LABELS, save_consolidated_report, save_report, sort_results_by_html_order
@@ -48,7 +52,14 @@ def highlight_differences(excel_text, html_text, char_level=False):
     """Diff en gras rouge entre 2 textes. Par mots par defaut (wording) ;
     char_level=True decoupe caractere par caractere (mode URL, ou une URL
     n'a pas d'espaces - un decoupage par mots surlignerait l'URL entiere en
-    rouge pour la moindre difference)."""
+    rouge pour la moindre difference).
+
+    Le resultat est injecte tel quel comme innerHTML dans le tableau AgGrid
+    (voir _render_table) : chaque token est html.escape() avant d'etre
+    entoure du <span> de surlignage, pour qu'un wording/texte HTML contenant
+    litteralement des caracteres '<'/'>' (email fourni par un tiers,
+    composant mal forme...) s'affiche comme du texte plutot que de
+    s'executer comme du HTML/JS dans le navigateur."""
 
     excel_text = str(excel_text or "")
     html_text = str(html_text or "")
@@ -73,8 +84,8 @@ def highlight_differences(excel_text, html_text, char_level=False):
 
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
 
-        ex = sep.join(excel_tokens[i1:i2])
-        ht = sep.join(html_tokens[j1:j2])
+        ex = html.escape(sep.join(excel_tokens[i1:i2]))
+        ht = html.escape(sep.join(html_tokens[j1:j2]))
 
         if tag == "equal":
 
@@ -97,10 +108,44 @@ def highlight_differences(excel_text, html_text, char_level=False):
     )
 
 
+def _send_teams_notification_safely(subject, message):
+    """Point d'entree du thread daemon fire-and-forget qui envoie la
+    notification Teams (voir _do_archive) : send_teams_notification()
+    n'attrape deja que requests.RequestException (best-effort sur l'appel
+    reseau lui-meme, voir qa/notifications.py) - toute AUTRE exception
+    (bug de construction du message, regression future...) ne remonterait
+    sinon nulle part de visible pour l'utilisateur de l'app (le thread est
+    daemon, jamais rejoint), et ne serait imprimee que via le hook
+    d'exception par defaut de threading, sans le contexte (sujet) de la
+    notification concernee. Avale tout, comme le reste des fonctionnalites
+    de confort de l'outil (historique, nettoyage temp...) : la notification
+    Teams n'est jamais critique pour la QA elle-meme."""
+    try:
+        send_teams_notification(subject, message)
+    except Exception as e:
+        print(f"❌ Notification Teams ({subject}) : erreur inattendue : {e}")
+
+
+def _score_pct(ok, total, digits=1):
+    """Pourcentage OK/total arrondi, 0 si total est nul (aucune ligne a
+    tester - un onglet vide, une sequence sans resultat...) plutot qu'une
+    ZeroDivisionError. Motif repete a plusieurs endroits (recap batch,
+    archivage, diagnostic Excel, score combine...) : centralise ici pour
+    qu'aucun de ces points d'appel n'oublie la garde `if total`."""
+    return round(ok / total * 100, digits) if total else 0
+
+
 def run_with_debug_capture(fn, *args, **kwargs):
-    """Execute fn en capturant tout ce qu'elle imprime (stdout), pour l'afficher dans l'UI."""
+    """Execute fn en capturant tout ce qu'elle imprime (stdout), pour
+    l'afficher dans l'UI. Le flux cible est enveloppe dans
+    _ThreadSafeLineBuffer : fn peut elle-meme paralleliser du travail sur
+    plusieurs threads (voir _run_jobs_in_parallel, appelee via cette
+    fonction par _execute_batch/_execute_combined_batch) sans risquer de
+    fusionner deux lignes issues de threads differents - le meme wrapper ne
+    change rien d'observable pour un fn strictement sequentiel (voir
+    _execute_single_or_combined_test)."""
     buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
+    with contextlib.redirect_stdout(_ThreadSafeLineBuffer(buf)):
         result = fn(*args, **kwargs)
     return result, buf.getvalue()
 
@@ -121,11 +166,18 @@ def _run_batch_qa(html_path, excel_path, keyword, mode, include_generic, label):
     """
     Execute run_qa_for_sequence pour un fichier/sequence du batch (mode
     "batch" ou moitie wording/url du mode "combined_batch", voir le bouton
-    Comparer plus bas) : affiche une erreur claire (log + UI) plutot que
-    d'interrompre tout le run si CE fichier precis est illisible - les
-    autres fichiers du batch continuent d'etre traites. Retourne les
-    resultats, ou None si l'appel a echoue (rien a ajouter au dict de
-    resultats de l'appelant dans ce cas).
+    Comparer plus bas) : si CE fichier precis est illisible, retourne un
+    message d'erreur clair plutot que d'interrompre tout le run - les
+    autres fichiers du batch continuent d'etre traites.
+
+    Retourne (results, error_message) : error_message est None en cas de
+    succes (results contient alors les resultats), ou l'inverse en cas
+    d'echec. N'appelle plus st.error()/st.* directement (contrairement aux
+    versions precedentes) : cette fonction est executee depuis un thread
+    worker par _run_jobs_in_parallel, et Streamlit n'autorise pas les appels
+    a son API depuis un thread autre que celui du script - c'est a
+    l'appelant, sur le thread principal, d'afficher error_message avec
+    st.error() une fois tous les jobs termines.
     """
     try:
         results, _ = run_qa_for_sequence(
@@ -135,11 +187,365 @@ def _run_batch_qa(html_path, excel_path, keyword, mode, include_generic, label):
             mode=mode,
             include_generic=include_generic,
         )
-        return results
+        return results, None
     except QA_RUN_READ_ERRORS as e:
-        print(f"❌ {label} : {e}")
-        st.error(f"❌ {label} : {e}")
-        return None
+        message = f"❌ {label} : {e}"
+        print(message)
+        return None, message
+
+
+class _ThreadSafeLineBuffer:
+    """Wrapper autour d'un flux (ex: io.StringIO) a utiliser comme cible de
+    contextlib.redirect_stdout pendant que des jobs tournent en parallele
+    sur un ThreadPoolExecutor (voir _run_jobs_in_parallel) : sys.stdout est
+    un attribut global au process, partage par tous les threads, donc
+    chaque print() (2 appels .write() distincts : le texte, puis le retour
+    ligne) d'un job peut sinon s'entrelacer avec celui d'un autre job en
+    cours - fusionnant par exemple le texte de deux sequences differentes
+    en une seule ligne illisible dans l'expander "Logs de debug".
+
+    Accumule les ecritures par thread (threading.local) jusqu'a une ligne
+    complete, puis n'ecrit cette ligne dans le flux partage que sous verrou
+    - une ligne entiere d'un thread ne peut alors plus se retrouver coupee
+    au milieu par l'ecriture d'un autre thread."""
+
+    def __init__(self, target):
+        self._target = target
+        self._lock = threading.Lock()
+        self._local = threading.local()
+
+    def write(self, text):
+        pending = getattr(self._local, "pending", "") + text
+        *complete_lines, self._local.pending = pending.split("\n")
+        if complete_lines:
+            with self._lock:
+                for line in complete_lines:
+                    self._target.write(line + "\n")
+
+    def flush(self):
+        pass
+
+
+def _run_jobs_in_parallel(jobs):
+    """
+    Execute une liste de callables sans argument (voir les boucles du
+    bouton Comparer plus bas, mode batch) en parallele et retourne leurs
+    resultats dans le meme ordre que `jobs` - chaque job est un appel a
+    _run_batch_qa, independant des autres (fichier/sequence different),
+    donc majoritairement en attente d'I/O (lecture du classeur Excel et du
+    fichier HTML) plutot que de calcul pur : les executer sur des threads
+    plutot que sequentiellement raccourcit d'autant l'attente sur un batch
+    de plusieurs fichiers, malgre le GIL.
+
+    ThreadPoolExecutor.map preserve l'ordre de `jobs` quel que soit l'ordre
+    reel de completion, ce qui permet a l'appelant de reassocier chaque
+    resultat a son fichier/sequence d'origine par simple zip(). Aucun job
+    n'appelle de fonction Streamlit (voir _run_batch_qa) : executer du code
+    Streamlit depuis un thread secondaire n'est pas supporte.
+    """
+    if not jobs:
+        return []
+    with ThreadPoolExecutor(max_workers=min(8, len(jobs))) as executor:
+        return list(executor.map(lambda job: job(), jobs))
+
+
+def _build_and_run_combined_batch_jobs(combined_sequence_assignments, excel_path, include_generic, session_id):
+    """Ecrit les fichiers HTML temporaires puis construit et execute en
+    parallele 2 jobs par fichier (Wording et URL, voir _run_jobs_in_parallel)
+    - partie commune a _execute_combined_batch factorisee ici pour etre
+    executee via run_with_debug_capture (voir plus haut) plutot que de
+    dupliquer sa capture de stdout."""
+    # Ecriture des fichiers temporaires d'abord (sequentielle, rapide) :
+    # chaque job ci-dessous doit avoir son chemin final deja pret,
+    # _write_batch_html n'est pas thread-safe a partager (compteur uuid
+    # mis a part, aucun probleme reel, mais autant garder l'IO de
+    # fichier hors des threads).
+    batch_paths = [_write_batch_html(f, session_id) for f, _, _ in combined_sequence_assignments]
+
+    # 2 jobs independants par paire (wording + url), executes en
+    # parallele (voir _run_jobs_in_parallel) - un fichier lent a lire ne
+    # retarde plus tous les autres.
+    jobs = []
+    for (f, w_seq, u_seq), batch_html_path in zip(combined_sequence_assignments, batch_paths):
+        print(f"\n{'=' * 20} {w_seq} / {u_seq} ({f.name}) {'=' * 20}")
+
+        jobs.append(lambda p=batch_html_path, s=w_seq, name=f.name: _run_batch_qa(
+            p, excel_path, s, "wording", include_generic, label=f"Wording {s} ({name})"
+        ))
+        # include_generic ne s'applique qu'au wording (case a cocher non
+        # affichee du tout en mode url, voir plus haut) - jamais la
+        # valeur (potentiellement True) choisie pour la moitie wording
+        # de ce meme run combine.
+        jobs.append(lambda p=batch_html_path, s=u_seq, name=f.name: _run_batch_qa(
+            p, excel_path, s, "url", False, label=f"URL {s} ({name})"
+        ))
+
+    return _run_jobs_in_parallel(jobs)
+
+
+def _execute_combined_batch(excel_path, combined_sequence_assignments, include_generic, session_id):
+    """
+    Execute le mode batch "Wording + URL" (voir le bouton Comparer) :
+    ecrit les fichiers HTML temporaires, lance en parallele 2 jobs par
+    fichier (Wording et URL, voir _build_and_run_combined_batch_jobs), puis
+    genere les rapports consolides. Ne fait AUCUN appel a l'API Streamlit
+    (st.*) : entierement testable avec de simples objets Python (voir
+    tests/test_home.py), les erreurs de fichiers individuels et les logs de
+    debug sont retournes plutot qu'affiches directement, a charge de
+    l'appelant (le bouton Comparer plus bas) de les rendre.
+
+    Retourne (last_run, error_messages, debug_logs) : last_run est le dict a
+    stocker dans st.session_state["last_run"] (kind="combined_batch"), ou
+    None si aucun fichier n'a produit le moindre resultat (rien a
+    afficher/archiver, seuls les logs de debug ont un sens dans ce cas).
+    """
+    wording_results_by_sequence = {}
+    url_results_by_sequence = {}
+    error_messages = []
+
+    outcomes, debug_logs = run_with_debug_capture(
+        _build_and_run_combined_batch_jobs, combined_sequence_assignments, excel_path, include_generic, session_id
+    )
+
+    for i, (f, w_seq, u_seq) in enumerate(combined_sequence_assignments):
+        w_results, w_error = outcomes[2 * i]
+        u_results, u_error = outcomes[2 * i + 1]
+
+        if w_error:
+            error_messages.append(w_error)
+        if w_results is not None:
+            wording_results_by_sequence[w_seq] = w_results
+
+        if u_error:
+            error_messages.append(u_error)
+        if u_results is not None:
+            url_results_by_sequence[u_seq] = u_results
+
+    if not (wording_results_by_sequence or url_results_by_sequence):
+        return None, error_messages, debug_logs
+
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    wording_report_path = (
+        save_consolidated_report(wording_results_by_sequence, mode="wording")
+        if wording_results_by_sequence else None
+    )
+    url_report_path = (
+        save_consolidated_report(url_results_by_sequence, mode="url")
+        if url_results_by_sequence else None
+    )
+
+    pairs = []
+    recap_rows = []
+
+    for f, w_seq, u_seq in combined_sequence_assignments:
+        w_rows = wording_results_by_sequence.get(w_seq, [])
+        u_rows = url_results_by_sequence.get(u_seq, [])
+
+        pairs.append({
+            "file_name": f.name,
+            "wording_sequence": w_seq,
+            "wording_rows": w_rows,
+            "url_sequence": u_seq,
+            "url_rows": u_rows,
+        })
+
+        w_total, w_ok = len(w_rows), sum(1 for r in w_rows if r["Status"] == "OK")
+        u_total, u_ok = len(u_rows), sum(1 for r in u_rows if r["Status"] == "OK")
+
+        recap_rows.append({
+            "Fichier": f.name,
+            "Séquence Wording": w_seq,
+            "Score Wording": _score_pct(w_ok, w_total),
+            "Séquence URL": u_seq,
+            "Score URL": _score_pct(u_ok, u_total),
+        })
+
+    last_run = {
+        "kind": "combined_batch",
+        "excel_path": excel_path,
+        "title": f"Comparaison terminée pour {len(pairs)} séquence(s) (Wording + URL)",
+        "pairs": pairs,
+        "recap_rows": recap_rows,
+        "wording_report_path": wording_report_path,
+        "wording_download_filename": f"qa_report_multi_wording_{today}.xlsx",
+        "url_report_path": url_report_path,
+        "url_download_filename": f"qa_report_multi_url_{today}.xlsx",
+        "debug_logs": debug_logs,
+    }
+    return last_run, error_messages, debug_logs
+
+
+def _build_and_run_batch_jobs(sequence_assignments, excel_path, qa_mode, include_generic, session_id):
+    """Ecrit les fichiers HTML temporaires puis construit et execute en
+    parallele un job par fichier (voir _run_jobs_in_parallel) - equivalent
+    de _build_and_run_combined_batch_jobs pour le mode batch a un seul type
+    de test (Wording OU URL), factorise de la meme facon pour etre execute
+    via run_with_debug_capture."""
+    batch_paths = [_write_batch_html(f, session_id) for f, _ in sequence_assignments]
+
+    jobs = []
+    for (f, seq_name), batch_html_path in zip(sequence_assignments, batch_paths):
+        print(f"\n{'=' * 20} {seq_name} ({f.name}) {'=' * 20}")
+        jobs.append(lambda p=batch_html_path, s=seq_name, name=f.name: _run_batch_qa(
+            p, excel_path, s, qa_mode, include_generic, label=f"{s} ({name})"
+        ))
+
+    return _run_jobs_in_parallel(jobs)
+
+
+def _execute_batch(excel_path, sequence_assignments, qa_mode, include_generic, session_id):
+    """
+    Equivalent de _execute_combined_batch pour le mode batch a un seul type
+    de test (Wording OU URL, voir le bouton Comparer) : un seul job par
+    fichier plutot que deux (voir _build_and_run_batch_jobs). Memes
+    garanties (aucun appel st.*, entierement testable) et meme forme de
+    retour (last_run, error_messages, debug_logs).
+    """
+    results_by_sequence = {}
+    error_messages = []
+
+    outcomes, debug_logs = run_with_debug_capture(
+        _build_and_run_batch_jobs, sequence_assignments, excel_path, qa_mode, include_generic, session_id
+    )
+
+    for (f, seq_name), (seq_results, error_message) in zip(sequence_assignments, outcomes):
+        if error_message:
+            error_messages.append(error_message)
+        if seq_results is not None:
+            results_by_sequence[seq_name] = seq_results
+
+    if not results_by_sequence:
+        return None, error_messages, debug_logs
+
+    report_path = save_consolidated_report(results_by_sequence, mode=qa_mode)
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    recap_rows = []
+    for seq_name, rows in results_by_sequence.items():
+        seq_total = len(rows)
+        seq_ok = sum(1 for r in rows if r["Status"] == "OK")
+        recap_rows.append({
+            "Séquence": seq_name,
+            "Total": seq_total,
+            "OK": seq_ok,
+            "KO": seq_total - seq_ok,
+            "Score": _score_pct(seq_ok, seq_total)
+        })
+
+    last_run = {
+        "kind": "batch",
+        "mode": qa_mode,
+        "excel_path": excel_path,
+        "title": f"Comparaison terminée pour {len(results_by_sequence)} séquence(s)",
+        "download_filename": f"qa_report_multi_{today}.xlsx",
+        "report_path": report_path,
+        "sheet_name": None,
+        "sequences": results_by_sequence,
+        "recap_rows": recap_rows,
+        "debug_logs": debug_logs,
+    }
+    return last_run, error_messages, debug_logs
+
+
+def _execute_single_or_combined_test(html_path, excel_path, test_wording, test_url,
+                                      wording_keyword, url_keyword, include_generic):
+    """
+    Execute une comparaison sur un seul HTML (mode simple, "kind" single ou
+    combined_test - voir le bouton Comparer) : Wording seul, URL seul, ou
+    les deux pipelines l'un apres l'autre sur le meme fichier. Aucun appel
+    st.* (voir _execute_combined_batch pour le rationnel) : l'erreur de
+    lecture eventuelle est retournee (message d'exception brut) plutot
+    qu'affichee, a charge de l'appelant de la reformuler pour l'utilisateur.
+
+    Retourne (last_run, error_message) : error_message est None en cas de
+    succes (last_run contient alors le dict a stocker dans
+    st.session_state["last_run"]), ou l'inverse en cas d'echec.
+    """
+    try:
+        if test_wording and test_url:
+            # Wording + URL : les deux pipelines tournent sur le meme
+            # HTML/Excel (un seul email peut etre teste sur les deux
+            # aspects a la fois), avec chacun son propre onglet/sequence.
+            (wording_results, wording_report_path, wording_sheet_name), wording_logs = run_with_debug_capture(
+                run_qa,
+                html_file=html_path,
+                excel_file=excel_path,
+                keyword=wording_keyword,
+                mode="wording",
+                include_generic=include_generic
+            )
+            (url_results, url_report_path, url_sheet_name), url_logs = run_with_debug_capture(
+                run_qa,
+                html_file=html_path,
+                excel_file=excel_path,
+                keyword=url_keyword,
+                mode="url"
+            )
+
+            today = datetime.now().strftime("%Y-%m-%d")
+            safe_wording_name = re.sub(r"[^\w\-]", "_", wording_sheet_name)
+            safe_url_name = re.sub(r"[^\w\-]", "_", url_sheet_name)
+
+            last_run = {
+                "kind": "combined_test",
+                "excel_path": excel_path,
+                "title": "Comparaison terminée (Wording + URL)",
+                "wording_results": wording_results,
+                "wording_report_path": wording_report_path,
+                "wording_sequence": wording_keyword,
+                "wording_download_filename": f"qa_report_wording_{safe_wording_name}_{today}.xlsx",
+                "url_results": url_results,
+                "url_report_path": url_report_path,
+                # onglet UTM plat (pas de decoupage en sequences, voir
+                # url_ready) : url_keyword est vide, on reutilise la
+                # sequence wording (meme sequence testee des deux cotes).
+                "url_sequence": url_keyword or wording_keyword,
+                "url_download_filename": f"qa_report_url_{safe_url_name}_{today}.xlsx",
+                "debug_logs": f"--- Wording ---\n{wording_logs}\n\n--- URL ---\n{url_logs}",
+            }
+
+        else:
+            qa_mode = "wording" if test_wording else "url"
+            keyword = wording_keyword if test_wording else url_keyword
+
+            (results, report_path, sheet_name), debug_logs = run_with_debug_capture(
+                run_qa,
+                html_file=html_path,
+                excel_file=excel_path,
+                keyword=keyword,
+                mode=qa_mode,
+                include_generic=include_generic
+            )
+
+            today = datetime.now().strftime("%Y-%m-%d")
+            safe_sheet_name = re.sub(r"[^\w\-]", "_", sheet_name)
+
+            last_run = {
+                "kind": "single",
+                "mode": qa_mode,
+                "excel_path": excel_path,
+                "title": "Comparaison terminée",
+                "download_filename": f"qa_report_{safe_sheet_name}_{today}.xlsx",
+                "report_path": report_path,
+                "results": results,
+                "sheet_name": sheet_name,
+                # keyword == la sequence choisie par l'utilisateur (onglet UTM
+                # en mode url, ou onglet Excel en mode wording - dans ce cas
+                # identique a sheet_name). En mode url, sheet_name est le nom
+                # de l'onglet UTM (souvent unique, partage par toutes les
+                # sequences) : ce n'est PAS la sequence, il ne faut pas s'en
+                # servir pour le classement par sequence dans l'historique -
+                # sauf si keyword est vide (onglet UTM plat, voir url_ready),
+                # auquel cas c'est le seul nom disponible.
+                "sequence": keyword or sheet_name,
+                "debug_logs": debug_logs,
+            }
+
+        return last_run, None
+
+    except QA_RUN_READ_ERRORS as e:
+        return None, str(e)
 
 
 # Memes libelles que l'export Excel (qa.report.URL_HEADER_LABELS), pour que
@@ -147,6 +553,26 @@ def _run_batch_qa(html_path, excel_path, keyword, mode, include_generic, label):
 # noms de colonne - un renommage/ajout de colonne ne se fait plus qu'a un
 # seul endroit.
 URL_COLUMN_RENAME = URL_HEADER_LABELS
+
+
+def _safe_html_cell(status, excel_value, html_value, char_level=False):
+    """Version HTML-safe (echappee, avec diff en gras rouge sur un KO) d'une
+    paire Excel Wording/HTML Wording - seul point (avec highlight_differences
+    lui-meme) qui produit le HTML brut ensuite injecte tel quel comme
+    innerHTML dans le tableau AgGrid (voir _render_table, colonnes excel_col/
+    html_col) : un KO passe par le diff mot-a-mot ou caractere par caractere
+    (deja echappe token par token, voir highlight_differences), un OK n'a
+    rien a surligner mais doit tout de meme etre echappe - un wording
+    contenant litteralement '<'/'>' ne doit jamais s'executer comme du
+    HTML/JS. Utilisee par _prepare_display_df pour les deux modes (wording
+    et url) plutot que dupliquee dans chacun, pour qu'un futur mode ne
+    puisse pas oublier cet echappement."""
+    if status == "KO":
+        return highlight_differences(excel_value, html_value, char_level=char_level)
+    return (
+        html.escape(str(excel_value or "")),
+        html.escape(str(html_value or "")),
+    )
 
 
 def _prepare_display_df(results, mode):
@@ -177,30 +603,22 @@ def _prepare_display_df(results, mode):
         df_display = df[display_cols].copy()
 
         for idx, row in df_display.iterrows():
-            if row["Status"] == "KO":
-                excel_diff, html_diff = highlight_differences(
-                    row.get("Excel Wording", ""),
-                    row.get("HTML Wording", ""),
-                    char_level=True
-                )
-                df_display.at[idx, "Excel Wording"] = excel_diff
-                df_display.at[idx, "HTML Wording"] = html_diff
+            excel_safe, html_safe = _safe_html_cell(
+                row["Status"], row.get("Excel Wording", ""), row.get("HTML Wording", ""), char_level=True
+            )
+            df_display.at[idx, "Excel Wording"] = excel_safe
+            df_display.at[idx, "HTML Wording"] = html_safe
 
         df_display = df_display.rename(columns=URL_COLUMN_RENAME)
     else:
         df_display = df.copy()
 
         for idx, row in df_display.iterrows():
-
-            if row["Status"] == "KO":
-
-                excel_diff, html_diff = highlight_differences(
-                    row.get("Excel Wording", ""),
-                    row.get("HTML Wording", "")
-                )
-
-                df_display.at[idx, "Excel Wording"] = excel_diff
-                df_display.at[idx, "HTML Wording"] = html_diff
+            excel_safe, html_safe = _safe_html_cell(
+                row["Status"], row.get("Excel Wording", ""), row.get("HTML Wording", "")
+            )
+            df_display.at[idx, "Excel Wording"] = excel_safe
+            df_display.at[idx, "HTML Wording"] = html_safe
 
     return df, df_display
 
@@ -442,7 +860,7 @@ def render_grouped_results(results_by_sequence, mode, report_path, download_file
     for seq, rows in results_by_sequence.items():
         seq_total = len(rows)
         seq_ok = sum(1 for r in rows if r["Status"] == "OK")
-        seq_score = round(seq_ok / seq_total * 100, 1) if seq_total else 0
+        seq_score = _score_pct(seq_ok, seq_total)
         icon = "✅" if seq_total and seq_ok == seq_total else "⚠️"
 
         with st.expander(f"{icon} {seq} — {seq_ok}/{seq_total} OK ({seq_score}%)"):
@@ -546,6 +964,18 @@ def _do_archive(last_run, country, trigger):
     summary_lines = []
     combined_error_types = {}
 
+    try:
+        # Utilisateur du systeme d'exploitation (ex: "mbonhomme") : l'outil
+        # n'a pas de systeme d'authentification propre, donc pas d'autre
+        # notion fiable de "qui" sans ajouter de friction (champ a remplir a
+        # chaque comparaison). getuser() peut lever OSError si aucun nom
+        # d'utilisateur n'est determinable (environnement tres restreint) -
+        # tested_by reste alors None, comme avant l'ajout de cette
+        # fonctionnalite (voir qa.history.record_run).
+        tested_by = getpass.getuser()
+    except OSError:
+        tested_by = None
+
     for item in _run_items(last_run):
         sequence = resolve_sequence_alias(country, trigger, normalize_sequence_name(item["sequence"]))
         resolved_sequences.add(sequence)
@@ -553,7 +983,7 @@ def _do_archive(last_run, country, trigger):
         rows = item["rows"]
         total = len(rows)
         ok = sum(1 for r in rows if r["Status"] == "OK")
-        score = round(ok / total * 100, 2) if total else 0
+        score = _score_pct(ok, total, digits=2)
 
         error_types = Counter(r["Error Type"] for r in rows if r["Status"] == "KO" and r.get("Error Type"))
         combined_error_types.setdefault(sequence, Counter()).update(error_types)
@@ -569,6 +999,7 @@ def _do_archive(last_run, country, trigger):
         record_run(
             item["sequence"], item["mode"], total, ok, total - ok, score,
             country=country, trigger=trigger, sequence=sequence, error_types=dict(error_types),
+            tested_by=tested_by,
         )
 
     for sequence in resolved_sequences:
@@ -586,6 +1017,7 @@ def _do_archive(last_run, country, trigger):
                 combined_stats["total"], combined_stats["ok"], combined_stats["ko"], combined_stats["score"],
                 country=country, trigger=trigger, sequence=sequence,
                 error_types=dict(combined_error_types.get(sequence, {})),
+                tested_by=tested_by,
             )
 
     notification_lines = list(summary_lines)
@@ -597,7 +1029,17 @@ def _do_archive(last_run, country, trigger):
                 f"- {r['sequence']} ({r['mode']}) : {r['previous_score']}% → {r['current_score']}% "
                 f"({r['delta']:+.1f} pts)"
             )
-    send_teams_notification(f"QA {country} / {trigger}", "\n".join(notification_lines))
+    # Fire-and-forget : send_teams_notification() reste synchrone et
+    # unitairement testable (voir tests/test_notifications.py), mais
+    # l'attendre ici bloquerait l'archivage - donc l'affichage des resultats
+    # a l'utilisateur - jusqu'a 10s (son timeout, voir qa/notifications.py)
+    # si Teams est lent/indisponible, alors que la notification est une
+    # fonctionnalite de confort, jamais critique pour la QA elle-meme.
+    threading.Thread(
+        target=_send_teams_notification_safely,
+        args=(f"QA {country} / {trigger}", "\n".join(notification_lines)),
+        daemon=True,
+    ).start()
 
     return regressions
 
@@ -693,6 +1135,149 @@ def _guess_sequence_choice(filename, options):
 
     return best_option if best_score >= 0.6 else None
 
+
+_DIAGNOSTIC_RENDERERS = {
+    "caption": st.caption,
+    "success": st.success,
+    "warning": st.warning,
+    "error": st.error,
+}
+
+
+def _run_excel_diagnostics(excel_path, html_path, test_wording, test_url,
+                            wording_keyword, url_keyword, include_generic):
+    """Diagnostic du classeur Excel (et du HTML si deja uploade) avant de
+    lancer la QA (mode simple, hors multi-sequences) : onglets detectes,
+    taux de remplissage des classes techniques, composants dupliques,
+    wordings dans la mauvaise langue/vides/mal espaces, blocs AEM mal
+    formes, classes Excel introuvables dans le HTML. Aucun appel st.* (meme
+    convention que _execute_batch/_do_archive) : retourne une liste de
+    (level, text) - level parmi "caption"/"success"/"warning"/"error" (voir
+    _DIAGNOSTIC_RENDERERS) - pour que l'appelant puisse decider si le
+    panneau doit s'ouvrir automatiquement (presence d'un warning/error)
+    avant de le rendre, sans dupliquer toute cette logique pour le savoir."""
+    messages = []
+
+    try:
+        xls_preview = _open_excel_file(excel_path)
+        messages.append(("caption", f"Onglets détectés : {', '.join(xls_preview.sheet_names)}"))
+    except EXCEL_READ_ERRORS as e:
+        messages.append(("error", f"Impossible de lire le fichier Excel : {e}"))
+        xls_preview = None
+
+    if xls_preview is None:
+        return messages
+
+    if test_wording:
+        try:
+            diag_sheet, diag_wordings = load_excel_wordings(excel_path, wording_keyword)
+            messages.append(("success", f"✅ Onglet trouvé : **{diag_sheet}** — {len(diag_wordings)} wordings chargés"))
+
+            n_with_class = sum(1 for w in diag_wordings if w.get("Technical"))
+            fill_rate = _score_pct(n_with_class, len(diag_wordings))
+
+            if fill_rate == 100:
+                messages.append(("success", "Classes techniques (TECHNICAL NAME) renseignées sur 100% des lignes."))
+            elif fill_rate == 0:
+                messages.append(("warning",
+                    "⚠️ Colonne 'TECHNICAL NAME' absente ou vide sur tout l'onglet — "
+                    "le matching par classe ne fonctionnera pas, tout reposera sur la comparaison de texte seule."
+                ))
+            else:
+                messages.append(("warning",
+                    f"⚠️ Classes techniques renseignées sur seulement {fill_rate}% des lignes — "
+                    "le matching sera moins précis pour les lignes sans classe."
+                ))
+
+            combined_wordings = list(diag_wordings)
+
+            if include_generic:
+                try:
+                    diag_generic_sheet, diag_generic_wordings = load_generic_wordings(excel_path)
+                    messages.append(("success",
+                        f"✅ Onglet générique trouvé : **{diag_generic_sheet}** — "
+                        f"{len(diag_generic_wordings)} wording(s) génériques seront ajoutés"
+                    ))
+                    combined_wordings += diag_generic_wordings
+                except ValueError as e:
+                    messages.append(("error", f"❌ Composants génériques : {e}"))
+
+            duplicates = find_duplicate_components(combined_wordings)
+            if duplicates:
+                details = "; ".join(f"**{comp}** ({', '.join(classes)})" for comp, classes in duplicates)
+                messages.append(("warning",
+                    f"⚠️ Composant(s) présents avec plusieurs classes techniques différentes — "
+                    f"souvent un bloc dupliqué par erreur (copier-coller) : {details}"
+                ))
+
+            language_mismatches = find_wrong_language_wordings(combined_wordings)
+            if language_mismatches:
+                preview = "; ".join(
+                    f"**{m['Component']}** ({m['detected_lang']}) : \"{str(m['Wording'])[:40]}...\""
+                    for m in language_mismatches[:5]
+                )
+                more = f" (+{len(language_mismatches) - 5} autre(s))" if len(language_mismatches) > 5 else ""
+                messages.append(("warning",
+                    f"⚠️ {len(language_mismatches)} wording(s) semblent dans une langue différente "
+                    f"de la langue dominante (`{language_mismatches[0]['expected_lang']}`) — "
+                    f"probablement collés depuis une autre campagne/marché : {preview}{more}"
+                ))
+
+            empty_wordings = find_empty_wordings(combined_wordings)
+            if empty_wordings:
+                details = "; ".join(f"**{w['Component']}** / {w['Element']}" for w in empty_wordings[:10])
+                more = f" (+{len(empty_wordings) - 10} autre(s))" if len(empty_wordings) > 10 else ""
+                messages.append(("warning", f"⚠️ {len(empty_wordings)} wording(s) vide(s) dans le référentiel : {details}{more}"))
+
+            whitespace_issues = find_whitespace_anomalies(combined_wordings)
+            if whitespace_issues:
+                details = "; ".join(
+                    f"**{w['Component']}** / {w['Element']} ({w['issue']})" for w in whitespace_issues[:10]
+                )
+                more = f" (+{len(whitespace_issues) - 10} autre(s))" if len(whitespace_issues) > 10 else ""
+                messages.append(("warning",
+                    f"⚠️ {len(whitespace_issues)} wording(s) avec une anomalie d'espacement "
+                    f"(souvent invisible dans Excel) : {details}{more}"
+                ))
+
+            unbalanced_blocks = find_unbalanced_aem_blocks(combined_wordings)
+            if unbalanced_blocks:
+                details = "; ".join(f"**{w['Component']}** / {w['Element']}" for w in unbalanced_blocks[:10])
+                more = f" (+{len(unbalanced_blocks) - 10} autre(s))" if len(unbalanced_blocks) > 10 else ""
+                messages.append(("warning",
+                    f"⚠️ {len(unbalanced_blocks)} wording(s) avec un bloc conditionnel AEM mal formé "
+                    f"(balises `<%`/`%>` non équilibrées) : {details}{more}"
+                ))
+
+            if html_path:
+                try:
+                    diag_html_texts = load_and_extract_html_texts(html_path)
+                    unused_classes = find_unused_excel_classes(diag_html_texts, combined_wordings)
+                    if unused_classes:
+                        messages.append(("warning",
+                            "⚠️ Classe(s) technique(s) déclarée(s) dans l'Excel mais introuvable(s) dans le HTML "
+                            "(le nom a probablement divergé du vrai template) : "
+                            + ", ".join(f"`{c}`" for c in unused_classes)
+                        ))
+                except (OSError, UnicodeDecodeError):
+                    pass  # le HTML sera re-analyse (avec message d'erreur clair) au clic sur Comparer
+
+        except ValueError as e:
+            messages.append(("error", f"❌ {e}"))
+
+    if test_url:
+        try:
+            diag_sheet, _, diag_urls = load_excel_urls(excel_path, url_keyword)
+            messages.append(("success",
+                f"✅ Onglet UTM trouvé : **{diag_sheet}** — "
+                f"{len(diag_urls)} URL(s) de référence pour cette séquence"
+            ))
+        except ValueError as e:
+            messages.append(("error", f"❌ {e}"))
+
+    return messages
+
+
 st.set_page_config(page_title="QA Email Tool", layout="wide")
 
 header_col1, header_col2 = st.columns([5, 1])
@@ -710,6 +1295,15 @@ session_id = st.session_state["session_id"]
 # Purge les fichiers de temp/ plus vieux que 24h (throttle : ne scanne
 # reellement le dossier qu'une fois par heure au plus, voir qa.cleanup).
 cleanup_old_temp_files_throttled()
+
+# Migration unique et idempotente de l'ancien historique JSONL vers SQLite
+# (voir qa.history.migrate_legacy_jsonl_history) - appelee ici (et pas
+# seulement depuis la page Historique) pour garantir qu'elle s'execute
+# AVANT le moindre record_run de cette page (ex: le premier "Comparer"
+# apres la mise a jour) : sinon ce record_run creerait une base neuve vide
+# avant que la migration n'ait eu la chance de tourner, abandonnant
+# silencieusement l'historique existant (voir le docstring de la fonction).
+migrate_legacy_jsonl_history()
 
 with st.expander("❓ Comment utiliser cet outil ?"):
     st.markdown(
@@ -753,30 +1347,35 @@ mode = st.radio(
 test_wording = mode in ("Wording", "Wording + URL")
 test_url = mode in ("URL", "Wording + URL")
 
-batch_mode = st.checkbox(
-    "📦 Traiter plusieurs séquences en une fois (même Excel, plusieurs HTML)",
-    help=(
-        "À cocher si vous avez plusieurs emails HTML à tester d'un coup pour la même "
-        "campagne (un seul fichier Excel, un HTML par séquence)."
-    )
-)
-
-include_generic = False
-if test_wording:
-    include_generic = st.checkbox(
-        "🧩 Les composants génériques (footer, mentions légales, fidélité...) "
-        "sont dans un onglet séparé de l'Excel",
+# Repliees par defaut : ces deux reglages ne concernent qu'une minorite de
+# campagnes (plusieurs sequences a la fois, composants generiques dans un
+# onglet separe) - les laisser toujours visibles alourdissait la page pour
+# le cas le plus frequent (un seul HTML, mode Wording simple).
+with st.expander("⚙️ Options avancées"):
+    batch_mode = st.checkbox(
+        "📦 Traiter plusieurs séquences en une fois (même Excel, plusieurs HTML)",
         help=(
-            "À cocher si le référentiel Excel de cette campagne ne répète pas, dans chaque "
-            "séquence, les composants communs à toutes les séquences (footer, mentions "
-            "légales...) : ils seront ajoutés automatiquement depuis leur onglet dédié."
+            "À cocher si vous avez plusieurs emails HTML à tester d'un coup pour la même "
+            "campagne (un seul fichier Excel, un HTML par séquence)."
         )
     )
-    if include_generic:
-        st.caption(
-            "ℹ️ L'onglet des composants génériques est retrouvé automatiquement "
-            "(nom contenant \"GENERIC\") et fusionné avec l'onglet de la séquence testée."
+
+    include_generic = False
+    if test_wording:
+        include_generic = st.checkbox(
+            "🧩 Les composants génériques (footer, mentions légales, fidélité...) "
+            "sont dans un onglet séparé de l'Excel",
+            help=(
+                "À cocher si le référentiel Excel de cette campagne ne répète pas, dans chaque "
+                "séquence, les composants communs à toutes les séquences (footer, mentions "
+                "légales...) : ils seront ajoutés automatiquement depuis leur onglet dédié."
+            )
         )
+        if include_generic:
+            st.caption(
+                "ℹ️ L'onglet des composants génériques est retrouvé automatiquement "
+                "(nom contenant \"GENERIC\") et fusionné avec l'onglet de la séquence testée."
+            )
 
 # =========================
 # UPLOAD FILES
@@ -1033,123 +1632,20 @@ if excel_path and not batch_mode and missing_keyword:
     st.info("👆 Sélectionnez une campagne/séquence ci-dessus pour afficher le diagnostic.")
 
 if excel_path and not batch_mode and not missing_keyword:
-    with st.expander("🔍 Diagnostic du fichier Excel", expanded=True):
-        try:
-            xls_preview = _open_excel_file(excel_path)
-            st.caption(f"Onglets détectés : {', '.join(xls_preview.sheet_names)}")
-        except EXCEL_READ_ERRORS as e:
-            st.error(f"Impossible de lire le fichier Excel : {e}")
-            xls_preview = None
+    diagnostic_messages = _run_excel_diagnostics(
+        excel_path, html_path, test_wording, test_url, wording_keyword, url_keyword, include_generic
+    )
+    # Replie par defaut, sauf si le diagnostic a quelque chose a signaler
+    # (warning/error) : la plupart des campagnes n'ont rien a corriger, pas
+    # la peine d'occuper l'espace avec un panneau toujours ouvert pour ca.
+    has_diagnostic_issues = any(level in ("warning", "error") for level, _ in diagnostic_messages)
+    diagnostic_label = "🔍 Diagnostic du fichier Excel"
+    if has_diagnostic_issues:
+        diagnostic_label += " — ⚠️ point(s) à vérifier"
 
-        if xls_preview is not None:
-            if test_wording:
-                try:
-                    diag_sheet, diag_wordings = load_excel_wordings(excel_path, wording_keyword)
-                    st.success(f"✅ Onglet trouvé : **{diag_sheet}** — {len(diag_wordings)} wordings chargés")
-
-                    n_with_class = sum(1 for w in diag_wordings if w.get("Technical"))
-                    fill_rate = round(n_with_class / len(diag_wordings) * 100, 1) if diag_wordings else 0
-
-                    if fill_rate == 100:
-                        st.success("Classes techniques (TECHNICAL NAME) renseignées sur 100% des lignes.")
-                    elif fill_rate == 0:
-                        st.warning(
-                            "⚠️ Colonne 'TECHNICAL NAME' absente ou vide sur tout l'onglet — "
-                            "le matching par classe ne fonctionnera pas, tout reposera sur la comparaison de texte seule."
-                        )
-                    else:
-                        st.warning(
-                            f"⚠️ Classes techniques renseignées sur seulement {fill_rate}% des lignes — "
-                            "le matching sera moins précis pour les lignes sans classe."
-                        )
-
-                    combined_wordings = list(diag_wordings)
-
-                    if include_generic:
-                        try:
-                            diag_generic_sheet, diag_generic_wordings = load_generic_wordings(excel_path)
-                            st.success(
-                                f"✅ Onglet générique trouvé : **{diag_generic_sheet}** — "
-                                f"{len(diag_generic_wordings)} wording(s) génériques seront ajoutés"
-                            )
-                            combined_wordings += diag_generic_wordings
-                        except ValueError as e:
-                            st.error(f"❌ Composants génériques : {e}")
-
-                    duplicates = find_duplicate_components(combined_wordings)
-                    if duplicates:
-                        details = "; ".join(f"**{comp}** ({', '.join(classes)})" for comp, classes in duplicates)
-                        st.warning(
-                            f"⚠️ Composant(s) présents avec plusieurs classes techniques différentes — "
-                            f"souvent un bloc dupliqué par erreur (copier-coller) : {details}"
-                        )
-
-                    language_mismatches = find_wrong_language_wordings(combined_wordings)
-                    if language_mismatches:
-                        preview = "; ".join(
-                            f"**{m['Component']}** ({m['detected_lang']}) : \"{str(m['Wording'])[:40]}...\""
-                            for m in language_mismatches[:5]
-                        )
-                        more = f" (+{len(language_mismatches) - 5} autre(s))" if len(language_mismatches) > 5 else ""
-                        st.warning(
-                            f"⚠️ {len(language_mismatches)} wording(s) semblent dans une langue différente "
-                            f"de la langue dominante (`{language_mismatches[0]['expected_lang']}`) — "
-                            f"probablement collés depuis une autre campagne/marché : {preview}{more}"
-                        )
-
-                    empty_wordings = find_empty_wordings(combined_wordings)
-                    if empty_wordings:
-                        details = "; ".join(f"**{w['Component']}** / {w['Element']}" for w in empty_wordings[:10])
-                        more = f" (+{len(empty_wordings) - 10} autre(s))" if len(empty_wordings) > 10 else ""
-                        st.warning(
-                            f"⚠️ {len(empty_wordings)} wording(s) vide(s) dans le référentiel : {details}{more}"
-                        )
-
-                    whitespace_issues = find_whitespace_anomalies(combined_wordings)
-                    if whitespace_issues:
-                        details = "; ".join(
-                            f"**{w['Component']}** / {w['Element']} ({w['issue']})" for w in whitespace_issues[:10]
-                        )
-                        more = f" (+{len(whitespace_issues) - 10} autre(s))" if len(whitespace_issues) > 10 else ""
-                        st.warning(
-                            f"⚠️ {len(whitespace_issues)} wording(s) avec une anomalie d'espacement "
-                            f"(souvent invisible dans Excel) : {details}{more}"
-                        )
-
-                    unbalanced_blocks = find_unbalanced_aem_blocks(combined_wordings)
-                    if unbalanced_blocks:
-                        details = "; ".join(f"**{w['Component']}** / {w['Element']}" for w in unbalanced_blocks[:10])
-                        more = f" (+{len(unbalanced_blocks) - 10} autre(s))" if len(unbalanced_blocks) > 10 else ""
-                        st.warning(
-                            f"⚠️ {len(unbalanced_blocks)} wording(s) avec un bloc conditionnel AEM mal formé "
-                            f"(balises `<%`/`%>` non équilibrées) : {details}{more}"
-                        )
-
-                    if html_path:
-                        try:
-                            diag_html_texts = load_and_extract_html_texts(html_path)
-                            unused_classes = find_unused_excel_classes(diag_html_texts, combined_wordings)
-                            if unused_classes:
-                                st.warning(
-                                    "⚠️ Classe(s) technique(s) déclarée(s) dans l'Excel mais introuvable(s) dans le HTML "
-                                    "(le nom a probablement divergé du vrai template) : "
-                                    + ", ".join(f"`{c}`" for c in unused_classes)
-                                )
-                        except (OSError, UnicodeDecodeError):
-                            pass  # le HTML sera re-analyse (avec message d'erreur clair) au clic sur Comparer
-
-                except ValueError as e:
-                    st.error(f"❌ {e}")
-
-            if test_url:
-                try:
-                    diag_sheet, _, diag_urls = load_excel_urls(excel_path, url_keyword)
-                    st.success(
-                        f"✅ Onglet UTM trouvé : **{diag_sheet}** — "
-                        f"{len(diag_urls)} URL(s) de référence pour cette séquence"
-                    )
-                except ValueError as e:
-                    st.error(f"❌ {e}")
+    with st.expander(diagnostic_label, expanded=has_diagnostic_issues):
+        for level, text in diagnostic_messages:
+            _DIAGNOSTIC_RENDERERS[level](text)
 
 # =========================
 # BOUTON COMPARER
@@ -1167,92 +1663,20 @@ if st.button(button_label):
             )
             st.stop()
 
-        wording_results_by_sequence = {}
-        url_results_by_sequence = {}
-        debug_buf = io.StringIO()
-
         with st.spinner("Analyse en cours..."):
-            with contextlib.redirect_stdout(debug_buf):
-                for f, w_seq, u_seq in combined_sequence_assignments:
-
-                    batch_html_path = _write_batch_html(f, session_id)
-
-                    print(f"\n{'=' * 20} {w_seq} / {u_seq} ({f.name}) {'=' * 20}")
-
-                    w_results = _run_batch_qa(
-                        batch_html_path, excel_path, w_seq, "wording", include_generic,
-                        label=f"Wording {w_seq} ({f.name})"
-                    )
-                    if w_results is not None:
-                        wording_results_by_sequence[w_seq] = w_results
-
-                    # include_generic ne s'applique qu'au wording (case a cocher
-                    # non affichee du tout en mode url, voir plus haut) - jamais
-                    # la valeur (potentiellement True) choisie pour la moitie
-                    # wording de ce meme run combine.
-                    u_results = _run_batch_qa(
-                        batch_html_path, excel_path, u_seq, "url", False,
-                        label=f"URL {u_seq} ({f.name})"
-                    )
-                    if u_results is not None:
-                        url_results_by_sequence[u_seq] = u_results
-
-        if wording_results_by_sequence or url_results_by_sequence:
-
-            today = datetime.now().strftime("%Y-%m-%d")
-
-            wording_report_path = (
-                save_consolidated_report(wording_results_by_sequence, mode="wording")
-                if wording_results_by_sequence else None
-            )
-            url_report_path = (
-                save_consolidated_report(url_results_by_sequence, mode="url")
-                if url_results_by_sequence else None
+            last_run, error_messages, debug_logs = _execute_combined_batch(
+                excel_path, combined_sequence_assignments, include_generic, session_id
             )
 
-            pairs = []
-            recap_rows = []
+        for message in error_messages:
+            st.error(message)
 
-            for f, w_seq, u_seq in combined_sequence_assignments:
-                w_rows = wording_results_by_sequence.get(w_seq, [])
-                u_rows = url_results_by_sequence.get(u_seq, [])
-
-                pairs.append({
-                    "file_name": f.name,
-                    "wording_sequence": w_seq,
-                    "wording_rows": w_rows,
-                    "url_sequence": u_seq,
-                    "url_rows": u_rows,
-                })
-
-                w_total, w_ok = len(w_rows), sum(1 for r in w_rows if r["Status"] == "OK")
-                u_total, u_ok = len(u_rows), sum(1 for r in u_rows if r["Status"] == "OK")
-
-                recap_rows.append({
-                    "Fichier": f.name,
-                    "Séquence Wording": w_seq,
-                    "Score Wording": round(w_ok / w_total * 100, 1) if w_total else 0,
-                    "Séquence URL": u_seq,
-                    "Score URL": round(u_ok / u_total * 100, 1) if u_total else 0,
-                })
-
-            st.session_state["last_run"] = {
-                "kind": "combined_batch",
-                "excel_path": excel_path,
-                "title": f"Comparaison terminée pour {len(pairs)} séquence(s) (Wording + URL)",
-                "pairs": pairs,
-                "recap_rows": recap_rows,
-                "wording_report_path": wording_report_path,
-                "wording_download_filename": f"qa_report_multi_wording_{today}.xlsx",
-                "url_report_path": url_report_path,
-                "url_download_filename": f"qa_report_multi_url_{today}.xlsx",
-                "debug_logs": debug_buf.getvalue(),
-            }
-
+        if last_run is not None:
+            st.session_state["last_run"] = last_run
         else:
             st.session_state.pop("last_run", None)
             with st.expander("🐛 Logs de debug (extraction HTML/Excel)"):
-                st.code(debug_buf.getvalue() or "Aucun log.", language=None)
+                st.code(debug_logs or "Aucun log.", language=None)
 
     elif batch_mode:
 
@@ -1263,60 +1687,20 @@ if st.button(button_label):
             )
             st.stop()
 
-        results_by_sequence = {}
-        debug_buf = io.StringIO()
-
         with st.spinner("Analyse en cours..."):
-            with contextlib.redirect_stdout(debug_buf):
-                for f, seq_name in sequence_assignments:
+            last_run, error_messages, debug_logs = _execute_batch(
+                excel_path, sequence_assignments, qa_mode, include_generic, session_id
+            )
 
-                    batch_html_path = _write_batch_html(f, session_id)
+        for message in error_messages:
+            st.error(message)
 
-                    print(f"\n{'=' * 20} {seq_name} ({f.name}) {'=' * 20}")
-
-                    seq_results = _run_batch_qa(
-                        batch_html_path, excel_path, seq_name, qa_mode, include_generic,
-                        label=f"{seq_name} ({f.name})"
-                    )
-                    if seq_results is not None:
-                        results_by_sequence[seq_name] = seq_results
-
-        if results_by_sequence:
-
-            report_path = save_consolidated_report(results_by_sequence, mode=qa_mode)
-
-            today = datetime.now().strftime("%Y-%m-%d")
-
-            recap_rows = []
-
-            for seq_name, rows in results_by_sequence.items():
-                seq_total = len(rows)
-                seq_ok = sum(1 for r in rows if r["Status"] == "OK")
-                recap_rows.append({
-                    "Séquence": seq_name,
-                    "Total": seq_total,
-                    "OK": seq_ok,
-                    "KO": seq_total - seq_ok,
-                    "Score": round(seq_ok / seq_total * 100, 1) if seq_total else 0
-                })
-
-            st.session_state["last_run"] = {
-                "kind": "batch",
-                "mode": qa_mode,
-                "excel_path": excel_path,
-                "title": f"Comparaison terminée pour {len(results_by_sequence)} séquence(s)",
-                "download_filename": f"qa_report_multi_{today}.xlsx",
-                "report_path": report_path,
-                "sheet_name": None,
-                "sequences": results_by_sequence,
-                "recap_rows": recap_rows,
-                "debug_logs": debug_buf.getvalue(),
-            }
-
+        if last_run is not None:
+            st.session_state["last_run"] = last_run
         else:
             st.session_state.pop("last_run", None)
             with st.expander("🐛 Logs de debug (extraction HTML/Excel)"):
-                st.code(debug_buf.getvalue() or "Aucun log.", language=None)
+                st.code(debug_logs or "Aucun log.", language=None)
 
     elif html_file and excel_file:
 
@@ -1325,96 +1709,20 @@ if st.button(button_label):
             st.stop()
 
         with st.spinner("Analyse en cours..."):
-            # appel backend
-            try:
-                if test_wording and test_url:
-                    # Wording + URL : les deux pipelines tournent sur le meme
-                    # HTML/Excel (un seul email peut etre teste sur les deux
-                    # aspects a la fois), avec chacun son propre onglet/sequence.
-                    (wording_results, wording_report_path, wording_sheet_name), wording_logs = run_with_debug_capture(
-                        run_qa,
-                        html_file=html_path,
-                        excel_file=excel_path,
-                        keyword=wording_keyword,
-                        mode="wording",
-                        include_generic=include_generic
-                    )
-                    (url_results, url_report_path, url_sheet_name), url_logs = run_with_debug_capture(
-                        run_qa,
-                        html_file=html_path,
-                        excel_file=excel_path,
-                        keyword=url_keyword,
-                        mode="url"
-                    )
+            last_run, error_message = _execute_single_or_combined_test(
+                html_path, excel_path, test_wording, test_url, wording_keyword, url_keyword, include_generic
+            )
 
-                    today = datetime.now().strftime("%Y-%m-%d")
-                    safe_wording_name = re.sub(r"[^\w\-]", "_", wording_sheet_name)
-                    safe_url_name = re.sub(r"[^\w\-]", "_", url_sheet_name)
-
-                    st.session_state["last_run"] = {
-                        "kind": "combined_test",
-                        "excel_path": excel_path,
-                        "title": "Comparaison terminée (Wording + URL)",
-                        "wording_results": wording_results,
-                        "wording_report_path": wording_report_path,
-                        "wording_sequence": wording_keyword,
-                        "wording_download_filename": f"qa_report_wording_{safe_wording_name}_{today}.xlsx",
-                        "url_results": url_results,
-                        "url_report_path": url_report_path,
-                        # onglet UTM plat (pas de decoupage en sequences, voir
-                        # url_ready) : url_keyword est vide, on reutilise la
-                        # sequence wording (meme sequence testee des deux cotes).
-                        "url_sequence": url_keyword or wording_keyword,
-                        "url_download_filename": f"qa_report_url_{safe_url_name}_{today}.xlsx",
-                        "debug_logs": f"--- Wording ---\n{wording_logs}\n\n--- URL ---\n{url_logs}",
-                    }
-
-                else:
-                    qa_mode = "wording" if test_wording else "url"
-                    keyword = wording_keyword if test_wording else url_keyword
-
-                    (results, report_path, sheet_name), debug_logs = run_with_debug_capture(
-                        run_qa,
-                        html_file=html_path,
-                        excel_file=excel_path,
-                        keyword=keyword,
-                        mode=qa_mode,
-                        include_generic=include_generic
-                    )
-
-                    today = datetime.now().strftime("%Y-%m-%d")
-
-                    safe_sheet_name = re.sub(r"[^\w\-]", "_", sheet_name)
-
-                    st.session_state["last_run"] = {
-                        "kind": "single",
-                        "mode": qa_mode,
-                        "excel_path": excel_path,
-                        "title": "Comparaison terminée",
-                        "download_filename": f"qa_report_{safe_sheet_name}_{today}.xlsx",
-                        "report_path": report_path,
-                        "results": results,
-                        "sheet_name": sheet_name,
-                        # keyword == la sequence choisie par l'utilisateur (onglet UTM
-                        # en mode url, ou onglet Excel en mode wording - dans ce cas
-                        # identique a sheet_name). En mode url, sheet_name est le nom
-                        # de l'onglet UTM (souvent unique, partage par toutes les
-                        # sequences) : ce n'est PAS la sequence, il ne faut pas s'en
-                        # servir pour le classement par sequence dans l'historique -
-                        # sauf si keyword est vide (onglet UTM plat, voir url_ready),
-                        # auquel cas c'est le seul nom disponible.
-                        "sequence": keyword or sheet_name,
-                        "debug_logs": debug_logs,
-                    }
-
-            except QA_RUN_READ_ERRORS as e:
-                st.session_state.pop("last_run", None)
-                st.error(
-                    "❌ Impossible d'analyser ces fichiers. Vérifiez qu'il s'agit bien d'un "
-                    "export HTML valide (\"view-source\" AEM ou HTML brut) et d'un classeur "
-                    "Excel non corrompu, puis réessayez."
-                )
-                st.caption(f"Détail technique : {e}")
+        if last_run is not None:
+            st.session_state["last_run"] = last_run
+        else:
+            st.session_state.pop("last_run", None)
+            st.error(
+                "❌ Impossible d'analyser ces fichiers. Vérifiez qu'il s'agit bien d'un "
+                "export HTML valide (\"view-source\" AEM ou HTML brut) et d'un classeur "
+                "Excel non corrompu, puis réessayez."
+            )
+            st.caption(f"Détail technique : {error_message}")
 
     else:
         st.session_state.pop("last_run", None)
@@ -1449,7 +1757,7 @@ if last_run:
         url_ok = sum(1 for r in last_run["url_results"] if r["Status"] == "OK")
         combined_total = wording_total + url_total
         combined_ok = wording_ok + url_ok
-        combined_score = round(combined_ok / combined_total * 100, 1) if combined_total else 0
+        combined_score = _score_pct(combined_ok, combined_total)
 
         st.metric("Score combiné (Wording + URL)", f"{combined_score}%")
 

@@ -11,9 +11,11 @@ tests :
   comme attendu, ce qu'un import direct ne peut pas verifier (home.py
   execute son UI au niveau module, hors de toute fonction).
 """
+import io
 import os
 import shutil
 import tempfile
+import threading
 
 import pandas as pd
 import pytest
@@ -63,6 +65,23 @@ class TestHighlightDifferences:
         excel, html_out = home.highlight_differences(None, None)
         assert excel == "" and html_out == ""
 
+    def test_html_special_characters_in_text_are_escaped(self):
+        # Le resultat est injecte comme innerHTML brut par le tableau AgGrid
+        # (voir _render_table) : un wording contenant litteralement des
+        # caracteres HTML (ex. un email fourni par un tiers) ne doit jamais
+        # s'executer comme du HTML/JS - regression test pour la faille XSS
+        # corrigee dans highlight_differences.
+        excel, html_out = home.highlight_differences("<script>alert(1)</script>", "safe text")
+        assert "<script>" not in excel
+        assert "&lt;script&gt;" in excel
+
+    def test_html_special_characters_survive_inside_a_diff_span(self):
+        excel, html_out = home.highlight_differences("Hello world", "Hello <b>there</b>")
+        assert "<b>there</b>" not in html_out
+        assert "&lt;b&gt;there&lt;/b&gt;" in html_out
+        # Le span de surlignage lui-meme reste un vrai tag HTML.
+        assert "<span style='font-weight:bold;color:#d62828'>" in html_out
+
 
 class TestPrepareDisplayDf:
     def test_wording_mode_marks_diff_only_on_ko_rows(self):
@@ -76,6 +95,41 @@ class TestPrepareDisplayDf:
         assert "_html_order" not in df_display.columns
         assert "<span" not in df_display.iloc[0]["HTML Wording"]
         assert "<span" in df_display.iloc[1]["HTML Wording"]
+
+    def test_ok_rows_are_html_escaped_even_without_a_diff(self):
+        # Les colonnes Excel/HTML Wording d'une ligne OK passent quand meme
+        # par le rendu innerHTML brut du tableau AgGrid (voir _render_table) :
+        # doivent etre echappees comme les lignes KO diffees, sinon un texte
+        # extrait contenant litteralement des caracteres HTML s'executerait
+        # comme du HTML/JS (regression test pour la faille XSS corrigee).
+        results = [
+            {"Component Name": "Header", "Status": "OK",
+             "Excel Wording": "<img src=x onerror=alert(1)>", "HTML Wording": "<img src=x onerror=alert(1)>",
+             "_html_order": 0},
+        ]
+        _, df_display = home._prepare_display_df(results, mode="wording")
+
+        assert "<img" not in df_display.iloc[0]["Excel Wording"]
+        assert "&lt;img" in df_display.iloc[0]["Excel Wording"]
+
+    def test_url_mode_ok_rows_are_html_escaped_even_without_a_diff(self):
+        # Meme regression test que test_ok_rows_are_html_escaped_even_without_a_diff
+        # (branche wording), applique a la branche url - les deux passent
+        # desormais par le meme helper _safe_html_cell plutot que par une
+        # copie du code d'echappement, ce test verifie qu'aucune des deux
+        # branches n'a ete oubliee.
+        results = [
+            {
+                "Component Name": "", "Source Section": "SEQ 1", "Expected Class": "audit-component-a",
+                "HTML Class": "audit-component-a", "Excel Wording": "<img src=x onerror=alert(1)>",
+                "HTML Wording": "<img src=x onerror=alert(1)>", "Status": "OK", "Error Type": "",
+                "Similarity": "100%", "Occurrences": 1, "_html_order": 0,
+            },
+        ]
+        _, df_display = home._prepare_display_df(results, mode="url")
+
+        assert "<img" not in df_display.iloc[0]["URL attendue (Excel)"]
+        assert "&lt;img" in df_display.iloc[0]["URL attendue (Excel)"]
 
     def test_url_mode_renames_columns_and_uses_char_level_diff(self):
         results = [
@@ -100,6 +154,129 @@ class TestPrepareDisplayDf:
         ]
         df, _ = home._prepare_display_df(results, mode="wording")
         assert list(df["Excel Wording"]) == ["A", "B"]
+
+
+class TestThreadSafeLineBuffer:
+    """_ThreadSafeLineBuffer est la cible de contextlib.redirect_stdout
+    pendant l'execution parallele du mode batch (voir _execute_batch/
+    _execute_combined_batch) : sans elle, les print() de plusieurs threads
+    peuvent entrelacer leurs ecritures (chaque print() fait 2 appels
+    .write() distincts) et fusionner deux messages en une seule ligne
+    illisible - regression test pour ce bug corrige."""
+
+    def test_single_thread_writes_pass_through_unchanged(self):
+        target = io.StringIO()
+        buf = home._ThreadSafeLineBuffer(target)
+
+        print("premiere ligne", file=buf)
+        print("deuxieme ligne", file=buf)
+
+        assert target.getvalue() == "premiere ligne\ndeuxieme ligne\n"
+
+    def test_concurrent_writes_from_multiple_threads_never_interleave_a_line(self):
+        target = io.StringIO()
+        buf = home._ThreadSafeLineBuffer(target)
+        n_threads = 8
+        n_lines = 50
+        barrier = threading.Barrier(n_threads)
+
+        def worker(thread_id):
+            barrier.wait()  # maximise les chances d'ecritures simultanees
+            for i in range(n_lines):
+                # Un print() ecrit le texte puis "\n" en 2 appels .write()
+                # distincts : c'est exactement entre ces deux appels qu'une
+                # ecriture non protegee d'un autre thread pourrait s'inserer.
+                print(f"thread-{thread_id}-line-{i}", file=buf)
+
+        threads = [threading.Thread(target=worker, args=(t,)) for t in range(n_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        lines = target.getvalue().splitlines()
+        assert len(lines) == n_threads * n_lines
+        # Chaque ligne doit rester exactement celle qu'un seul thread a
+        # ecrite - jamais un fragment de deux lignes fusionnees.
+        for line in lines:
+            assert line.startswith("thread-") and "-line-" in line
+            thread_part, line_part = line.split("-line-")
+            assert thread_part.startswith("thread-")
+            int(thread_part.removeprefix("thread-"))  # leve si corrompu
+            int(line_part)  # leve si corrompu
+
+
+class TestRunExcelDiagnostics:
+    """_run_excel_diagnostics calcule les messages du panneau "🔍 Diagnostic
+    du fichier Excel" sans appel st.* (voir home.py), pour que l'appelant
+    puisse decider d'ouvrir ou non le panneau automatiquement selon la
+    presence d'un warning/error - regression test pour ce comportement
+    (le panneau etait toujours deplie avant, quel que soit le contenu)."""
+
+    def test_clean_workbook_has_no_warning_or_error(self, tmp_path):
+        excel_file = make_wording_workbook(tmp_path, {
+            "SEQ 1": [["Header", "Title", "Hallo Welt", "audit-component-header"]]
+        })
+
+        messages = home._run_excel_diagnostics(
+            excel_file, html_path=None, test_wording=True, test_url=False,
+            wording_keyword="SEQ 1", url_keyword="", include_generic=False
+        )
+
+        levels = [level for level, _ in messages]
+        assert "warning" not in levels and "error" not in levels
+        assert "success" in levels
+
+    def test_missing_technical_name_produces_a_warning(self, tmp_path):
+        # Colonne TECHNICAL NAME vide (une seule espace : une cellule
+        # vraiment vide serait relue comme NaN par pandas, or Technical
+        # n'est converti en chaine par excel_loader que si pd.notna() - un
+        # NaN brut resterait tel quel et compterait a tort comme "rempli",
+        # bool(nan) etant True) sur toutes les lignes -> fill_rate == 0.
+        excel_file = make_wording_workbook(tmp_path, {
+            "SEQ 1": [["Header", "Title", "Hallo Welt", " "]]
+        })
+
+        messages = home._run_excel_diagnostics(
+            excel_file, html_path=None, test_wording=True, test_url=False,
+            wording_keyword="SEQ 1", url_keyword="", include_generic=False
+        )
+
+        levels = [level for level, _ in messages]
+        assert "warning" in levels
+        warning_text = next(text for level, text in messages if level == "warning")
+        assert "TECHNICAL NAME" in warning_text
+
+    def test_unreadable_excel_produces_a_single_error(self, tmp_path):
+        missing_path = str(tmp_path / "does_not_exist.xlsx")
+
+        messages = home._run_excel_diagnostics(
+            missing_path, html_path=None, test_wording=True, test_url=False,
+            wording_keyword="SEQ 1", url_keyword="", include_generic=False
+        )
+
+        assert messages == [("error", messages[0][1])]
+        assert "Impossible de lire le fichier Excel" in messages[0][1]
+
+    def test_expander_expands_only_when_a_warning_or_error_is_present(self, tmp_path):
+        # Verifie la decision d'ouverture automatique elle-meme (voir la
+        # section DIAGNOSTIC EXCEL de home.py), pas seulement les messages.
+        clean_excel = make_wording_workbook(tmp_path, {
+            "SEQ 1": [["Header", "Title", "Hallo Welt", "audit-component-header"]]
+        })
+        dirty_excel = make_wording_workbook(tmp_path, {
+            "SEQ 1": [["Header", "Title", "Hallo Welt", " "]]
+        }, filename="dirty.xlsx")
+
+        def has_issues(excel_file):
+            messages = home._run_excel_diagnostics(
+                excel_file, html_path=None, test_wording=True, test_url=False,
+                wording_keyword="SEQ 1", url_keyword="", include_generic=False
+            )
+            return any(level in ("warning", "error") for level, _ in messages)
+
+        assert has_issues(clean_excel) is False
+        assert has_issues(dirty_excel) is True
 
 
 class TestRunItems:
@@ -173,17 +350,23 @@ class TestArchiveKey:
         assert home._archive_key(last_run) == home._archive_key(dict(last_run))
 
 
+class _FakeUploadedFile:
+    """Simule l'objet retourne par st.file_uploader (attributs .name et
+    .getvalue() seulement, les deux seuls utilises par home.py) - partagee
+    entre TestWriteBatchHtml et les tests des fonctions _execute_* (mode
+    batch), aucun upload de fichier reel n'etant simulable via AppTest."""
+    def __init__(self, content: bytes, name: str = "email.html"):
+        self._content = content
+        self.name = name
+
+    def getvalue(self):
+        return self._content
+
+
 class TestWriteBatchHtml:
-    class _FakeUploadedFile:
-        def __init__(self, content: bytes):
-            self._content = content
-
-        def getvalue(self):
-            return self._content
-
     def test_writes_the_uploaded_bytes_under_a_session_scoped_path(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        path = home._write_batch_html(self._FakeUploadedFile(b"<html>hello</html>"), "sess123")
+        path = home._write_batch_html(_FakeUploadedFile(b"<html>hello</html>"), "sess123")
 
         assert path.startswith("temp/sess123_") and path.endswith(".html")
         assert open(path, "rb").read() == b"<html>hello</html>"
@@ -192,8 +375,8 @@ class TestWriteBatchHtml:
         # Mode batch : plusieurs fichiers HTML pour une meme session ne
         # doivent jamais s'ecraser les uns les autres pendant la boucle.
         monkeypatch.chdir(tmp_path)
-        path1 = home._write_batch_html(self._FakeUploadedFile(b"A"), "sess123")
-        path2 = home._write_batch_html(self._FakeUploadedFile(b"B"), "sess123")
+        path1 = home._write_batch_html(_FakeUploadedFile(b"A"), "sess123")
+        path2 = home._write_batch_html(_FakeUploadedFile(b"B"), "sess123")
         assert path1 != path2
 
 
@@ -212,20 +395,280 @@ class TestRunBatchQa:
     def test_returns_results_on_success(self, tmp_path):
         excel_file, html_file = self._make_excel_and_html(tmp_path)
 
-        results = home._run_batch_qa(html_file, excel_file, "SEQ 1", "wording", False, label="SEQ 1")
+        results, error_message = home._run_batch_qa(html_file, excel_file, "SEQ 1", "wording", False, label="SEQ 1")
 
         assert results is not None
         assert results[0]["Status"] == "OK"
+        assert error_message is None
 
-    def test_returns_none_and_shows_an_error_on_unreadable_html(self, tmp_path):
+    def test_returns_an_error_message_instead_of_raising_on_unreadable_html(self, tmp_path):
+        # Ne doit plus afficher l'erreur elle-meme (st.error) : cette fonction
+        # est appelee depuis un thread worker par _run_jobs_in_parallel, et
+        # Streamlit n'autorise pas les appels a son API hors du thread du
+        # script - c'est a l'appelant (thread principal) d'afficher
+        # error_message une fois tous les jobs du batch termines.
         excel_file, html_file = self._make_excel_and_html(tmp_path)
         # Ecrase le HTML valide par une sequence non-UTF8 (voir QA_RUN_READ_ERRORS).
         with open(html_file, "wb") as f:
             f.write("café".encode("latin-1"))
 
-        results = home._run_batch_qa(html_file, excel_file, "SEQ 1", "wording", False, label="SEQ 1")
+        results, error_message = home._run_batch_qa(html_file, excel_file, "SEQ 1", "wording", False, label="SEQ 1")
 
         assert results is None
+        assert "SEQ 1" in error_message
+
+
+class TestRunJobsInParallel:
+    def test_empty_job_list_returns_empty_list(self):
+        assert home._run_jobs_in_parallel([]) == []
+
+    def test_runs_every_job_and_preserves_order(self):
+        results = home._run_jobs_in_parallel([lambda: 1, lambda: 2, lambda: 3])
+        assert results == [1, 2, 3]
+
+    def test_an_unexpected_exception_from_a_job_propagates(self):
+        # _run_batch_qa (le seul appelant reel) n'est jamais cense lever -
+        # il attrape lui-meme QA_RUN_READ_ERRORS et retourne un message
+        # d'erreur (voir TestRunBatchQa) - une exception qui remonte jusqu'ici
+        # est donc un bug de programmation, pas une erreur utilisateur a
+        # avaler silencieusement.
+        def _boom():
+            raise ValueError("boom")
+
+        with pytest.raises(ValueError):
+            home._run_jobs_in_parallel([lambda: 1, _boom, lambda: 3])
+
+
+@pytest.fixture
+def isolated_report_dir(tmp_path, monkeypatch):
+    """
+    _execute_batch/_execute_combined_batch/_execute_single_or_combined_test
+    ecrivent un vrai rapport Excel via qa.report (save_report/
+    save_consolidated_report), qui appelle lui-meme record_run() en mode
+    "brut" (voir qa.report, qa.history.record_run) - sans isolation, ces
+    tests ecriraient dans le vrai output/ et le vrai output/history.db du
+    projet (meme risque documente par TestDoArchive.isolated_archive_dirs
+    plus bas, pour le chemin d'archivage classe plutot que ce chemin "brut").
+    monkeypatch.chdir isole aussi les fichiers temporaires de
+    _write_batch_html (mode batch), qui utilise toujours un chemin relatif
+    "temp/".
+    """
+    import qa.report as report_module
+    from qa.history import record_run as real_record_run
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(report_module, "OUTPUT_DIR", str(tmp_path / "output"))
+    history_path = str(tmp_path / "history.db")
+    monkeypatch.setattr(
+        report_module, "record_run",
+        lambda *a, path=history_path, **k: real_record_run(*a, path=path, **k)
+    )
+
+
+class TestExecuteSingleOrCombinedTest:
+    """_execute_single_or_combined_test orchestre run_qa (mode simple, ou
+    Wording+URL sur le meme HTML) et construit le dict last_run - jusqu'ici
+    la seule facon de l'exercer etait un upload de fichier reel dans le
+    navigateur (non simulable par AppTest, voir TestHomeAppSmoke), ce qui
+    laissait tout ce chemin hors de la couverture de tests."""
+
+    def _make_wording_files(self, tmp_path, wording="Hallo", html_text="Hallo", seq="SEQ 1"):
+        excel_file = make_wording_workbook(tmp_path, {
+            seq: [["Header", "Title", wording, "audit-component-header"]],
+        })
+        html_file = tmp_path / "email.html"
+        html_file.write_text(
+            f'<div class="text-contribution"><p class="audit-component-header">{html_text}</p></div>',
+            encoding="utf-8",
+        )
+        return str(html_file), excel_file
+
+    def _make_combined_files(self, tmp_path):
+        """Classeur avec un onglet wording ET un onglet UTM (une seule
+        section "SEQ 1", label "audit-component-cta" - meme convention que
+        tests/test_engine.py._make_utm_workbook) + un HTML qui satisfait les
+        deux a la fois, pour exercer la branche test_wording ET test_url."""
+        path = tmp_path / "combined.xlsx"
+        wording_rows = [
+            ["", "", "", ""],
+            ["COMPONENT NAME", "ELEMENT", "TRANSLATION", "TECHNICAL NAME"],
+            ["Header", "Title", "Hallo Welt", "audit-component-header"],
+        ]
+        utm_rows = [
+            [None, "!! CHECK !!", None, None, None, None, None, None],
+            [None, "URL", "SOURCE", "MEDIUM", "CAMPAIGN", "SEQUENCE", "VERSION", "<< TRACKED URL >>"],
+            [None, "Insert url here", "Mandatory", "Mandatory", "TRIGGER", "SEQ", "VERSION", None],
+            [None, "SEQ 1", None, None, None, None, None, None],
+            ["audit-component-cta", "https://example.com/", "trigger", "email", "revamp_inac", "seq1", "",
+             "https://example.com/shop"],
+        ]
+        with pd.ExcelWriter(path) as writer:
+            pd.DataFrame(wording_rows).to_excel(writer, sheet_name="SEQ 1", index=False, header=False)
+            pd.DataFrame(utm_rows).to_excel(writer, sheet_name="UTM TRIGGER", index=False, header=False)
+
+        html_file = tmp_path / "email.html"
+        html_file.write_text(
+            '<div class="text-contribution"><p class="audit-component-header">Hallo Welt</p></div>'
+            '<div class="audit-component-cta"><a href="https://example.com/shop">Shop</a></div>',
+            encoding="utf-8",
+        )
+        return str(html_file), str(path)
+
+    def test_wording_only_returns_a_single_last_run(self, tmp_path, isolated_report_dir):
+        html_file, excel_file = self._make_wording_files(tmp_path)
+
+        last_run, error = home._execute_single_or_combined_test(
+            html_file, excel_file, test_wording=True, test_url=False,
+            wording_keyword="SEQ 1", url_keyword="", include_generic=False,
+        )
+
+        assert error is None
+        assert last_run["kind"] == "single"
+        assert last_run["mode"] == "wording"
+        assert last_run["sequence"] == "SEQ 1"
+        assert last_run["results"][0]["Status"] == "OK"
+        assert last_run["download_filename"].startswith("qa_report_SEQ_1_")
+
+    def test_unreadable_html_returns_no_last_run_and_an_error_message(self, tmp_path, isolated_report_dir):
+        html_file, excel_file = self._make_wording_files(tmp_path)
+        with open(html_file, "wb") as f:
+            f.write("café".encode("latin-1"))
+
+        last_run, error = home._execute_single_or_combined_test(
+            html_file, excel_file, test_wording=True, test_url=False,
+            wording_keyword="SEQ 1", url_keyword="", include_generic=False,
+        )
+
+        assert last_run is None
+        assert error is not None
+
+    def test_wording_and_url_combined_returns_a_combined_test_last_run(self, tmp_path, isolated_report_dir):
+        html_file, excel_file = self._make_combined_files(tmp_path)
+
+        last_run, error = home._execute_single_or_combined_test(
+            html_file, excel_file, test_wording=True, test_url=True,
+            wording_keyword="SEQ 1", url_keyword="SEQ 1", include_generic=False,
+        )
+
+        assert error is None
+        assert last_run["kind"] == "combined_test"
+        assert last_run["wording_results"][0]["Status"] == "OK"
+        assert last_run["url_results"][0]["Status"] == "OK"
+        assert "--- Wording ---" in last_run["debug_logs"] and "--- URL ---" in last_run["debug_logs"]
+
+
+class TestExecuteBatch:
+    """_execute_batch orchestre le mode multi-sequences a un seul type de
+    test (Wording OU URL) : ecriture des fichiers temporaires, jobs
+    paralleles (voir TestRunJobsInParallel), rapport consolide."""
+
+    def _make_files(self, tmp_path, sequences=("SEQ 1", "SEQ 2")):
+        excel_file = make_wording_workbook(tmp_path, {
+            seq: [["Header", "Title", "Hallo", "audit-component-header"]] for seq in sequences
+        })
+        assignments = []
+        for i, seq in enumerate(sequences):
+            content = '<div class="text-contribution"><p class="audit-component-header">Hallo</p></div>'
+            assignments.append((_FakeUploadedFile(content.encode("utf-8"), name=f"email_{i}.html"), seq))
+        return excel_file, assignments
+
+    def test_all_sequences_succeed(self, tmp_path, isolated_report_dir):
+        excel_file, assignments = self._make_files(tmp_path)
+
+        last_run, errors, debug_logs = home._execute_batch(
+            excel_file, assignments, "wording", False, "sess1"
+        )
+
+        assert errors == []
+        assert last_run["kind"] == "batch"
+        assert set(last_run["sequences"].keys()) == {"SEQ 1", "SEQ 2"}
+        assert all(r["Status"] == "OK" for rows in last_run["sequences"].values() for r in rows)
+        assert len(last_run["recap_rows"]) == 2
+        # _execute_batch capture desormais ses logs via run_with_debug_capture
+        # (voir _build_and_run_batch_jobs) plutot que sa propre redirection -
+        # verifie que l'entete par sequence (print() dans la boucle de
+        # construction des jobs) est toujours bien remontee dans debug_logs.
+        assert "SEQ 1" in last_run["debug_logs"] and "SEQ 2" in last_run["debug_logs"]
+
+    def test_one_failing_file_does_not_block_the_others(self, tmp_path, isolated_report_dir):
+        excel_file, assignments = self._make_files(tmp_path)
+        # Le fichier de "SEQ 2" est illisible (non-UTF8) - "SEQ 1" doit quand
+        # meme aboutir, avec un message d'erreur pour l'autre.
+        bad_file = _FakeUploadedFile("café".encode("latin-1"), name="email_1.html")
+        assignments = [assignments[0], (bad_file, "SEQ 2")]
+
+        last_run, errors, debug_logs = home._execute_batch(
+            excel_file, assignments, "wording", False, "sess1"
+        )
+
+        assert len(errors) == 1
+        assert last_run["kind"] == "batch"
+        assert set(last_run["sequences"].keys()) == {"SEQ 1"}
+
+    def test_every_file_failing_returns_no_last_run(self, tmp_path, isolated_report_dir):
+        excel_file, assignments = self._make_files(tmp_path)
+        bad_assignments = [
+            (_FakeUploadedFile("café".encode("latin-1"), name=f.name), seq) for f, seq in assignments
+        ]
+
+        last_run, errors, debug_logs = home._execute_batch(
+            excel_file, bad_assignments, "wording", False, "sess1"
+        )
+
+        assert last_run is None
+        assert len(errors) == 2
+
+
+class TestExecuteCombinedBatch:
+    """_execute_combined_batch orchestre le mode multi-sequences "Wording +
+    URL" : 2 jobs (wording + url) par fichier, voir _execute_batch pour le
+    cas a un seul type de test."""
+
+    def _make_files(self, tmp_path):
+        path = tmp_path / "combined.xlsx"
+        wording_rows = [
+            ["", "", "", ""],
+            ["COMPONENT NAME", "ELEMENT", "TRANSLATION", "TECHNICAL NAME"],
+            ["Header", "Title", "Hallo Welt", "audit-component-header"],
+        ]
+        utm_rows = [
+            [None, "!! CHECK !!", None, None, None, None, None, None],
+            [None, "URL", "SOURCE", "MEDIUM", "CAMPAIGN", "SEQUENCE", "VERSION", "<< TRACKED URL >>"],
+            [None, "Insert url here", "Mandatory", "Mandatory", "TRIGGER", "SEQ", "VERSION", None],
+            [None, "SEQ 1", None, None, None, None, None, None],
+            ["audit-component-cta", "https://example.com/", "trigger", "email", "revamp_inac", "seq1", "",
+             "https://example.com/shop"],
+        ]
+        with pd.ExcelWriter(path) as writer:
+            pd.DataFrame(wording_rows).to_excel(writer, sheet_name="SEQ 1", index=False, header=False)
+            pd.DataFrame(utm_rows).to_excel(writer, sheet_name="UTM TRIGGER", index=False, header=False)
+
+        html_content = (
+            '<div class="text-contribution"><p class="audit-component-header">Hallo Welt</p></div>'
+            '<div class="audit-component-cta"><a href="https://example.com/shop">Shop</a></div>'
+        )
+        uploaded_file = _FakeUploadedFile(html_content.encode("utf-8"), name="email.html")
+        return str(path), [(uploaded_file, "SEQ 1", "SEQ 1")]
+
+    def test_wording_and_url_both_succeed(self, tmp_path, isolated_report_dir):
+        excel_file, assignments = self._make_files(tmp_path)
+
+        last_run, errors, debug_logs = home._execute_combined_batch(
+            excel_file, assignments, False, "sess1"
+        )
+
+        assert errors == []
+        assert last_run["kind"] == "combined_batch"
+        assert len(last_run["pairs"]) == 1
+        assert last_run["pairs"][0]["wording_rows"][0]["Status"] == "OK"
+        assert last_run["pairs"][0]["url_rows"][0]["Status"] == "OK"
+        assert last_run["recap_rows"][0]["Score Wording"] == 100.0
+        assert last_run["recap_rows"][0]["Score URL"] == 100.0
+        # Meme verification que TestExecuteBatch : la capture de debug passe
+        # desormais par run_with_debug_capture (voir
+        # _build_and_run_combined_batch_jobs) plutot qu'une redirection
+        # dupliquee dans cette fonction.
+        assert "SEQ 1" in last_run["debug_logs"]
 
 
 class TestDoArchive:
@@ -418,6 +861,35 @@ def _make_combined_excel(tmp_path, filename="combined.xlsx"):
     return str(path)
 
 
+class TestSendTeamsNotificationSafely:
+    """_send_teams_notification_safely est le point d'entree du thread
+    daemon fire-and-forget lance par _do_archive (voir plus haut) :
+    send_teams_notification() n'attrape que requests.RequestException, donc
+    toute autre exception (bug de construction du message, regression
+    future...) doit etre avalee ICI plutot que de disparaitre silencieuse-
+    ment dans le thread - regression test pour ce point corrige."""
+
+    def test_swallows_any_exception_raised_by_the_notification_call(self, monkeypatch, capsys):
+        def _boom(subject, message):
+            raise TypeError("payload inattendu")
+
+        monkeypatch.setattr(home, "send_teams_notification", _boom)
+
+        home._send_teams_notification_safely("QA Germany / Revamp", "resume")  # ne doit pas lever
+
+        captured = capsys.readouterr()
+        assert "Notification Teams" in captured.out
+        assert "QA Germany / Revamp" in captured.out
+
+    def test_still_calls_the_real_notification_function_on_success(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(home, "send_teams_notification", lambda subject, message: calls.append((subject, message)))
+
+        home._send_teams_notification_safely("QA Germany / Revamp", "resume")
+
+        assert calls == [("QA Germany / Revamp", "resume")]
+
+
 class TestEnsureArchived:
     """
     ensure_archived decide entre archivage automatique (pays/trigger
@@ -519,3 +991,16 @@ class TestHomeAppSmoke:
         at.button[0].click().run()
         assert not at.exception
         assert any("uploader le HTML et l'Excel" in e.value for e in at.error)
+
+    def test_batch_mode_and_generic_checkboxes_live_in_a_collapsed_expander(self, tmp_path, monkeypatch):
+        # Regression test pour la reduction de la surcharge de widgets
+        # visibles par defaut (voir home.py) : ces deux reglages ne
+        # concernent qu'une minorite de campagnes, ils ne doivent plus etre
+        # deplies par defaut sur la page principale.
+        monkeypatch.chdir(tmp_path)
+        at = AppTest.from_file(HOME_PATH)
+        at.run()
+        assert not at.exception
+        advanced = next(e for e in at.expander if e.label == "⚙️ Options avancées")
+        assert advanced.proto.expanded is False
+        assert len(advanced.checkbox) == 2

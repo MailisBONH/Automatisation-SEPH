@@ -25,6 +25,7 @@ from qa.history import (
     export_history_excel,
     load_classified_history,
     load_sequence_history,
+    migrate_legacy_jsonl_history,
     rewrite_classification,
 )
 from qa.report_diff import diff_uploaded_reports, load_last_two_reports_diff
@@ -41,6 +42,18 @@ if "history_nav" not in st.session_state:
 
 nav = st.session_state["history_nav"]
 
+# Migration unique et idempotente de l'ancien historique JSONL vers SQLite
+# (voir qa.history.migrate_legacy_jsonl_history) - AVANT toute lecture de
+# l'historique sur cette page (build_history_tree ci-dessous, et
+# migrate_legacy_loyalty_sequences qui en appelle deja un), sinon ces
+# lectures verraient une base neuve vide plutot que l'historique existant.
+if migrate_legacy_jsonl_history():
+    st.info(
+        "🗄️ L'historique a été migré de l'ancien format (fichier JSONL) vers une base SQLite "
+        "plus robuste. Aucune donnée perdue : l'ancien fichier est conservé sur disque "
+        "(suffixe `.migrated`)."
+    )
+
 # Reprise retroactive, silencieuse et idempotente : toute sequence encore
 # archivee sous un ancien nom qualifie LOYAL/NON LOYAL/FID/NON FID (avant
 # l'unification du nommage, voir qa.classification.normalize_sequence_name)
@@ -52,7 +65,13 @@ if migrated:
         "fusionnée(s) automatiquement vers leur nom unifié."
     )
 
-tree = build_history_tree()
+# Une seule lecture de la base pour les deux usages ci-dessous (l'arbre de
+# navigation ET la liste a plat pour les statistiques d'erreurs) : sans
+# `entries=`, build_history_tree relirait une deuxieme fois toute la table
+# en interne via load_classified_history, a chaque interaction avec un
+# widget de la page (Streamlit reexecute tout le script a chaque rerun).
+all_classified_entries = load_classified_history()
+tree = build_history_tree(entries=all_classified_entries)
 
 if not tree:
     st.info(
@@ -61,8 +80,6 @@ if not tree:
         "n'a pas pu être détecté)."
     )
     st.stop()
-
-all_classified_entries = load_classified_history()
 
 
 # =========================
@@ -93,6 +110,7 @@ def _overview_rows(tree):
                     "Type": MODE_LABELS.get(latest.get("mode"), latest.get("mode")),
                     "% OK": latest["score"],
                     "Nb tests": len(entries),
+                    "Testé par": latest.get("tested_by") or "—",
                 })
     return rows
 
@@ -396,6 +414,13 @@ else:
     if entries:
         history_df = pd.DataFrame(entries)
         history_df["Type"] = history_df["mode"].map(MODE_LABELS).fillna(history_df["mode"])
+        # tested_by n'existe comme colonne que si au moins une entree l'a
+        # (voir qa.history.record_run, colonne absente pour les runs
+        # archives avant l'ajout de cette fonctionnalite) - la creer sinon,
+        # pour que la selection de colonnes ci-dessous ne leve jamais.
+        if "tested_by" not in history_df.columns:
+            history_df["tested_by"] = None
+        history_df["tested_by"] = history_df["tested_by"].fillna("—")
 
         fig = px.line(
             history_df,
@@ -410,8 +435,8 @@ else:
         st.plotly_chart(fig, use_container_width=True)
 
         st.dataframe(
-            history_df[["timestamp", "Type", "total", "ok", "ko", "score"]]
-                .rename(columns={"score": "% OK"})
+            history_df[["timestamp", "Type", "total", "ok", "ko", "score", "tested_by"]]
+                .rename(columns={"score": "% OK", "tested_by": "Testé par"})
                 .iloc[::-1],
             use_container_width=True,
             hide_index=True
