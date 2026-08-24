@@ -52,6 +52,13 @@ _FAILED = object()
 # trigger_name en base pour eviter d'avoir a le quoter partout, mais la clef
 # exposee par l'API Python reste "trigger" (voir _row_to_entry) - purement
 # un detail de stockage interne, invisible de tous les appelants existants.
+# Index sur (country, trigger_name, sequence) : load_sequence_history/
+# find_regression filtrent desormais directement en SQL sur ce triplet
+# (voir plus bas) plutot que de charger toute la table puis filtrer en
+# Python - indispensable pour que ce filtre reste rapide sur un historique
+# de plusieurs annees couvrant de nombreux pays/triggers/sequences (voir
+# README). Index sur `sheet` pour la meme raison cote load_history(sheet=...)
+# (mini-graphique par onglet affiche apres chaque comparaison, home.py).
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -67,7 +74,9 @@ CREATE TABLE IF NOT EXISTS runs (
     sequence TEXT,
     error_types TEXT,
     tested_by TEXT
-)
+);
+CREATE INDEX IF NOT EXISTS idx_runs_sheet ON runs(sheet);
+CREATE INDEX IF NOT EXISTS idx_runs_classification ON runs(country, trigger_name, sequence);
 """
 
 
@@ -113,7 +122,7 @@ def _with_connection(path: str, fn, default=None, mutates: bool = False):
     with _LOCK:
         try:
             with contextlib.closing(_connect(path)) as conn:
-                conn.execute(_SCHEMA)
+                conn.executescript(_SCHEMA)
                 result = fn(conn)
         except (sqlite3.Error, OSError):
             return default
@@ -209,7 +218,7 @@ def migrate_legacy_jsonl_history(legacy_path: str = LEGACY_HISTORY_PATH, path: s
         entries = _load_legacy_jsonl(legacy_path)
 
         with contextlib.closing(_connect(path)) as conn:
-            conn.execute(_SCHEMA)
+            conn.executescript(_SCHEMA)
             for entry in entries:
                 error_types = entry.get("error_types")
                 conn.execute(
@@ -279,29 +288,22 @@ def record_run(sheet: str, mode: str, total: int, ok: int, ko: int, score: float
         prune_history(path=path)
 
 
-def load_history(sheet: str = None, path: str = HISTORY_PATH) -> list:
-    """Retourne les runs enregistres (tous, ou filtres sur sheet), dans
-    l'ordre chronologique (ordre d'insertion). Liste vide si la base
-    n'existe pas encore.
-
-    Si elle existe mais est illisible/corrompue (ex. synchronisation
+def _select_entries(path: str, where_sql: str, params: tuple) -> list:
+    """Execute `SELECT * FROM runs {where_sql} ORDER BY id` et retourne les
+    entrees resultantes (voir _row_to_entry), avec repli sur la sauvegarde
+    .bak si le fichier principal est illisible/corrompu (ex. synchronisation
     OneDrive interrompue en plein ecriture - ce projet vit dans un dossier
-    synchronise), retombe sur la derniere sauvegarde .bak connue-saine
-    (rafraichie apres chaque ecriture reussie, voir _refresh_backup) plutot
-    que de traiter tout l'historique comme perdu d'un coup : seule la perte
-    simultanee du fichier principal ET de sa sauvegarde retourne une liste
-    vide (best-effort, comme le reste de ce module : ne doit jamais faire
-    planter l'app)."""
+    synchronise) : seule la perte simultanee du fichier principal ET de sa
+    sauvegarde retourne une liste vide (best-effort, comme le reste de ce
+    module : ne doit jamais faire planter l'app). `where_sql` est toujours
+    l'une des quelques clauses litterales ecrites dans ce module (jamais
+    construite depuis une entree utilisateur) - seuls les `params` portent
+    des valeurs variables, liees via des `?` parametres."""
     if not os.path.exists(path):
         return []
 
     def _select(conn):
-        if sheet is None:
-            rows = conn.execute("SELECT * FROM runs ORDER BY id").fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT * FROM runs WHERE sheet = ? ORDER BY id", (sheet,)
-            ).fetchall()
+        rows = conn.execute(f"SELECT * FROM runs {where_sql} ORDER BY id", params).fetchall()
         return [_row_to_entry(row) for row in rows]
 
     entries = _with_connection(path, _select)
@@ -317,13 +319,23 @@ def load_history(sheet: str = None, path: str = HISTORY_PATH) -> list:
     return []
 
 
+def load_history(sheet: str = None, path: str = HISTORY_PATH) -> list:
+    """Retourne les runs enregistres (tous, ou filtres sur sheet), dans
+    l'ordre chronologique (ordre d'insertion). Liste vide si la base
+    n'existe pas encore ou est illisible/corrompue (voir _select_entries)."""
+    if sheet is None:
+        return _select_entries(path, "", ())
+    return _select_entries(path, "WHERE sheet = ?", (sheet,))
+
+
 def load_classified_history(path: str = HISTORY_PATH) -> list:
     """Runs archives manuellement (voir record_run) : ceux qui portent un
-    pays + trigger + sequence."""
-    return [
-        e for e in load_history(path=path)
-        if e.get("country") and e.get("trigger") and e.get("sequence")
-    ]
+    pays + trigger + sequence. Filtre en SQL (indexe, voir _SCHEMA) plutot
+    que de charger toute la table (y compris les runs "bruts" jamais
+    affiches sur la page Historique) puis filtrer en Python."""
+    return _select_entries(
+        path, "WHERE country IS NOT NULL AND trigger_name IS NOT NULL AND sequence IS NOT NULL", ()
+    )
 
 
 def build_history_tree(path: str = HISTORY_PATH, entries: list = None) -> dict:
@@ -348,11 +360,17 @@ def build_history_tree(path: str = HISTORY_PATH, entries: list = None) -> dict:
 
 
 def load_sequence_history(country: str, trigger: str, sequence: str, path: str = HISTORY_PATH) -> list:
-    """Historique (tous les runs archives) d'une sequence precise, tries chronologiquement."""
-    return [
-        e for e in load_classified_history(path)
-        if e["country"] == country and e["trigger"] == trigger and e["sequence"] == sequence
-    ]
+    """Historique (tous les runs archives) d'une sequence precise, tries
+    chronologiquement. Filtre directement en SQL (indexe sur
+    (country, trigger_name, sequence), voir _SCHEMA) plutot que de charger
+    tout l'historique classe puis filtrer en Python - decisif ici puisque
+    find_regression appelle cette fonction pour CHAQUE item archive (voir
+    home._do_archive), potentiellement plusieurs fois par clic sur
+    Comparer (mode combine/batch), sur un historique qui peut couvrir
+    plusieurs annees et de nombreux pays/triggers/sequences (voir README)."""
+    return _select_entries(
+        path, "WHERE country = ? AND trigger_name = ? AND sequence = ?", (country, trigger, sequence)
+    )
 
 
 def aggregate_error_types(entries: list) -> dict:

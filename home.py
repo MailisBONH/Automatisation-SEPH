@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import functools
 import getpass
 import html
 import os
@@ -35,7 +36,7 @@ from qa.excel_loader import (
 )
 from qa.history import find_regression, migrate_legacy_jsonl_history, record_run
 from qa.html_extraction import load_and_extract_html_texts
-from qa.notifications import send_teams_notification
+from qa.notifications import escape_teams_markdown, send_teams_notification
 from qa.report import URL_HEADER_LABELS, save_consolidated_report, save_report, sort_results_by_html_order
 
 from datetime import datetime
@@ -992,7 +993,9 @@ def _do_archive(last_run, country, trigger):
         if regression:
             regressions.append({"sequence": sequence, "mode": item["mode"], **regression})
 
-        summary_lines.append(f"- **{item['sequence']}** ({item['mode']}) : {score}% ({ok}/{total} OK)")
+        summary_lines.append(
+            f"- **{escape_teams_markdown(item['sequence'])}** ({item['mode']}) : {score}% ({ok}/{total} OK)"
+        )
 
         report_path = item["report_path"] or save_report(rows, item["sequence"], mode=item["mode"])
         archive_report(report_path, country, trigger, sequence, mode=item["mode"])
@@ -1009,7 +1012,7 @@ def _do_archive(last_run, country, trigger):
             if combined_regression:
                 regressions.append({"sequence": sequence, "mode": "combined", **combined_regression})
             summary_lines.append(
-                f"- **{sequence}** (combined) : {combined_stats['score']}% "
+                f"- **{escape_teams_markdown(sequence)}** (combined) : {combined_stats['score']}% "
                 f"({combined_stats['ok']}/{combined_stats['total']} OK)"
             )
             record_run(
@@ -1026,8 +1029,8 @@ def _do_archive(last_run, country, trigger):
         notification_lines.append("⚠️ **Régression(s) détectée(s) :**")
         for r in regressions:
             notification_lines.append(
-                f"- {r['sequence']} ({r['mode']}) : {r['previous_score']}% → {r['current_score']}% "
-                f"({r['delta']:+.1f} pts)"
+                f"- {escape_teams_markdown(r['sequence'])} ({r['mode']}) : "
+                f"{r['previous_score']}% → {r['current_score']}% ({r['delta']:+.1f} pts)"
             )
     # Fire-and-forget : send_teams_notification() reste synchrone et
     # unitairement testable (voir tests/test_notifications.py), mais
@@ -1037,7 +1040,10 @@ def _do_archive(last_run, country, trigger):
     # fonctionnalite de confort, jamais critique pour la QA elle-meme.
     threading.Thread(
         target=_send_teams_notification_safely,
-        args=(f"QA {country} / {trigger}", "\n".join(notification_lines)),
+        args=(
+            f"QA {escape_teams_markdown(country)} / {escape_teams_markdown(trigger)}",
+            "\n".join(notification_lines),
+        ),
         daemon=True,
     ).start()
 
@@ -1276,6 +1282,45 @@ def _run_excel_diagnostics(excel_path, html_path, test_wording, test_url,
             messages.append(("error", f"❌ {e}"))
 
     return messages
+
+
+@functools.lru_cache(maxsize=8)
+def _cached_excel_diagnostics(excel_path, excel_mtime_ns, excel_size,
+                               html_path, html_mtime_ns, html_size,
+                               test_wording, test_url, wording_keyword, url_keyword, include_generic):
+    """Cache de _run_excel_diagnostics par (chemin, mtime_ns, taille) de
+    chaque fichier - meme principe que qa.excel_loader._cached_excel_file.
+    Sans ce cache, le diagnostic (qui reparse tout le classeur onglet par
+    onglet - et le HTML si deja uploade -, plus un appel
+    langdetect.detect() par wording, voir find_wrong_language_wordings)
+    tournerait a chaque interaction avec un widget de la page, pas
+    seulement au clic sur Comparer : Streamlit reexecute tout le script a
+    chaque rerun. mtime_ns+taille (pas seulement le chemin) pour ne jamais
+    servir un diagnostic perime si l'utilisateur reuploade un fichier
+    different sous le meme chemin temporaire (voir home.py, un chemin fixe
+    par session)."""
+    return _run_excel_diagnostics(
+        excel_path, html_path, test_wording, test_url, wording_keyword, url_keyword, include_generic
+    )
+
+
+def _run_excel_diagnostics_cached(excel_path, html_path, test_wording, test_url,
+                                   wording_keyword, url_keyword, include_generic):
+    """Point d'entree cache de _run_excel_diagnostics (voir
+    _cached_excel_diagnostics) : calcule la cle de cache (stat() de chaque
+    fichier) puis delegue."""
+    excel_stat = os.stat(excel_path)
+    if html_path:
+        html_stat = os.stat(html_path)
+        html_mtime_ns, html_size = html_stat.st_mtime_ns, html_stat.st_size
+    else:
+        html_mtime_ns, html_size = None, None
+
+    return _cached_excel_diagnostics(
+        excel_path, excel_stat.st_mtime_ns, excel_stat.st_size,
+        html_path, html_mtime_ns, html_size,
+        test_wording, test_url, wording_keyword, url_keyword, include_generic,
+    )
 
 
 st.set_page_config(page_title="QA Email Tool", layout="wide")
@@ -1632,7 +1677,7 @@ if excel_path and not batch_mode and missing_keyword:
     st.info("👆 Sélectionnez une campagne/séquence ci-dessus pour afficher le diagnostic.")
 
 if excel_path and not batch_mode and not missing_keyword:
-    diagnostic_messages = _run_excel_diagnostics(
+    diagnostic_messages = _run_excel_diagnostics_cached(
         excel_path, html_path, test_wording, test_url, wording_keyword, url_keyword, include_generic
     )
     # Replie par defaut, sauf si le diagnostic a quelque chose a signaler

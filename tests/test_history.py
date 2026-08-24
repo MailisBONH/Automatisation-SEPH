@@ -2,7 +2,6 @@ import contextlib
 import io
 import json
 import os
-import sqlite3
 import threading
 import time
 from datetime import datetime
@@ -34,8 +33,8 @@ def _seed_raw_rows(path, rows):
     prune_history, qui doivent controler precisement le timestamp de chaque
     entree. rows: liste de dicts avec au moins timestamp/sheet/mode/total/
     ok/ko/score, et optionnellement country/trigger/sequence."""
-    with contextlib.closing(sqlite3.connect(path)) as conn:
-        conn.execute(history._SCHEMA)
+    with contextlib.closing(history._connect(path)) as conn:
+        conn.executescript(history._SCHEMA)
         for r in rows:
             conn.execute(
                 "INSERT INTO runs (timestamp, sheet, mode, total, ok, ko, score, "

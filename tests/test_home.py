@@ -279,6 +279,67 @@ class TestRunExcelDiagnostics:
         assert has_issues(dirty_excel) is True
 
 
+class TestRunExcelDiagnosticsCached:
+    """_run_excel_diagnostics_cached (utilisee par la section DIAGNOSTIC
+    EXCEL de home.py) met en cache _run_excel_diagnostics par (chemin,
+    mtime, taille) pour eviter de reparser le classeur/HTML a chaque rerun
+    Streamlit (le script entier est reexecute a chaque interaction avec un
+    widget) - regression tests pour (a) le cache-hit reel et (b)
+    l'invalidation quand un fichier different est reuploade sous le meme
+    chemin (chemin fixe par session, contenu remplace a chaque upload)."""
+
+    def test_repeated_calls_with_the_same_file_hit_the_cache(self, tmp_path, monkeypatch):
+        excel_file = make_wording_workbook(tmp_path, {
+            "SEQ 1": [["Header", "Title", "Hallo Welt", "audit-component-header"]]
+        })
+        calls = []
+        original = home._run_excel_diagnostics
+
+        def _counting(*args, **kwargs):
+            calls.append(1)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(home, "_run_excel_diagnostics", _counting)
+
+        for _ in range(3):
+            home._run_excel_diagnostics_cached(
+                excel_file, html_path=None, test_wording=True, test_url=False,
+                wording_keyword="SEQ 1", url_keyword="", include_generic=False
+            )
+
+        assert len(calls) == 1
+
+    def test_reuploading_a_different_file_at_the_same_path_invalidates_the_cache(self, tmp_path):
+        path = tmp_path / "input.xlsx"
+
+        clean = make_wording_workbook(tmp_path, {
+            "SEQ 1": [["Header", "Title", "Hallo Welt", "audit-component-header"]]
+        }, filename="clean.xlsx")
+        shutil.copy2(clean, path)
+
+        first = home._run_excel_diagnostics_cached(
+            str(path), html_path=None, test_wording=True, test_url=False,
+            wording_keyword="SEQ 1", url_keyword="", include_generic=False
+        )
+        assert not any(level in ("warning", "error") for level, _ in first)
+
+        dirty = make_wording_workbook(tmp_path, {
+            "SEQ 1": [["Header", "Title", "Hallo Welt", " "]]
+        }, filename="dirty.xlsx")
+        shutil.copy2(dirty, path)
+        # Force un mtime distinct : deux ecritures rapprochees dans un test
+        # pourraient sinon retomber sur la meme valeur arrondie selon la
+        # resolution du systeme de fichiers, et masquer une regression ici.
+        current = os.stat(path).st_mtime
+        os.utime(path, (current + 5, current + 5))
+
+        second = home._run_excel_diagnostics_cached(
+            str(path), html_path=None, test_wording=True, test_url=False,
+            wording_keyword="SEQ 1", url_keyword="", include_generic=False
+        )
+        assert any(level == "warning" for level, _ in second)
+
+
 class TestRunItems:
     def test_single_kind_returns_one_item(self):
         last_run = {
@@ -733,6 +794,42 @@ class TestDoArchive:
 
         entries = load_sequence_history("Germany", "Revamp Inac", "SEQ 1", path=self.history_path)
         assert any(e["mode"] == "wording" and e["score"] == 50.0 for e in entries)
+
+    def test_escapes_markdown_special_characters_before_notifying_teams(self, tmp_path, monkeypatch):
+        # Un onglet Excel peut porter n'importe quel nom (voir
+        # qa.classification.normalize_sequence_name) : une "sequence"
+        # contenant une syntaxe de lien markdown ne doit pas produire un
+        # lien cliquable trompeur dans le message poste sur le canal Teams
+        # configure - regression test pour la faille d'injection corrigee
+        # (voir qa.notifications.escape_teams_markdown).
+        captured = {}
+
+        def _fake_thread(target, args, daemon):
+            target(*args)  # execute tout de suite (pas de vrai thread) pour inspecter le resultat
+
+            class _Dummy:
+                def start(self):
+                    pass
+            return _Dummy()
+
+        monkeypatch.setattr(home.threading, "Thread", _fake_thread)
+        monkeypatch.setattr(
+            home, "send_teams_notification",
+            lambda subject, message: captured.update(subject=subject, message=message)
+        )
+
+        report_path = tmp_path / "report.xlsx"
+        make_details_report(str(report_path), [{"Status": "OK"}])
+        malicious_sequence = "[Cliquez ici](https://phishing.example)"
+        last_run = {
+            "kind": "single", "mode": "wording", "sequence": malicious_sequence,
+            "results": [{"Status": "OK"}], "report_path": str(report_path),
+        }
+
+        home._do_archive(last_run, "Germany", "Revamp Inac")
+
+        assert "](" not in captured["message"]
+        assert r"\[Cliquez ici\]\(https://phishing.example\)" in captured["message"]
 
     def test_archives_a_batch_item_with_no_pregenerated_report_path(self, tmp_path):
         # Regression : un item "batch" (voir _run_items) a report_path=None -

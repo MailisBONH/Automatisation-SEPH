@@ -33,11 +33,36 @@ class TestSafeFolderName:
     def test_leaves_normal_names_unchanged(self):
         assert archive.safe_folder_name("SEQ 1 NON LOYAL") == "SEQ 1 NON LOYAL"
 
+    def test_dots_only_names_fall_back_to_unclassified_label(self):
+        # ".."/"." sont des composants speciaux pour os.path.join/normpath
+        # (repertoire parent/courant) - aucun des caracteres interdits
+        # ci-dessus ne les couvre. Un pays/trigger/sequence valant
+        # exactement ".." (ex. un onglet Excel litteralement nomme ainsi,
+        # ou une saisie libre dans le formulaire de renommage de la page
+        # Historique) traverserait sinon l'arborescence hors de OUTPUT_DIR
+        # - regression test pour cette faille de traversee de chemin.
+        assert archive.safe_folder_name("..") == archive.UNCLASSIFIED_LABEL
+        assert archive.safe_folder_name(".") == archive.UNCLASSIFIED_LABEL
+        assert archive.safe_folder_name("...") == archive.UNCLASSIFIED_LABEL
+
+    def test_dots_surrounded_by_real_content_are_left_alone(self):
+        # Seul un segment ENTIEREMENT compose de points est un composant
+        # special - "..\\.." serait deja neutralise par la substitution du
+        # backslash ci-dessus, et un nom comme "Acme..Inc" ne traverse rien.
+        assert archive.safe_folder_name("Acme..Inc") == "Acme..Inc"
+
 
 class TestSequenceDir:
     def test_builds_nested_sanitized_path(self, isolated_output):
         result = archive.sequence_dir("Germany", "Revamp Inac", "SEQ 1 NON LOYAL")
         assert result == os.path.join(archive.OUTPUT_DIR, "Germany", "Revamp Inac", "SEQ 1 NON LOYAL")
+
+    def test_dotdot_segments_cannot_escape_output_dir(self, isolated_output):
+        # Meme avec les 3 segments valant "..", le chemin resultant doit
+        # rester a l'interieur de OUTPUT_DIR (voir TestSafeFolderName).
+        result = archive.sequence_dir("..", "..", "..")
+        assert os.path.commonpath([os.path.normpath(result), os.path.normpath(archive.OUTPUT_DIR)]) == \
+            os.path.normpath(archive.OUTPUT_DIR)
 
 
 class TestArchiveReportAndListReports:

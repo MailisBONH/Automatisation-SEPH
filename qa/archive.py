@@ -29,7 +29,19 @@ from qa.config import KEEP_REPORTS, OUTPUT_DIR, UNCLASSIFIED_LABEL
 
 def safe_folder_name(name: str) -> str:
     name = (name or "").strip() or UNCLASSIFIED_LABEL
-    return re.sub(r'[<>:"/\\|?*]', "_", name)
+    name = re.sub(r'[<>:"/\\|?*]', "_", name)
+
+    # Un segment compose uniquement de points (".", "..", "...") est un
+    # composant special pour os.path.join/os.path.normpath (repertoire
+    # courant/parent) : aucun des caracteres neutralises ci-dessus ne le
+    # couvre, donc un pays/trigger/sequence valant exactement ".." (ex. un
+    # onglet Excel litteralement nomme ainsi, ou une saisie libre dans le
+    # formulaire de renommage de la page Historique) traverserait sinon
+    # l'arborescence hors de OUTPUT_DIR une fois passe a sequence_dir().
+    if re.fullmatch(r"\.+", name):
+        return UNCLASSIFIED_LABEL
+
+    return name
 
 
 def sequence_dir(country: str, trigger: str, sequence: str) -> str:

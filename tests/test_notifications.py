@@ -4,7 +4,7 @@ aucune requete reseau reelle ne doit avoir lieu dans la suite de tests.
 """
 import requests
 
-from qa.notifications import send_teams_notification
+from qa.notifications import escape_teams_markdown, send_teams_notification
 
 
 class _FakeResponse:
@@ -59,3 +59,30 @@ class TestSendTeamsNotification:
 
         assert captured["title"] == "Mon titre"
         assert captured["text"] == "Mon texte"
+
+
+class TestEscapeTeamsMarkdown:
+    """escape_teams_markdown neutralise les caracteres markdown avant
+    d'inserer une valeur variable (pays/trigger/sequence, issue du contenu
+    Excel semi-fiable) dans un message Teams - regression test pour la
+    faille d'injection markdown/lien trompeur corrigee dans home._do_archive."""
+
+    def test_escapes_link_syntax(self):
+        # Sans echappement, "[Cliquez ici](https://phishing.example)" a la
+        # place d'un nom de sequence produirait un vrai lien cliquable dans
+        # le message Teams poste sur un canal de confiance.
+        escaped = escape_teams_markdown("[Cliquez ici](https://phishing.example)")
+        assert "[" not in escaped.replace("\\[", "")
+        assert "](" not in escaped.replace("\\]", "").replace("\\(", "")
+        assert escaped == r"\[Cliquez ici\]\(https://phishing.example\)"
+
+    def test_escapes_bold_and_other_markdown_chars(self):
+        assert escape_teams_markdown("**gras** _italique_ `code` ~barre~") == \
+            r"\*\*gras\*\* \_italique\_ \`code\` \~barre\~"
+
+    def test_plain_text_is_left_readable(self):
+        assert escape_teams_markdown("SEQ 1 NON LOYAL") == "SEQ 1 NON LOYAL"
+
+    def test_none_and_empty_are_treated_as_empty_string(self):
+        assert escape_teams_markdown(None) == ""
+        assert escape_teams_markdown("") == ""
