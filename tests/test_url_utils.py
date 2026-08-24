@@ -1,25 +1,4 @@
-from qa.url_utils import extract_hrefs, is_query_ignored_domain, normalize_url, strip_query
-
-
-class TestExtractHrefs:
-    def test_extracts_every_href_in_order(self):
-        html = '<a href="https://a.example/1">A</a><a href="https://a.example/2">B</a>'
-        assert extract_hrefs(html) == ["https://a.example/1", "https://a.example/2"]
-
-    def test_single_and_double_quotes_are_both_recognized(self):
-        html = "<a href='https://a.example/1'>A</a>"
-        assert extract_hrefs(html) == ["https://a.example/1"]
-
-    def test_case_insensitive_href_attribute(self):
-        html = '<a HREF="https://a.example/1">A</a>'
-        assert extract_hrefs(html) == ["https://a.example/1"]
-
-    def test_no_links_returns_empty_list(self):
-        assert extract_hrefs("<p>No links here</p>") == []
-
-    def test_empty_or_none_returns_empty_list(self):
-        assert extract_hrefs("") == []
-        assert extract_hrefs(None) == []
+from qa.url_utils import is_query_ignored_domain, normalize_url, strip_query
 
 
 class TestIsQueryIgnoredDomain:

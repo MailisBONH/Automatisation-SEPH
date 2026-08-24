@@ -1,4 +1,4 @@
-from qa.config import CAMPAIGN_KEYWORD, EXCEL_FILE, HTML_FILE
+from qa.config import CAMPAIGN_KEYWORD, DEBUG_MODE, EXCEL_FILE, HTML_FILE
 from qa.excel_loader import (
     EXCEL_READ_ERRORS,
     load_excel_urls,
@@ -72,12 +72,12 @@ def run_qa_for_sequence(html_file, excel_file, keyword, mode="wording", include_
                 if (w["norm"], w.get("Technical")) not in existing_keys
             ]
             skipped = len(sibling_wordings) - len(new_sibling_wordings)
-            if skipped:
+            if skipped and DEBUG_MODE:
                 print(
                     f"➖ {skipped} wording(s) de l'onglet frère '{sibling_sheet}' ignoré(s) "
                     "(identiques à l'onglet séquence, rien de spécifique à l'audience)"
                 )
-            if new_sibling_wordings:
+            if new_sibling_wordings and DEBUG_MODE:
                 print(
                     f"🔀 Onglet frère '{sibling_sheet}' détecté (même séquence, audience "
                     f"opposée) : {len(new_sibling_wordings)} wording(s) réellement "
@@ -92,13 +92,15 @@ def run_qa_for_sequence(html_file, excel_file, keyword, mode="wording", include_
 
             overridden = [w for w in excel_wordings if w.get("Technical") in generic_classes]
             if overridden:
-                print(
-                    f"➖ {len(overridden)} wording(s) de l'onglet séquence ignoré(s) "
-                    "(composant couvert par l'onglet générique)"
-                )
+                if DEBUG_MODE:
+                    print(
+                        f"➖ {len(overridden)} wording(s) de l'onglet séquence ignoré(s) "
+                        "(composant couvert par l'onglet générique)"
+                    )
                 excel_wordings = [w for w in excel_wordings if w.get("Technical") not in generic_classes]
 
-            print(f"➕ {len(generic_wordings)} wording(s) générique(s) ajoutés depuis l'onglet '{generic_sheet}'")
+            if DEBUG_MODE:
+                print(f"➕ {len(generic_wordings)} wording(s) générique(s) ajoutés depuis l'onglet '{generic_sheet}'")
             excel_wordings = excel_wordings + generic_wordings
 
         results = run_wording_qa(html_texts, excel_wordings)
@@ -116,10 +118,11 @@ def run_qa_for_sequence(html_file, excel_file, keyword, mode="wording", include_
         if section_name:
             sibling_section, sibling_urls = load_sibling_url_section(excel_file, section_name)
             if sibling_section and sibling_urls:
-                print(
-                    f"🔀 Section frère '{sibling_section}' détectée (même séquence, audience "
-                    "opposée) : URLs fusionnées avant dédoublonnage."
-                )
+                if DEBUG_MODE:
+                    print(
+                        f"🔀 Section frère '{sibling_section}' détectée (même séquence, audience "
+                        "opposée) : URLs fusionnées avant dédoublonnage."
+                    )
                 excel_urls = excel_urls + sibling_urls
 
         # Deduplique par URL normalisee (ordre/encodage des parametres
@@ -144,7 +147,7 @@ def run_qa_for_sequence(html_file, excel_file, keyword, mode="wording", include_
             deduped_urls.append(u)
 
         skipped = len(excel_urls) - len(deduped_urls)
-        if skipped:
+        if skipped and DEBUG_MODE:
             print(f"➖ {skipped} URL(s) dupliquée(s) (même destination normalisée) ignorée(s)")
         excel_urls = deduped_urls
 

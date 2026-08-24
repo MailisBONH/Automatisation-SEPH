@@ -1,16 +1,7 @@
 import html
-import re
 import urllib.parse
 
 from qa.config import URL_IGNORE_QUERY_DOMAINS
-
-HREF_PATTERN = re.compile(r'href=["\'](.*?)["\']', re.IGNORECASE)
-
-
-def extract_hrefs(html_content: str) -> list:
-    if not html_content:
-        return []
-    return HREF_PATTERN.findall(html_content)
 
 
 def normalize_url(url: str) -> str:

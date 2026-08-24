@@ -2,6 +2,7 @@ import difflib
 import html
 
 from qa.config import (
+    DEBUG_MODE,
     KO_URL_PARAM_MISMATCH,
     KO_URL_NOT_FOUND,
     KO_UNEXPECTED_URL,
@@ -319,9 +320,10 @@ def run_url_qa(raw_html: str, excel_urls: list) -> list:
     total = len(results)
     ok = sum(1 for r in results if r["Status"] == "OK")
 
-    print("\n" + "=" * 70)
-    print(f"✅ URLs - Total: {total} | OK: {ok} | KO: {total-ok} | "
-          f"Score: {round((ok/total)*100, 2) if total else 0}%")
-    print("=" * 70)
+    if DEBUG_MODE:
+        print("\n" + "=" * 70)
+        print(f"✅ URLs - Total: {total} | OK: {ok} | KO: {total-ok} | "
+              f"Score: {round((ok/total)*100, 2) if total else 0}%")
+        print("=" * 70)
 
     return results

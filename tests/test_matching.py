@@ -115,7 +115,7 @@ class TestFindBestMatch:
             excel_row("Discover now", technical="audit-component-b"),
         ]
         item = html_item("Discover now", component_class="audit-component-b")
-        result = find_best_match(item, wordings, set())
+        result = find_best_match(item, wordings)
         assert result is not None
         idx, status, error, sim = result
         assert idx == 1
@@ -124,7 +124,7 @@ class TestFindBestMatch:
     def test_no_candidate_of_matching_class_returns_none(self):
         wordings = [excel_row("Discover now", technical="audit-component-a")]
         item = html_item("Discover now", component_class="audit-component-b")
-        assert find_best_match(item, wordings, set()) is None
+        assert find_best_match(item, wordings) is None
 
     def test_two_unknown_classes_are_not_treated_as_a_matching_pair(self):
         # Regression : "None != None" est faux, donc sans verification
@@ -136,7 +136,7 @@ class TestFindBestMatch:
         # rapport (voir l'onglet loyalty-section polonais dans la conv.).
         wordings = [excel_row("Completely unrelated wording here", technical=None)]
         item = html_item("Totally different text", component_class=None)
-        assert find_best_match(item, wordings, set()) is None
+        assert find_best_match(item, wordings) is None
 
     def test_class_index_gives_the_same_result_as_a_full_scan(self):
         # index_wordings_by_technical_class (voir qa.wording_qa.run_wording_qa)
@@ -150,20 +150,20 @@ class TestFindBestMatch:
         item = html_item("Discover now", component_class="audit-component-b")
         class_index = index_wordings_by_technical_class(wordings)
 
-        assert find_best_match(item, wordings, set(), class_index) == find_best_match(item, wordings, set())
+        assert find_best_match(item, wordings, class_index) == find_best_match(item, wordings)
 
     def test_class_index_returns_none_for_a_class_with_no_wordings(self):
         wordings = [excel_row("Discover now", technical="audit-component-a")]
         item = html_item("Discover now", component_class="audit-component-b")
         class_index = index_wordings_by_technical_class(wordings)
 
-        assert find_best_match(item, wordings, set(), class_index) is None
+        assert find_best_match(item, wordings, class_index) is None
 
     def test_missing_html_class_returns_none_without_needing_the_index(self):
         wordings = [excel_row("Discover now", technical="audit-component-a")]
         item = html_item("Discover now", component_class=None)
 
-        assert find_best_match(item, wordings, set(), index_wordings_by_technical_class(wordings)) is None
+        assert find_best_match(item, wordings, index_wordings_by_technical_class(wordings)) is None
 
 
 class TestIndexWordingsByTechnicalClass:

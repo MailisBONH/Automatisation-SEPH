@@ -250,6 +250,59 @@ def _run_jobs_in_parallel(jobs):
         return list(executor.map(lambda job: job(), jobs))
 
 
+# =========================
+# SCHEMA COMMUN DE last_run
+# =========================
+# Les 3 fonctions _execute_* ci-dessous (une par flux : simple, batch un
+# seul mode, batch "Wording + URL") produisent toutes la MEME forme de
+# dict pour last_run - stocke dans st.session_state["last_run"] par le
+# bouton Comparer plus bas, puis consomme uniformement par _render_panel/
+# _run_items/_archive_key et le bloc d'affichage final, qui n'ont ainsi
+# plus besoin de savoir quel flux a produit ce run (remplace un ancien
+# champ "kind" et 4 branchements a 4 voies quasi dupliques : un par
+# fonction de consommation).
+#
+#   last_run = {
+#       "excel_path": str,
+#       "top_banner": str | None,       # banniere st.success dediee, affichee
+#                                        # avant les panels - seul le mode simple
+#                                        # "Wording + URL" la renseigne (les
+#                                        # autres modes affichent leur succes via
+#                                        # le titre de leur(s) panel(s) uniquement)
+#       "combined_score": {"ok": int, "total": int} | None,  # metrique dediee,
+#                                        # juste apres top_banner - meme mode que
+#                                        # ci-dessus uniquement
+#       "recap_rows": list[dict] | None,  # si present : "Récapitulatif par
+#                                        # séquence" (subheader + dataframe) avant
+#                                        # les panels - modes multi-sequences
+#                                        # (batch, combined_batch) uniquement
+#       "panels": [
+#           {
+#               "mode": "wording" | "url",
+#               "consolidated": bool,    # True -> render_grouped_results (recap +
+#                                        # un expander par sequence ; report_path
+#                                        # couvre TOUTES les sequences du panel,
+#                                        # jamais reporte tel quel a l'archivage,
+#                                        # voir _run_items) ; False -> render_results_block
+#                                        # (panel mono-sequence, un seul tableau)
+#               "results_by_sequence": {nom_sequence: [rows...], ...},
+#               "report_path": str | None,
+#               "download_filename": str,
+#               "title": str,            # titre affiche (st.success) par
+#                                        # render_results_block/render_grouped_results
+#               "tab_label": str | None,  # libelle d'onglet (voir plus bas) - peut
+#                                        # differer du titre (ex: sans le suffixe
+#                                        # "(toutes séquences)" du mode batch)
+#           },
+#           ...  # 1 panel (mode simple) ou 2 (Wording + URL) - jamais plus
+#       ],
+#       "debug_logs": str,
+#   }
+#
+# Le bloc d'affichage final pose des onglets (st.tabs, un par panel) UNIQUEMENT
+# si len(panels) == 2 (toujours le cas "Wording + URL", jamais un mode a un
+# seul panel) ; sinon chaque panel (il n'y en a alors qu'un) est affiche
+# directement, sans onglet.
 def _build_and_run_combined_batch_jobs(combined_sequence_assignments, excel_path, include_generic, session_id):
     """Ecrit les fichiers HTML temporaires puis construit et execute en
     parallele 2 jobs par fichier (Wording et URL, voir _run_jobs_in_parallel)
@@ -296,9 +349,10 @@ def _execute_combined_batch(excel_path, combined_sequence_assignments, include_g
     l'appelant (le bouton Comparer plus bas) de les rendre.
 
     Retourne (last_run, error_messages, debug_logs) : last_run est le dict a
-    stocker dans st.session_state["last_run"] (kind="combined_batch"), ou
-    None si aucun fichier n'a produit le moindre resultat (rien a
-    afficher/archiver, seuls les logs de debug ont un sens dans ce cas).
+    stocker dans st.session_state["last_run"] (voir le schema commun a tous
+    les modes en tete de fichier), ou None si aucun fichier n'a produit le
+    moindre resultat (rien a afficher/archiver, seuls les logs de debug ont
+    un sens dans ce cas).
     """
     wording_results_by_sequence = {}
     url_results_by_sequence = {}
@@ -322,34 +376,24 @@ def _execute_combined_batch(excel_path, combined_sequence_assignments, include_g
         if u_results is not None:
             url_results_by_sequence[u_seq] = u_results
 
-    if not (wording_results_by_sequence or url_results_by_sequence):
+    # Seules les sequences avec au moins un resultat sont archivees/affichees
+    # (un fichier dont le job a echoue - voir error_messages ci-dessus - n'a
+    # rien de reel a y montrer ; une sequence dont le job a "reussi" sur 0
+    # ligne n'apporte rien de plus qu'un panel vide). Calcule ici, AVANT le
+    # test de sortie anticipee ci-dessous, pour que celui-ci porte sur les
+    # memes donnees que ce qui sera reellement affiche.
+    wording_by_sequence_with_rows = {seq: rows for seq, rows in wording_results_by_sequence.items() if rows}
+    url_by_sequence_with_rows = {seq: rows for seq, rows in url_results_by_sequence.items() if rows}
+
+    if not (wording_by_sequence_with_rows or url_by_sequence_with_rows):
         return None, error_messages, debug_logs
 
     today = datetime.now().strftime("%Y-%m-%d")
 
-    wording_report_path = (
-        save_consolidated_report(wording_results_by_sequence, mode="wording")
-        if wording_results_by_sequence else None
-    )
-    url_report_path = (
-        save_consolidated_report(url_results_by_sequence, mode="url")
-        if url_results_by_sequence else None
-    )
-
-    pairs = []
     recap_rows = []
-
     for f, w_seq, u_seq in combined_sequence_assignments:
         w_rows = wording_results_by_sequence.get(w_seq, [])
         u_rows = url_results_by_sequence.get(u_seq, [])
-
-        pairs.append({
-            "file_name": f.name,
-            "wording_sequence": w_seq,
-            "wording_rows": w_rows,
-            "url_sequence": u_seq,
-            "url_rows": u_rows,
-        })
 
         w_total, w_ok = len(w_rows), sum(1 for r in w_rows if r["Status"] == "OK")
         u_total, u_ok = len(u_rows), sum(1 for r in u_rows if r["Status"] == "OK")
@@ -362,16 +406,38 @@ def _execute_combined_batch(excel_path, combined_sequence_assignments, include_g
             "Score URL": _score_pct(u_ok, u_total),
         })
 
+    # Un panel par cote (wording/url), omis entierement si ce cote n'a
+    # produit aucune sequence avec resultat (voir plus haut) - c'est ce qui
+    # permet au bloc d'affichage final de decider seul, via le nombre de
+    # panels, s'il faut des onglets ou afficher directement l'unique panel.
+    panels = []
+    if wording_by_sequence_with_rows:
+        panels.append({
+            "mode": "wording",
+            "consolidated": True,
+            "results_by_sequence": wording_by_sequence_with_rows,
+            "report_path": save_consolidated_report(wording_results_by_sequence, mode="wording"),
+            "download_filename": f"qa_report_multi_wording_{today}.xlsx",
+            "title": "📝 Résultats Wording (toutes séquences)",
+            "tab_label": "📝 Résultats Wording",
+        })
+    if url_by_sequence_with_rows:
+        panels.append({
+            "mode": "url",
+            "consolidated": True,
+            "results_by_sequence": url_by_sequence_with_rows,
+            "report_path": save_consolidated_report(url_results_by_sequence, mode="url"),
+            "download_filename": f"qa_report_multi_url_{today}.xlsx",
+            "title": "🔗 Résultats URL (toutes séquences)",
+            "tab_label": "🔗 Résultats URL",
+        })
+
     last_run = {
-        "kind": "combined_batch",
         "excel_path": excel_path,
-        "title": f"Comparaison terminée pour {len(pairs)} séquence(s) (Wording + URL)",
-        "pairs": pairs,
+        "top_banner": None,
+        "combined_score": None,
         "recap_rows": recap_rows,
-        "wording_report_path": wording_report_path,
-        "wording_download_filename": f"qa_report_multi_wording_{today}.xlsx",
-        "url_report_path": url_report_path,
-        "url_download_filename": f"qa_report_multi_url_{today}.xlsx",
+        "panels": panels,
         "debug_logs": debug_logs,
     }
     return last_run, error_messages, debug_logs
@@ -435,15 +501,19 @@ def _execute_batch(excel_path, sequence_assignments, qa_mode, include_generic, s
         })
 
     last_run = {
-        "kind": "batch",
-        "mode": qa_mode,
         "excel_path": excel_path,
-        "title": f"Comparaison terminée pour {len(results_by_sequence)} séquence(s)",
-        "download_filename": f"qa_report_multi_{today}.xlsx",
-        "report_path": report_path,
-        "sheet_name": None,
-        "sequences": results_by_sequence,
+        "top_banner": None,
+        "combined_score": None,
         "recap_rows": recap_rows,
+        "panels": [{
+            "mode": qa_mode,
+            "consolidated": True,
+            "results_by_sequence": results_by_sequence,
+            "report_path": report_path,
+            "download_filename": f"qa_report_multi_{today}.xlsx",
+            "title": f"Comparaison terminée pour {len(results_by_sequence)} séquence(s)",
+            "tab_label": None,
+        }],
         "debug_logs": debug_logs,
     }
     return last_run, error_messages, debug_logs
@@ -452,9 +522,10 @@ def _execute_batch(excel_path, sequence_assignments, qa_mode, include_generic, s
 def _execute_single_or_combined_test(html_path, excel_path, test_wording, test_url,
                                       wording_keyword, url_keyword, include_generic):
     """
-    Execute une comparaison sur un seul HTML (mode simple, "kind" single ou
-    combined_test - voir le bouton Comparer) : Wording seul, URL seul, ou
-    les deux pipelines l'un apres l'autre sur le meme fichier. Aucun appel
+    Execute une comparaison sur un seul HTML (mode simple, voir le bouton
+    Comparer) : Wording seul, URL seul, ou les deux pipelines l'un apres
+    l'autre sur le meme fichier (1 ou 2 panels dans last_run selon le cas,
+    voir le schema commun en tete de fichier). Aucun appel
     st.* (voir _execute_combined_batch pour le rationnel) : l'erreur de
     lecture eventuelle est retournee (message d'exception brut) plutot
     qu'affichee, a charge de l'appelant de la reformuler pour l'utilisateur.
@@ -488,21 +559,39 @@ def _execute_single_or_combined_test(html_path, excel_path, test_wording, test_u
             safe_wording_name = re.sub(r"[^\w\-]", "_", wording_sheet_name)
             safe_url_name = re.sub(r"[^\w\-]", "_", url_sheet_name)
 
+            wording_total = len(wording_results)
+            wording_ok = sum(1 for r in wording_results if r["Status"] == "OK")
+            url_total = len(url_results)
+            url_ok = sum(1 for r in url_results if r["Status"] == "OK")
+
             last_run = {
-                "kind": "combined_test",
                 "excel_path": excel_path,
-                "title": "Comparaison terminée (Wording + URL)",
-                "wording_results": wording_results,
-                "wording_report_path": wording_report_path,
-                "wording_sequence": wording_keyword,
-                "wording_download_filename": f"qa_report_wording_{safe_wording_name}_{today}.xlsx",
-                "url_results": url_results,
-                "url_report_path": url_report_path,
-                # onglet UTM plat (pas de decoupage en sequences, voir
-                # url_ready) : url_keyword est vide, on reutilise la
-                # sequence wording (meme sequence testee des deux cotes).
-                "url_sequence": url_keyword or wording_keyword,
-                "url_download_filename": f"qa_report_url_{safe_url_name}_{today}.xlsx",
+                "top_banner": "Comparaison terminée (Wording + URL)",
+                "combined_score": {"ok": wording_ok + url_ok, "total": wording_total + url_total},
+                "recap_rows": None,
+                "panels": [
+                    {
+                        "mode": "wording",
+                        "consolidated": False,
+                        "results_by_sequence": {wording_keyword: wording_results},
+                        "report_path": wording_report_path,
+                        "download_filename": f"qa_report_wording_{safe_wording_name}_{today}.xlsx",
+                        "title": "📝 Résultats Wording",
+                        "tab_label": "📝 Résultats Wording",
+                    },
+                    {
+                        "mode": "url",
+                        "consolidated": False,
+                        # onglet UTM plat (pas de decoupage en sequences, voir
+                        # url_ready) : url_keyword est vide, on reutilise la
+                        # sequence wording (meme sequence testee des deux cotes).
+                        "results_by_sequence": {(url_keyword or wording_keyword): url_results},
+                        "report_path": url_report_path,
+                        "download_filename": f"qa_report_url_{safe_url_name}_{today}.xlsx",
+                        "title": "🔗 Résultats URL",
+                        "tab_label": "🔗 Résultats URL",
+                    },
+                ],
                 "debug_logs": f"--- Wording ---\n{wording_logs}\n\n--- URL ---\n{url_logs}",
             }
 
@@ -523,23 +612,27 @@ def _execute_single_or_combined_test(html_path, excel_path, test_wording, test_u
             safe_sheet_name = re.sub(r"[^\w\-]", "_", sheet_name)
 
             last_run = {
-                "kind": "single",
-                "mode": qa_mode,
                 "excel_path": excel_path,
-                "title": "Comparaison terminée",
-                "download_filename": f"qa_report_{safe_sheet_name}_{today}.xlsx",
-                "report_path": report_path,
-                "results": results,
-                "sheet_name": sheet_name,
-                # keyword == la sequence choisie par l'utilisateur (onglet UTM
-                # en mode url, ou onglet Excel en mode wording - dans ce cas
-                # identique a sheet_name). En mode url, sheet_name est le nom
-                # de l'onglet UTM (souvent unique, partage par toutes les
-                # sequences) : ce n'est PAS la sequence, il ne faut pas s'en
-                # servir pour le classement par sequence dans l'historique -
-                # sauf si keyword est vide (onglet UTM plat, voir url_ready),
-                # auquel cas c'est le seul nom disponible.
-                "sequence": keyword or sheet_name,
+                "top_banner": None,
+                "combined_score": None,
+                "recap_rows": None,
+                "panels": [{
+                    "mode": qa_mode,
+                    "consolidated": False,
+                    # keyword == la sequence choisie par l'utilisateur (onglet UTM
+                    # en mode url, ou onglet Excel en mode wording - dans ce cas
+                    # identique a sheet_name). En mode url, sheet_name est le nom
+                    # de l'onglet UTM (souvent unique, partage par toutes les
+                    # sequences) : ce n'est PAS la sequence, il ne faut pas s'en
+                    # servir pour le classement par sequence dans l'historique -
+                    # sauf si keyword est vide (onglet UTM plat, voir url_ready),
+                    # auquel cas c'est le seul nom disponible.
+                    "results_by_sequence": {(keyword or sheet_name): results},
+                    "report_path": report_path,
+                    "download_filename": f"qa_report_{safe_sheet_name}_{today}.xlsx",
+                    "title": "Comparaison terminée",
+                    "tab_label": None,
+                }],
                 "debug_logs": debug_logs,
             }
 
@@ -871,71 +964,53 @@ def render_grouped_results(results_by_sequence, mode, report_path, download_file
                 st.caption("Aucun résultat pour cette séquence.")
 
 
+def _render_panel(panel):
+    """Affiche un panel de last_run["panels"] (voir le schema commun en
+    tete de fichier) avec la fonction de rendu adaptee : render_grouped_results
+    pour un panel consolide (mode batch : recap + un expander par
+    sequence), render_results_block pour un panel mono-sequence (mode
+    simple, un seul tableau sans chrome supplementaire)."""
+    if panel["consolidated"]:
+        render_grouped_results(
+            panel["results_by_sequence"], panel["mode"], panel["report_path"],
+            panel["download_filename"], panel["title"]
+        )
+    else:
+        results = next(iter(panel["results_by_sequence"].values()))
+        render_results_block(
+            results, panel["report_path"], panel["title"], panel["download_filename"], mode=panel["mode"]
+        )
+
+
 def _run_items(last_run):
     """
-    Liste de {mode, sequence, rows, report_path} a archiver pour ce run.
-    report_path=None signifie qu'un rapport individuel doit encore etre
-    genere (cas batch : le rapport consolide ne se decoupe pas par
-    sequence, un rapport par sequence est regenere au moment d'archiver).
-
-    Le kind "combined_test" (mode "Wording + URL") retourne un item par
-    type - c'est ce qui permet a _do_archive de les archiver chacun sous
-    son propre type dans le meme dossier de sequence (une fois reconcilies,
-    voir normalize_sequence_name) et de declencher le rapport combine.
+    Liste de {mode, sequence, rows, report_path} a archiver pour ce run,
+    aplatie depuis last_run["panels"] (un item par (panel, sequence) -
+    c'est ce qui permet a _do_archive d'archiver chaque sequence/type sous
+    son propre dossier une fois reconcilies, voir normalize_sequence_name,
+    et de declencher le rapport combine des que wording et url coexistent
+    pour une meme sequence). report_path n'est reporte par item que si le
+    panel est mono-sequence (consolidated=False) : pour un panel consolide
+    (rapport multi-sequences), report_path=None signale a _do_archive qu'un
+    rapport individuel doit encore etre genere pour cette sequence precise
+    (le rapport consolide ne se decoupe pas par sequence).
     """
-    kind = last_run["kind"]
-
-    if kind == "batch":
-        return [
-            {"mode": last_run["mode"], "sequence": seq_name, "rows": rows, "report_path": None}
-            for seq_name, rows in last_run["sequences"].items()
-        ]
-
-    if kind == "combined_test":
-        return [
-            {
-                "mode": "wording", "sequence": last_run["wording_sequence"],
-                "rows": last_run["wording_results"], "report_path": last_run["wording_report_path"]
-            },
-            {
-                "mode": "url", "sequence": last_run["url_sequence"],
-                "rows": last_run["url_results"], "report_path": last_run["url_report_path"]
-            },
-        ]
-
-    if kind == "combined_batch":
-        # Deux items par paire (un wording, un url), chacun regenere son
-        # propre rapport individuel a l'archivage (les rapports consolides
-        # ne se decoupent pas par sequence). Une paire dont un cote a echoue
-        # (voir le try/except du bouton Comparer) a des rows vides pour ce
-        # cote : on ne l'archive pas (rien de reel a y mettre).
-        items = []
-        for pair in last_run["pairs"]:
-            if pair["wording_rows"]:
-                items.append({
-                    "mode": "wording", "sequence": pair["wording_sequence"],
-                    "rows": pair["wording_rows"], "report_path": None
-                })
-            if pair["url_rows"]:
-                items.append({
-                    "mode": "url", "sequence": pair["url_sequence"],
-                    "rows": pair["url_rows"], "report_path": None
-                })
-        return items
-
-    return [{
-        "mode": last_run["mode"],
-        "sequence": last_run.get("sequence") or last_run["sheet_name"],
-        "rows": last_run["results"],
-        "report_path": last_run["report_path"],
-    }]
+    items = []
+    for panel in last_run["panels"]:
+        per_sequence_report = None if panel["consolidated"] else panel["report_path"]
+        for seq_name, rows in panel["results_by_sequence"].items():
+            items.append({
+                "mode": panel["mode"], "sequence": seq_name, "rows": rows,
+                "report_path": per_sequence_report,
+            })
+    return items
 
 
 def _archive_key(last_run):
-    """Cle session_state identifiant ce run pour l'archivage (idempotence)."""
-    if last_run["kind"] in ("combined_test", "combined_batch"):
-        return f"archived::{last_run['wording_report_path']}::{last_run['url_report_path']}"
-    return f"archived::{last_run['report_path']}"
+    """Cle session_state identifiant ce run pour l'archivage (idempotence) -
+    derivee des report_path de tous les panels (1 pour un run mono-panel,
+    typiquement 2 - wording + url - pour un run combine)."""
+    return "archived::" + "::".join(str(panel["report_path"]) for panel in last_run["panels"])
 
 
 def _do_archive(last_run, country, trigger):
@@ -1782,102 +1857,38 @@ last_run = st.session_state.get("last_run")
 
 if last_run:
 
-    if last_run["kind"] == "batch":
-        st.subheader("Récapitulatif par séquence")
-        st.dataframe(pd.DataFrame(last_run["recap_rows"]), use_container_width=True)
-        render_grouped_results(
-            last_run["sequences"],
-            last_run["mode"],
-            last_run["report_path"],
-            last_run["download_filename"],
-            last_run["title"]
-        )
+    # Banniere/metrique dediees au mode "Wording + URL" simple (voir
+    # _execute_single_or_combined_test) : aucun des autres modes ne les
+    # renseigne (None), leur propre titre/succes etant alors porte par
+    # chaque panel individuellement (voir _render_panel plus haut).
+    if last_run["top_banner"]:
+        st.success(f"✅ {last_run['top_banner']}")
 
-    elif last_run["kind"] == "combined_test":
-        st.success(f"✅ {last_run['title']}")
+    if last_run["combined_score"]:
+        cs = last_run["combined_score"]
+        st.metric("Score combiné (Wording + URL)", f"{_score_pct(cs['ok'], cs['total'])}%")
 
-        wording_total = len(last_run["wording_results"])
-        wording_ok = sum(1 for r in last_run["wording_results"] if r["Status"] == "OK")
-        url_total = len(last_run["url_results"])
-        url_ok = sum(1 for r in last_run["url_results"] if r["Status"] == "OK")
-        combined_total = wording_total + url_total
-        combined_ok = wording_ok + url_ok
-        combined_score = _score_pct(combined_ok, combined_total)
-
-        st.metric("Score combiné (Wording + URL)", f"{combined_score}%")
-
-        tab_wording, tab_url = st.tabs(["📝 Résultats Wording", "🔗 Résultats URL"])
-        with tab_wording:
-            render_results_block(
-                last_run["wording_results"],
-                last_run["wording_report_path"],
-                "📝 Résultats Wording",
-                last_run["wording_download_filename"],
-                mode="wording"
-            )
-        with tab_url:
-            render_results_block(
-                last_run["url_results"],
-                last_run["url_report_path"],
-                "🔗 Résultats URL",
-                last_run["url_download_filename"],
-                mode="url"
-            )
-
-    elif last_run["kind"] == "combined_batch":
+    # Recapitulatif par sequence : seuls les modes multi-sequences (batch,
+    # combined_batch) le renseignent (voir _execute_batch/_execute_combined_batch).
+    if last_run["recap_rows"] is not None:
         st.subheader("Récapitulatif par séquence")
         st.dataframe(pd.DataFrame(last_run["recap_rows"]), use_container_width=True)
 
-        wording_by_sequence = {
-            pair["wording_sequence"]: pair["wording_rows"] for pair in last_run["pairs"] if pair["wording_rows"]
-        }
-        url_by_sequence = {
-            pair["url_sequence"]: pair["url_rows"] for pair in last_run["pairs"] if pair["url_rows"]
-        }
-
-        if last_run["wording_report_path"] and last_run["url_report_path"]:
-            tab_wording, tab_url = st.tabs(["📝 Résultats Wording", "🔗 Résultats URL"])
-            with tab_wording:
-                render_grouped_results(
-                    wording_by_sequence,
-                    "wording",
-                    last_run["wording_report_path"],
-                    last_run["wording_download_filename"],
-                    "📝 Résultats Wording (toutes séquences)"
-                )
-            with tab_url:
-                render_grouped_results(
-                    url_by_sequence,
-                    "url",
-                    last_run["url_report_path"],
-                    last_run["url_download_filename"],
-                    "🔗 Résultats URL (toutes séquences)"
-                )
-        elif last_run["wording_report_path"]:
-            render_grouped_results(
-                wording_by_sequence,
-                "wording",
-                last_run["wording_report_path"],
-                last_run["wording_download_filename"],
-                "📝 Résultats Wording (toutes séquences)"
-            )
-        elif last_run["url_report_path"]:
-            render_grouped_results(
-                url_by_sequence,
-                "url",
-                last_run["url_report_path"],
-                last_run["url_download_filename"],
-                "🔗 Résultats URL (toutes séquences)"
-            )
-
+    panels = last_run["panels"]
+    if len(panels) == 2:
+        # Combine (Wording + URL, simple ou batch) : toujours 2 panels dans
+        # ce cas precis (voir _execute_single_or_combined_test/
+        # _execute_combined_batch) - jamais plus, jamais un seul.
+        tab_wording, tab_url = st.tabs([panel["tab_label"] for panel in panels])
+        for tab, panel in zip((tab_wording, tab_url), panels):
+            with tab:
+                _render_panel(panel)
     else:
-        render_results_block(
-            last_run["results"],
-            last_run["report_path"],
-            last_run["title"],
-            last_run["download_filename"],
-            mode=last_run["mode"]
-        )
+        # Mode simple (1 panel) ou combined_batch ou un seul cote a produit
+        # un resultat (voir _execute_combined_batch) : pas d'onglet a poser
+        # pour un unique panel.
+        for panel in panels:
+            _render_panel(panel)
 
     with st.expander("🐛 Logs de debug (extraction HTML/Excel)"):
         st.code(last_run.get("debug_logs") or "Aucun log.", language=None)

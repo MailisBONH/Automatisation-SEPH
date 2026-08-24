@@ -1,6 +1,7 @@
 from collections import defaultdict
 
 from qa.config import (
+    DEBUG_MODE,
     SIM_CLOSEST_MATCH_ACCEPT,
     SIM_CLOSEST_MATCH_MIN,
     SIM_SHARED_BRANCH_EXACT,
@@ -349,7 +350,7 @@ def run_wording_qa(html_texts, excel_wordings):
         # Un candidat de la bonne classe mais textuellement tres different
         # (KO) ne doit pas empecher d'essayer l'agregation/le split, qui
         # peuvent trouver un meilleur match pour ce meme fragment HTML.
-        direct = find_best_match(item, excel_wordings, set(matched_excel_counts.keys()), class_index)
+        direct = find_best_match(item, excel_wordings, class_index)
         if direct and direct[1] == "OK":
             idx, status, error, sim = direct
             row = make_row(excel_wordings[idx], item, h_text, status, error, sim, "Direct")
@@ -361,7 +362,7 @@ def run_wording_qa(html_texts, excel_wordings):
 
         # B) Agregation (N HTML → 1 Excel) — meme logique : on ne verrouille
         # que si le resultat est OK.
-        agg = find_aggregated_match(html_texts, i, excel_wordings, matched_excel_counts, class_index=class_index)
+        agg = find_aggregated_match(html_texts, i, excel_wordings, class_index=class_index)
         if agg and agg[2] == "OK":
             nb, idx, status, error, sim = agg
             agg_text = " ".join(html_texts[i + k]["text"] for k in range(nb))
@@ -430,8 +431,9 @@ def run_wording_qa(html_texts, excel_wordings):
     total = len(results)
     ok = sum(1 for r in results if r["Status"] == "OK")
 
-    print("\n" + "=" * 70)
-    print(f"✅ Total: {total} | OK: {ok} | KO: {total-ok} | "
-          f"Score: {round((ok/total)*100, 2) if total else 0}%")
-    print("=" * 70)
+    if DEBUG_MODE:
+        print("\n" + "=" * 70)
+        print(f"✅ Total: {total} | OK: {ok} | KO: {total-ok} | "
+              f"Score: {round((ok/total)*100, 2) if total else 0}%")
+        print("=" * 70)
     return results

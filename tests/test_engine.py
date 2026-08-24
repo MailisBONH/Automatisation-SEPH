@@ -197,6 +197,46 @@ class TestRunQaForSequenceMergesSiblingUrlSection:
         assert matched[0]["Status"] == "OK"
 
 
+class TestDebugModeGatesMergeDiagnosticPrints:
+    """Les messages de fusion/dedoublonnage (onglet frere, composants
+    generiques, URLs dupliquees) doivent se taire quand DEBUG_MODE est
+    desactive, comme le fait deja qa.html_extraction pour ses propres logs
+    d'extraction - regression test pour l'incoherence corrigee (qa.engine
+    affichait toujours ces messages, quel que soit le flag)."""
+
+    def test_sibling_wording_merge_message_is_not_printed_when_debug_mode_is_disabled(self, tmp_path, monkeypatch, capsys):
+        import qa.engine as engine_module
+        monkeypatch.setattr(engine_module, "DEBUG_MODE", False)
+
+        excel_file = _make_wording_workbook(tmp_path, {
+            "SEQ 1 NON LOYAL": [["Loyalty", "Text", "Dir fehlt noch 1 Punkt", "audit-component-loyalty"]],
+            "SEQ 1 LOYAL": [["Loyalty", "Text", "Dir fehlen noch 2 Punkte", "audit-component-loyalty"]],
+        })
+        html_file = _make_html(tmp_path, "Dir fehlen noch 2 Punkte", "audit-component-loyalty")
+
+        run_qa_for_sequence(html_file, excel_file, "SEQ 1 NON LOYAL", mode="wording")
+
+        # qa.wording_qa.run_wording_qa a son propre resume (gate separement
+        # par SON DEBUG_MODE, voir TestDebugModeGatesSummaryPrint dans
+        # tests/test_wording_qa.py) : seul le message de fusion propre a
+        # qa.engine doit disparaitre ici.
+        assert "Onglet frère" not in capsys.readouterr().out
+
+    def test_sibling_wording_merge_message_is_printed_when_debug_mode_is_enabled(self, tmp_path, monkeypatch, capsys):
+        import qa.engine as engine_module
+        monkeypatch.setattr(engine_module, "DEBUG_MODE", True)
+
+        excel_file = _make_wording_workbook(tmp_path, {
+            "SEQ 1 NON LOYAL": [["Loyalty", "Text", "Dir fehlt noch 1 Punkt", "audit-component-loyalty"]],
+            "SEQ 1 LOYAL": [["Loyalty", "Text", "Dir fehlen noch 2 Punkte", "audit-component-loyalty"]],
+        })
+        html_file = _make_html(tmp_path, "Dir fehlen noch 2 Punkte", "audit-component-loyalty")
+
+        run_qa_for_sequence(html_file, excel_file, "SEQ 1 NON LOYAL", mode="wording")
+
+        assert "Onglet frère" in capsys.readouterr().out
+
+
 class TestRunQaForSequenceReadErrors:
     """
     home.py catche QA_RUN_READ_ERRORS (pas juste ValueError) autour de ses

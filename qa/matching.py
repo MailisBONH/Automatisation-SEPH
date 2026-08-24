@@ -148,7 +148,7 @@ def index_wordings_by_technical_class(excel_wordings: list) -> dict:
     return index
 
 
-def find_best_match(html_item: dict, excel_wordings: list, matched_excel_idx: set, class_index: dict = None):
+def find_best_match(html_item: dict, excel_wordings: list, class_index: dict = None):
     """
     Cherche uniquement parmi les wordings Excel dont la classe technique est
     CONNUE et correspond a la component_class (elle aussi connue) de
@@ -156,6 +156,13 @@ def find_best_match(html_item: dict, excel_wordings: list, matched_excel_idx: se
     wording n'est considere ici (sera traite comme KO, avec une chance
     d'etre rattrape par find_closest_match qui gere ce cas plus finement).
     Si aucun wording de la bonne classe ne matche -> None (sera traite comme KO).
+
+    Ne filtre pas par cellule Excel deja matchee (contrairement a
+    find_split_match) : un meme wording Excel peut legitimement etre
+    matche OK par plusieurs fragments HTML distincts (ex. un CTA repete
+    deux fois dans l'email) - voir run_wording_qa dans qa.wording_qa, qui
+    ne "verrouille" un resultat Direct/Agrege qu'une fois OK, sans jamais
+    exclure les autres fragments HTML de retenter la meme cellule.
 
     class_index (optionnel) : index precalcule par index_wordings_by_technical_class,
     pour ne parcourir que les wordings de la classe recherchee au lieu de
@@ -210,7 +217,7 @@ def find_best_match(html_item: dict, excel_wordings: list, matched_excel_idx: se
     return best
 
 
-def find_aggregated_match(html_items, start_idx, excel_wordings, matched_excel_idx, max_window=3, class_index=None):
+def find_aggregated_match(html_items, start_idx, excel_wordings, max_window=3, class_index=None):
     first_item = html_items[start_idx]
     first_norm = normalize(first_item["text"])
     if first_item["tag"] == "a" and len(first_norm) < 20:
@@ -234,7 +241,7 @@ def find_aggregated_match(html_items, start_idx, excel_wordings, matched_excel_i
         }
         # ────────────────────────────────────────────────────────────────────────────────
 
-        best = find_best_match(chunk_item, excel_wordings, matched_excel_idx, class_index)
+        best = find_best_match(chunk_item, excel_wordings, class_index)
         if best is not None:
             idx, status, error, sim = best
             target_len = len(normalize(excel_wordings[idx]["Wording"]))

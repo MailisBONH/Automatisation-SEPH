@@ -527,3 +527,28 @@ class TestSimilarityIsARealPercentage:
         assert results[0]["Match Type"] == "Functional match only"
         similarity = int(results[0]["Similarity"].rstrip("%"))
         assert 0 < similarity < 100
+
+
+class TestDebugModeGatesSummaryPrint:
+    """Le resume console Total/OK/KO/Score (deja affiche par ailleurs dans
+    l'UI via st.metric, voir home.py) doit se taire quand DEBUG_MODE est
+    desactive - regression test pour l'incoherence corrigee (qa.html_extraction
+    respectait deja ce flag, qa.url_qa affichait toujours son resume)."""
+
+    def test_summary_is_not_printed_when_debug_mode_is_disabled(self, monkeypatch, capsys):
+        import qa.url_qa as url_qa_module
+        monkeypatch.setattr(url_qa_module, "DEBUG_MODE", False)
+
+        html = '<a href="https://example.com/shop">Shop</a>'
+        run_url_qa(html, [excel_entry("https://example.com/shop")])
+
+        assert capsys.readouterr().out == ""
+
+    def test_summary_is_printed_when_debug_mode_is_enabled(self, monkeypatch, capsys):
+        import qa.url_qa as url_qa_module
+        monkeypatch.setattr(url_qa_module, "DEBUG_MODE", True)
+
+        html = '<a href="https://example.com/shop">Shop</a>'
+        run_url_qa(html, [excel_entry("https://example.com/shop")])
+
+        assert "Total:" in capsys.readouterr().out

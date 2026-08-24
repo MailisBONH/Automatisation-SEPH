@@ -6,7 +6,6 @@ import qa.report as report
 from qa.report import (
     _sort_by_criticality,
     build_rich_diff,
-    build_rich_diff_char,
     save_consolidated_report,
     save_report,
     score_fill_color,
@@ -26,13 +25,13 @@ def _bold_parts(rich):
 
 class TestBuildRichDiffChar:
     """
-    Diff caractere par caractere pour le rapport URL (contrairement a
-    build_rich_diff, qui decoupe par mots - inadapte a une URL, qui n'a pas
-    d'espaces).
+    Diff caractere par caractere (char_level=True) pour le rapport URL,
+    contrairement au decoupage par mots par defaut - inadapte a une URL,
+    qui n'a pas d'espaces.
     """
 
     def test_identical_strings_have_no_bold_part(self):
-        rich1, rich2 = build_rich_diff_char("https://example.com/shop", "https://example.com/shop")
+        rich1, rich2 = build_rich_diff("https://example.com/shop", "https://example.com/shop", char_level=True)
         assert _bold_parts(rich1) == []
         assert _bold_parts(rich2) == []
         assert _joined(rich1) == "https://example.com/shop"
@@ -41,24 +40,24 @@ class TestBuildRichDiffChar:
     def test_single_character_typo_is_highlighted_alone(self):
         # "shop" vs "shpo" : seuls "o"/"p" different, pas l'URL entiere -
         # exactement ce qu'un decoupage par mots ne peut pas faire ici.
-        rich1, rich2 = build_rich_diff_char("shop", "shpo")
+        rich1, rich2 = build_rich_diff("shop", "shpo", char_level=True)
         assert _joined(rich1) == "shop"
         assert _joined(rich2) == "shpo"
         # Les caracteres identiques ("sh" au debut) ne sont jamais en gras.
         assert "".join(block.text for block in rich1 if not block.font.b).startswith("sh")
 
     def test_completely_different_strings_are_fully_bold(self):
-        rich1, rich2 = build_rich_diff_char("abc", "xyz")
+        rich1, rich2 = build_rich_diff("abc", "xyz", char_level=True)
         assert _bold_parts(rich1) == ["abc"]
         assert _bold_parts(rich2) == ["xyz"]
 
     def test_empty_strings_produce_no_blocks(self):
-        rich1, rich2 = build_rich_diff_char("", "")
+        rich1, rich2 = build_rich_diff("", "", char_level=True)
         assert list(rich1) == []
         assert list(rich2) == []
 
     def test_none_is_treated_as_empty_string(self):
-        rich1, rich2 = build_rich_diff_char(None, "abc")
+        rich1, rich2 = build_rich_diff(None, "abc", char_level=True)
         assert list(rich1) == []
         assert _joined(rich2) == "abc"
 

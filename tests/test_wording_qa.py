@@ -506,3 +506,32 @@ class TestClosestMatchRow:
         assert row["Status"] == "KO"
         assert row["Error Type"] == KO_WORDING_MISMATCH
         assert row["Match Type"] == "Closest Match"
+
+
+class TestDebugModeGatesSummaryPrint:
+    """Le resume console Total/OK/KO/Score (deja affiche par ailleurs dans
+    l'UI via st.metric, voir home.py) doit se taire quand DEBUG_MODE est
+    desactive - regression test pour l'incoherence corrigee (qa.html_extraction
+    respectait deja ce flag, qa.wording_qa affichait toujours son resume)."""
+
+    def test_summary_is_not_printed_when_debug_mode_is_disabled(self, monkeypatch, capsys):
+        import qa.wording_qa as wording_qa_module
+        monkeypatch.setattr(wording_qa_module, "DEBUG_MODE", False)
+
+        run_wording_qa(
+            [html_item("Hallo", component_class="audit-component-a")],
+            [excel_row("Hallo", technical="audit-component-a")],
+        )
+
+        assert capsys.readouterr().out == ""
+
+    def test_summary_is_printed_when_debug_mode_is_enabled(self, monkeypatch, capsys):
+        import qa.wording_qa as wording_qa_module
+        monkeypatch.setattr(wording_qa_module, "DEBUG_MODE", True)
+
+        run_wording_qa(
+            [html_item("Hallo", component_class="audit-component-a")],
+            [excel_row("Hallo", technical="audit-component-a")],
+        )
+
+        assert "Total:" in capsys.readouterr().out

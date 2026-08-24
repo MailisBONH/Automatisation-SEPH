@@ -97,18 +97,33 @@ def sort_results_by_html_order(df: pd.DataFrame, prefix_columns: list = None) ->
 # =========================
 # RAPPORT EXCEL
 # =========================
-def build_rich_diff(text1, text2):
-
+def build_rich_diff(text1, text2, char_level=False):
+    """
+    Diff en gras rouge (openpyxl CellRichText, pour une cellule de rapport
+    Excel) entre 2 textes. Par mots par defaut (wording) ; char_level=True
+    decoupe caractere par caractere (mode URL, ou une URL n'a pas
+    d'espaces - un decoupage par mots surlignerait l'URL entiere en rouge
+    pour la moindre difference). Meme principe que
+    home.highlight_differences (equivalent cote apercu Streamlit),
+    factorise ici en une seule fonction plutot que deux copies quasi
+    identiques (build_rich_diff/build_rich_diff_char).
+    """
     text1 = str(text1 or "")
     text2 = str(text2 or "")
 
-    words1 = text1.split()
-    words2 = text2.split()
+    if char_level:
+        tokens1 = list(text1)
+        tokens2 = list(text2)
+        sep = ""
+    else:
+        tokens1 = text1.split()
+        tokens2 = text2.split()
+        sep = " "
 
     matcher = difflib.SequenceMatcher(
         None,
-        words1,
-        words2
+        tokens1,
+        tokens2
     )
 
     rich1 = CellRichText()
@@ -123,91 +138,19 @@ def build_rich_diff(text1, text2):
 
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
 
-        part1 = " ".join(words1[i1:i2])
-        part2 = " ".join(words2[j1:j2])
+        part1 = sep.join(tokens1[i1:i2])
+        part2 = sep.join(tokens2[j1:j2])
+        font = normal if tag == "equal" else red_bold
 
-        if tag == "equal":
+        if part1:
+            rich1.append(
+                TextBlock(font, part1 + sep)
+            )
 
-            if part1:
-                rich1.append(
-                    TextBlock(normal, part1 + " ")
-                )
-
-            if part2:
-                rich2.append(
-                    TextBlock(normal, part2 + " ")
-                )
-
-        else:
-
-            if part1:
-                rich1.append(
-                    TextBlock(red_bold, part1 + " ")
-                )
-
-            if part2:
-                rich2.append(
-                    TextBlock(red_bold, part2 + " ")
-                )
-
-    return rich1, rich2
-
-
-def build_rich_diff_char(text1, text2):
-    """
-    Comme build_rich_diff(), mais decoupe caractere par caractere plutot que
-    mot par mot - utilisee pour le rapport URL (qa/url_qa.py), ou un decoupage
-    par mots n'a aucun sens (une URL n'a pas d'espaces : la moindre difference,
-    meme un seul caractere, ferait surligner l'URL entiere en rouge).
-    """
-
-    text1 = str(text1 or "")
-    text2 = str(text2 or "")
-
-    matcher = difflib.SequenceMatcher(
-        None,
-        text1,
-        text2
-    )
-
-    rich1 = CellRichText()
-    rich2 = CellRichText()
-
-    red_bold = InlineFont(
-        color="FF0000",
-        b=True
-    )
-
-    normal = InlineFont()
-
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-
-        part1 = text1[i1:i2]
-        part2 = text2[j1:j2]
-
-        if tag == "equal":
-
-            if part1:
-                rich1.append(
-                    TextBlock(normal, part1)
-                )
-
-            if part2:
-                rich2.append(
-                    TextBlock(normal, part2)
-                )
-
-        else:
-
-            if part1:
-                rich1.append(
-                    TextBlock(red_bold, part1)
-                )
-
-            if part2:
-                rich2.append(
-                    TextBlock(red_bold, part2)
-                )
+        if part2:
+            rich2.append(
+                TextBlock(font, part2 + sep)
+            )
 
     return rich1, rich2
 
@@ -244,10 +187,6 @@ URL_HEADER_LABELS = {
 
 
 def _write_results_sheet(ws_target, df_data, header_color, columns, header_labels=None, char_diff=False):
-    # char_diff=True (mode URL) : diff caractere par caractere plutot que
-    # mot par mot - une URL n'a pas d'espaces, un decoupage par mots
-    # surlignerait l'URL entiere en rouge pour la moindre difference.
-    diff_fn = build_rich_diff_char if char_diff else build_rich_diff
 
     status_idx = columns.index("Status")
     excel_idx = columns.index("Excel Wording")
@@ -275,9 +214,10 @@ def _write_results_sheet(ws_target, df_data, header_color, columns, header_label
 
                 html_wording = row[html_idx]
 
-                rich_excel, _ = diff_fn(
+                rich_excel, _ = build_rich_diff(
                     safe_val,
-                    html_wording
+                    html_wording,
+                    char_level=char_diff
                 )
 
                 cell.value = rich_excel
@@ -289,9 +229,10 @@ def _write_results_sheet(ws_target, df_data, header_color, columns, header_label
 
                 excel_wording = row[excel_idx]
 
-                _, rich_html = diff_fn(
+                _, rich_html = build_rich_diff(
                     excel_wording,
-                    safe_val
+                    safe_val,
+                    char_level=char_diff
                 )
 
                 cell.value = rich_html

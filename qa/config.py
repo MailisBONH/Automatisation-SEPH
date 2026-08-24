@@ -53,10 +53,15 @@ WORDING_COLUMN_NAME = "TRANSLATION"       # Mot-clé (insensible à la casse) de
 CAMPAIGN_KEYWORD = "HugPlan S1 Bronze"    # Mot-clé pour sélectionner l'onglet dans l'Excel
 MIN_TEXT_LENGTH = 3
 
-# Active les logs detailles d'extraction (print) affiches dans l'expander
-# "Logs de debug" de l'UI. Override possible sans toucher au code via la
-# variable d'environnement QA_DEBUG_MODE (ex: "0"/"false" pour desactiver),
-# utile pour couper ces logs en environnement partage sans redeployer.
+# Active les logs detailles (print) affiches dans l'expander "Logs de
+# debug" de l'UI : extraction HTML (qa.html_extraction), fusions/
+# dedoublonnages onglet frere/generique/URL et resume Total/OK/KO/Score
+# (qa.engine, qa.wording_qa, qa.url_qa) - le score final reste par ailleurs
+# toujours visible ailleurs dans l'UI (metrique/graphiques), ce print n'est
+# qu'une trace console redondante. Override possible sans toucher au code
+# via la variable d'environnement QA_DEBUG_MODE (ex: "0"/"false" pour
+# desactiver), utile pour couper ces logs en environnement partage sans
+# redeployer.
 DEBUG_MODE = os.environ.get("QA_DEBUG_MODE", "1").strip().lower() not in ("0", "false", "")
 
 URL_SHEET_KEYWORD = "UTM"                 # Mot-clé pour repérer l'onglet des URLs trackées
