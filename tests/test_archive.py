@@ -1,10 +1,28 @@
 import os
 import time
+from datetime import datetime as real_datetime
 
 import pytest
 
 import qa.archive as archive
 from conftest import fake_incrementing_datetime
+
+
+def _fixed_datetime(monkeypatch, when=None):
+    """Remplace qa.archive.datetime par un objet dont .now() renvoie
+    TOUJOURS la meme valeur - simule deux archive_report() declenches dans
+    la meme seconde d'horloge murale (ex. le mode "Wording + URL" qui
+    archive plusieurs onglets a la suite dans une boucle serree), contraste
+    avec fake_incrementing_datetime (utilise ailleurs pour EVITER cette
+    collision) qui ne convient pas pour reproduire le bug lui-meme."""
+    frozen = when or real_datetime(2026, 1, 1, 0, 0, 0)
+
+    class FixedDateTime:
+        @staticmethod
+        def now():
+            return frozen
+
+    monkeypatch.setattr(archive, "datetime", FixedDateTime)
 
 
 @pytest.fixture(autouse=True)
@@ -112,6 +130,44 @@ class TestArchiveReportAndListReports:
         assert os.path.exists(paths[2])
         assert os.path.exists(paths[3])
 
+    def test_same_second_archiving_does_not_overwrite_previous_report(self, tmp_path, isolated_output, monkeypatch):
+        # Regression: deux archive_report() pour le meme
+        # (country, trigger, sequence, mode) dans la meme seconde d'horloge
+        # (timestamp de nom de fichier a la seconde pres, voir
+        # archive_report) produisaient jusqu'ici le meme dest_path - le
+        # second shutil.copy2 ecrasait alors silencieusement le premier
+        # rapport archive, sans aucun avertissement. Realiste en usage reel
+        # via le mode combine "Wording + URL", qui archive plusieurs onglets
+        # (ex. "SEQ 1 LOYAL" et "SEQ 1 NON LOYAL", tous deux normalises vers
+        # la meme sequence "SEQ 1") l'un apres l'autre dans une boucle
+        # serree, largement dans la meme seconde.
+        _fixed_datetime(monkeypatch)
+        report_a = str(tmp_path / "a.xlsx")
+        report_b = str(tmp_path / "b.xlsx")
+        with open(report_a, "wb") as f:
+            f.write(b"content A")
+        with open(report_b, "wb") as f:
+            f.write(b"content B")
+
+        dest_a = archive.archive_report(report_a, "Germany", "Revamp Inac", "SEQ 1", mode="wording")
+        dest_b = archive.archive_report(report_b, "Germany", "Revamp Inac", "SEQ 1", mode="wording")
+
+        assert dest_a != dest_b
+        assert os.path.exists(dest_a)
+        assert os.path.exists(dest_b)
+        with open(dest_a, "rb") as f:
+            content_a = f.read()
+        with open(dest_b, "rb") as f:
+            content_b = f.read()
+        assert content_a != content_b
+        with open(report_a, "rb") as f:
+            assert content_a == f.read()
+        with open(report_b, "rb") as f:
+            assert content_b == f.read()
+
+        reports = archive.list_reports("Germany", "Revamp Inac", "SEQ 1", mode="wording")
+        assert len(reports) == 2
+
     def test_rotation_does_not_affect_other_types(self, tmp_path, isolated_output, monkeypatch):
         fake_incrementing_datetime(monkeypatch)
         report = _make_report(tmp_path)
@@ -170,6 +226,32 @@ class TestMoveSequenceDir:
         merged = archive.list_reports("Germany", "Revamp Inac", "SEQ 1 NON LOYAL", mode="wording")
         # Rotation reappliquee apres fusion : au plus KEEP_REPORTS conserves.
         assert 1 <= len(merged) <= archive.KEEP_REPORTS
+
+    def test_case_only_rename_is_a_no_op_and_preserves_filenames(self, tmp_path, isolated_output, monkeypatch):
+        # Regression: sur un systeme de fichiers insensible a la casse
+        # (Windows), un renommage qui ne change QUE la casse de la sequence
+        # (ex. "seq 1" -> "SEQ 1") resout src_dir et dst_dir vers le MEME
+        # dossier physique. Avant le correctif, la boucle de collision
+        # trouvait chaque fichier "deja present" a destination (puisque
+        # c'etait le fichier source lui-meme) et le renommait a tort en
+        # suffixant "_fusionne", corrompant les noms de fichiers pour ce qui
+        # devrait etre un pur no-op.
+        fake_incrementing_datetime(monkeypatch)
+        report = _make_report(tmp_path)
+        dest = archive.archive_report(report, "Germany", "Revamp Inac", "seq 1", mode="wording")
+        original_name = os.path.basename(dest)
+
+        archive.move_sequence_dir(
+            "Germany", "Revamp Inac", "seq 1",
+            "Germany", "Revamp Inac", "SEQ 1"
+        )
+
+        seq_dir = archive.sequence_dir("Germany", "Revamp Inac", "SEQ 1")
+        files = os.listdir(seq_dir)
+        assert files == [original_name]
+        assert not any("_fusionne" in fname for fname in files)
+        with open(os.path.join(seq_dir, original_name), "rb") as f:
+            assert f.read() == b"fake xlsx content"
 
     def test_missing_source_is_a_no_op(self, isolated_output):
         archive.move_sequence_dir(

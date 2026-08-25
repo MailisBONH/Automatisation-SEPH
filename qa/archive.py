@@ -92,7 +92,27 @@ def archive_report(report_path: str, country: str, trigger: str, sequence: str, 
     os.makedirs(dest_dir, exist_ok=True)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    dest_path = os.path.join(dest_dir, f"QA_{mode}_{safe_folder_name(sequence)}_{timestamp}.xlsx")
+    base_name = f"QA_{mode}_{safe_folder_name(sequence)}_{timestamp}"
+    dest_path = os.path.join(dest_dir, f"{base_name}.xlsx")
+    # La resolution du timestamp est a la seconde : plusieurs archive_report()
+    # pour le meme (country, trigger, sequence, mode) dans la meme seconde
+    # (ex. le mode "Wording + URL" qui archive plusieurs onglets a la suite
+    # dans une boucle serree) produiraient sinon un dest_path identique, et
+    # le shutil.copy2 suivant ecraserait silencieusement le rapport
+    # precedent. On suffixe par un compteur incrementel tant que le chemin
+    # est deja pris - le pattern de glob utilise par list_reports/la rotation
+    # ("QA_<mode>_*.xlsx") continue de matcher ces fichiers suffixes, et le
+    # suffixe "_N" trie apres le "." de l'extension du fichier non suffixe
+    # (donc apres lui dans le tri alphabetique inverse de list_reports), ce
+    # qui le classe correctement comme "plus recent". Verification puis copie
+    # se font l'une apres l'autre sans attente entre les deux : suffisant
+    # pour une boucle rapide au sein d'un seul processus (cette appli tourne
+    # en un seul processus Streamlit), pas concu pour une vraie concurrence
+    # inter-processus.
+    counter = 2
+    while os.path.exists(dest_path):
+        dest_path = os.path.join(dest_dir, f"{base_name}_{counter}.xlsx")
+        counter += 1
     shutil.copy2(report_path, dest_path)
 
     for old_file in list_reports(country, trigger, sequence, mode=mode)[KEEP_REPORTS:]:
@@ -158,6 +178,21 @@ def move_sequence_dir(old_country: str, old_trigger: str, old_sequence: str,
         return
 
     dst_dir = sequence_dir(new_country, new_trigger, new_sequence)
+
+    # Sur un systeme de fichiers insensible a la casse (Windows, cas de cette
+    # appli), un (country, trigger, sequence) qui ne differe du precedent que
+    # par la casse (ex. "seq 1" -> "SEQ 1", ou un pays/trigger dont seule la
+    # casse change) resout src_dir et dst_dir vers le MEME dossier physique.
+    # C'est alors un no-op : rien a deplacer. Sans ce garde-fou, la boucle de
+    # collision ci-dessous trouverait chaque fichier "deja present" a
+    # destination (puisque c'est le fichier source lui-meme) et le
+    # suffixerait a tort en "_fusionne", corrompant les noms de fichiers pour
+    # ce qui devrait etre une simple correction de casse. os.path.exists()
+    # avant samefile() protege le cas (le cas normal, non case-only) ou
+    # dst_dir n'existe pas encore.
+    if os.path.exists(dst_dir) and os.path.samefile(src_dir, dst_dir):
+        return
+
     os.makedirs(dst_dir, exist_ok=True)
 
     for fname in os.listdir(src_dir):

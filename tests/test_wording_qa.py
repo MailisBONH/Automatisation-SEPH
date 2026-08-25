@@ -99,6 +99,43 @@ class TestFinalDedupCoversOkRows:
         assert results[0]["Status"] == "KO"
         assert results[0]["Error Type"] == KO_COMPONENT_CLASS_NOT_FOUND
 
+    def test_split_ok_match_marks_excel_row_covered_no_contradictory_ko_duplicate(self):
+        # Regression : contrairement au cas ci-dessus (classe HTML inconnue,
+        # Split KO), quand Split valide un fragment en OK avec une classe
+        # HTML connue et coherente, la cellule Excel correspondante DOIT
+        # etre marquee comme couverte (matched_excel_counts), exactement
+        # comme le font deja les blocs Direct et Agregation sur leur propre
+        # branche OK. Sans cela, _unmatched_excel_rows la retrouve "non
+        # couverte" en fin de pipeline, cherche le fragment HTML le plus
+        # proche (ici, le MEME fragment deja valide OK) et le reporte une
+        # 2e fois en KO ("Wording relocated"), contredisant le OK deja
+        # rapporte pour ce texte identique.
+        excel_wordings = [excel_row(
+            "Contact us Imprint Privacy policy for full details about how we handle your personal data",
+            technical="audit-component-footer",
+        )]
+        html_texts = [html_item(
+            # Sous-phrase genuine de la cellule Excel (prefixe, il manque
+            # juste le dernier mot) : Direct reste KO (Near exact, ~97%,
+            # sous SIM_NEAR_EXACT/OK qui exige l'egalite stricte), donc
+            # seul Split peut la valider en OK via l'inclusion HTML ⊂ Excel.
+            "Contact us Imprint Privacy policy for full details about how we handle your personal",
+            component_class="audit-component-footer",
+        )]
+
+        results = run_wording_qa(html_texts, excel_wordings)
+
+        matching_rows = [
+            r for r in results
+            if r.get("HTML Wording") == "Contact us Imprint Privacy policy for full details about how we handle your personal"
+        ]
+        assert len(matching_rows) == 1
+        assert matching_rows[0]["Status"] == "OK"
+        assert matching_rows[0]["Match Type"] == "Split (HTML ⊂ Excel)"
+        # Aucune autre ligne (ex: KO "Wording relocated") ne doit avoir ete
+        # ajoutee pour cette meme cellule Excel via le fallback "non couvert".
+        assert len(results) == 1
+
 
 class TestLowQualityBestEffortIsHonestlyUnexpectedWording:
     """

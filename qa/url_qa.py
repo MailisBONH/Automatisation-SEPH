@@ -197,6 +197,15 @@ def run_url_qa(raw_html: str, excel_urls: list) -> list:
         exact_href, exact_class = None, ""
         ignored_query_href, ignored_query_class = None, ""
         functional_href, functional_class = None, ""
+        # Tous les hrefs HTML qui correspondent (peu importe le tier) a
+        # CETTE URL Excel - pas seulement celui choisi ci-dessous pour la
+        # ligne de resultat. Necessaire pour que le sens inverse (liens HTML
+        # jamais retrouves, voir plus bas) ne signale pas a tort comme
+        # "Unexpected URL" un second lien qui pointe legitimement vers la
+        # meme destination sous une forme litterale differente (ordre des
+        # parametres, ou variante query-ignoree) - ex. un CTA duplique en
+        # header et en footer.
+        all_matching_hrefs = set()
 
         for link in links:
             href = link["href"].strip()
@@ -204,13 +213,16 @@ def run_url_qa(raw_html: str, excel_urls: list) -> list:
             html_variants = expand_conditional_variants(href_unescaped)
 
             match_kind = _classify_href_match(html_variants, excel_variants, norm_excel_variants)
+            if not match_kind:
+                continue
+
+            all_matching_hrefs.add(href)
 
             if match_kind == "exact" and exact_href is None:
                 exact_href = href
                 exact_class = link["component_class"]
-                break  # rien de mieux possible pour cette URL Excel
 
-            if match_kind == "query_ignored" and ignored_query_href is None:
+            elif match_kind == "query_ignored" and ignored_query_href is None:
                 ignored_query_href = href
                 ignored_query_class = link["component_class"]
 
@@ -251,8 +263,16 @@ def run_url_qa(raw_html: str, excel_urls: list) -> list:
         # wording). Ne s'applique que si un href a effectivement ete trouve
         # (rien a comparer sinon) et si les DEUX classes sont connues :
         # "None != None" serait sinon a tort traite comme "differentes".
-        class_known = bool(expected_class) and bool(found_class)
-        class_mismatch = bool(found_href) and class_known and expected_class != found_class
+        #
+        # expected_class peut porter PLUSIEURS labels joints par " / "
+        # (qa.engine fusionne ainsi les URLs identiques d'une section soeur
+        # FID/NON FID qui portaient des labels differents) : le lien est
+        # valide des qu'il correspond a N'IMPORTE LEQUEL des labels
+        # attendus, puisque chacun represente une audience possible du meme
+        # template HTML.
+        expected_labels = {part.strip() for part in expected_class.split(" / ") if part.strip()}
+        class_known = bool(expected_labels) and bool(found_class)
+        class_mismatch = bool(found_href) and class_known and found_class not in expected_labels
 
         # Classe HTML introuvable (aucune classe audit-component autour du
         # lien trouve) : contrairement au cas ci-dessus, on ne sait meme pas
@@ -275,8 +295,7 @@ def run_url_qa(raw_html: str, excel_urls: list) -> list:
         else:
             status, error, crit, match_type = base_status, base_error, base_crit, base_match_type
 
-        if found_href:
-            matched_hrefs.add(found_href)
+        matched_hrefs.update(all_matching_hrefs)
 
         results.append(_make_url_row(
             expected_class, found_class, excel_url, found_href, status, error, crit, match_type,

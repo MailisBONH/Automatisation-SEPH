@@ -264,9 +264,9 @@ with st.expander("📊 Vue d'ensemble (toutes les séquences)", expanded=nav["se
     filtered_df = overview_df
     if search:
         mask = (
-            overview_df["Pays"].str.contains(search, case=False, na=False)
-            | overview_df["Trigger"].str.contains(search, case=False, na=False)
-            | overview_df["Séquence"].str.contains(search, case=False, na=False)
+            overview_df["Pays"].str.contains(search, case=False, na=False, regex=False)
+            | overview_df["Trigger"].str.contains(search, case=False, na=False, regex=False)
+            | overview_df["Séquence"].str.contains(search, case=False, na=False, regex=False)
         )
         filtered_df = overview_df[mask]
 

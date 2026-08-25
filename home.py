@@ -1245,19 +1245,24 @@ def _uploaded_file_identity(f):
     return (f.name, hashlib.sha1(f.getvalue()).hexdigest())
 
 
-def _current_inputs_signature(mode, batch_mode, excel_file, html_file, html_files):
+def _current_inputs_signature(mode, batch_mode, excel_file, html_file, html_files, assignments_signature=()):
     """Signature des entrees qui definissent CE que produirait un clic sur
-    "Comparer" (type de test + fichier(s) uploade(s)) - comparee au rerun
-    precedent plus bas dans le script pour effacer last_run des qu'elle
-    change, plutot que de laisser un ancien resultat affiche a tort alors
-    qu'il ne correspond plus a la selection courante (fichier remplace,
-    mode Wording/URL/Wording + URL change...)."""
+    "Comparer" (type de test + fichier(s) uploade(s) + association(s)
+    fichier -> sequence) - comparee au rerun precedent plus bas dans le
+    script pour effacer last_run des qu'elle change, plutot que de laisser
+    un ancien resultat affiche a tort alors qu'il ne correspond plus a la
+    selection courante (fichier remplace, mode Wording/URL/Wording + URL
+    change, sequence/onglet ou association de fichier reassignee...).
+    assignments_signature : tuple hashable dependant du mode (wording_keyword/
+    url_keyword en mode simple, association fichier -> sequence(s) en mode
+    multi-sequences) - voir l'appelant."""
     return (
         mode,
         batch_mode,
         _uploaded_file_identity(excel_file),
         _uploaded_file_identity(html_file),
         tuple(_uploaded_file_identity(f) for f in (html_files or [])),
+        assignments_signature,
     )
 
 
@@ -1320,11 +1325,27 @@ def _apply_high_confidence_sequence_guesses(files, options, key_prefix):
     de l'utilisateur (il doit cliquer le bouton "🪄 Appliquer les
     suggestions"), jamais une pre-selection automatique silencieuse au
     chargement de la page - meme principe que _guess_sequence_choice, avec
-    un seuil plus strict puisqu'ici la selection est appliquee sans relecture."""
-    for f in files:
+    un seuil plus strict puisqu'ici la selection est appliquee sans relecture.
+
+    Cle prefixee par l'INDEX du fichier (pas seulement son nom, voir
+    _sequence_widget_key) : deux fichiers uploades portant le meme nom
+    (courant pour un export "view-source" AEM non renomme) doivent rester
+    pre-remplis independamment plutot que de cibler la meme entree
+    session_state."""
+    for i, f in enumerate(files):
         option, score = _best_sequence_guess(f.name, options)
         if option and score >= _SEQUENCE_GUESS_HIGH_CONFIDENCE_SCORE:
-            st.session_state[key_prefix + f.name] = option
+            st.session_state[_sequence_widget_key(key_prefix, i, f.name)] = option
+
+
+def _sequence_widget_key(prefix, index, filename):
+    """Cle de widget (selectbox d'association fichier -> sequence, en mode
+    batch) unique par (index, nom de fichier) plutot que par le seul nom :
+    Streamlit refuse deux widgets explicites portant la meme cle au sein
+    d'un meme run, et deux fichiers HTML uploades peuvent tout a fait
+    partager le meme nom (ex. plusieurs exports "view-source" AEM jamais
+    renommes) - sans l'index, un tel doublon plantait toute la page."""
+    return f"{prefix}{index}_{filename}"
 
 
 _DIAGNOSTIC_RENDERERS = {
@@ -1727,22 +1748,6 @@ if html_file:
     with open(html_path, "wb") as f:
         f.write(html_file.getvalue())
 
-# =========================
-# EFFACE LE DERNIER RESULTAT SI LES ENTREES ONT CHANGE
-# =========================
-# Sans ca, changer de fichier ou de type de test (mode) sans recliquer sur
-# "Comparer" laissait l'ancien resultat affiche (voir le commentaire sur la
-# persistance de last_run plus bas) : il pouvait alors etre confondu avec un
-# resultat correspondant a la selection courante. Comparee au rerun
-# PRECEDENT (pas au dernier run archive) : un rerun sans changement reel
-# (interaction avec un autre widget de la page) ne doit pas effacer le
-# resultat en cours.
-current_inputs_signature = _current_inputs_signature(mode, batch_mode, excel_file, html_file, html_files)
-previous_inputs_signature = st.session_state.get("_inputs_signature")
-if previous_inputs_signature is not None and previous_inputs_signature != current_inputs_signature:
-    st.session_state.pop("last_run", None)
-st.session_state["_inputs_signature"] = current_inputs_signature
-
 sequence_assignments = []
 combined_sequence_assignments = []
 
@@ -1801,14 +1806,18 @@ if batch_mode and mode == "Wording + URL":
                     _apply_high_confidence_sequence_guesses(html_files, url_sequence_names, "useq_")
                 st.rerun()
 
-            for f in html_files:
+            wording_seq_seen = set()
+            url_seq_seen = set()
+            duplicate_files = []
+
+            for i, f in enumerate(html_files):
                 col_a, col_b = st.columns(2)
                 with col_a:
                     w_choice = st.selectbox(
                         f"Onglet Wording pour **{f.name}**",
                         [NO_SELECTION] + wording_sheet_names,
                         format_func=lambda x: wording_sheet_labels.get(x, x),
-                        key=f"wseq_{f.name}"
+                        key=_sequence_widget_key("wseq_", i, f.name)
                     )
                     if w_choice == NO_SELECTION:
                         w_guess = _guess_sequence_choice(f.name, wording_sheet_names)
@@ -1820,7 +1829,7 @@ if batch_mode and mode == "Wording + URL":
                             f"Séquence URL pour **{f.name}**",
                             [NO_SELECTION] + url_sequence_names,
                             format_func=lambda x: url_sequence_labels.get(x, x),
-                            key=f"useq_{f.name}"
+                            key=_sequence_widget_key("useq_", i, f.name)
                         )
                         if u_choice == NO_SELECTION:
                             u_guess = _guess_sequence_choice(f.name, url_sequence_names)
@@ -1830,9 +1839,27 @@ if batch_mode and mode == "Wording + URL":
                         u_choice = w_choice  # onglet UTM a sequence unique : reutilise la sequence wording
 
                 if w_choice != NO_SELECTION and u_choice != NO_SELECTION:
-                    combined_sequence_assignments.append((f, w_choice, u_choice))
+                    # Deux fichiers assignes a la MEME sequence Wording (ou a
+                    # la meme sequence URL) ecraseraient silencieusement l'un
+                    # des deux resultats (wording_results_by_sequence et
+                    # url_results_by_sequence sont chacun indexes par nom de
+                    # sequence, voir _execute_combined_batch) - on ecarte le
+                    # doublon plutot que de laisser un fichier disparaitre sans
+                    # aucune trace.
+                    if w_choice in wording_seq_seen or u_choice in url_seq_seen:
+                        duplicate_files.append(f.name)
+                    else:
+                        wording_seq_seen.add(w_choice)
+                        url_seq_seen.add(u_choice)
+                        combined_sequence_assignments.append((f, w_choice, u_choice))
 
-            unassigned = len(html_files) - len(combined_sequence_assignments)
+            if duplicate_files:
+                st.warning(
+                    "⚠️ Plusieurs fichiers pointent vers la même paire de séquences "
+                    f"Wording/URL, seul le premier sera comparé : {', '.join(duplicate_files)}."
+                )
+
+            unassigned = len(html_files) - len(combined_sequence_assignments) - len(duplicate_files)
             if unassigned:
                 st.warning(
                     f"⚠️ {unassigned} fichier(s) incomplet(s) (séquence Wording et/ou URL manquante) : "
@@ -1875,21 +1902,38 @@ elif batch_mode:
                 _apply_high_confidence_sequence_guesses(html_files, sequence_options, "seq_choice_")
                 st.rerun()
 
-            for f in html_files:
+            seq_seen = set()
+            duplicate_files = []
+
+            for i, f in enumerate(html_files):
                 choice = st.selectbox(
                     f"Séquence pour **{f.name}**",
                     [NO_SELECTION] + sequence_options,
                     format_func=lambda x: sequence_labels.get(x, x),
-                    key=f"seq_choice_{f.name}"
+                    key=_sequence_widget_key("seq_choice_", i, f.name)
                 )
                 if choice == NO_SELECTION:
                     guess = _guess_sequence_choice(f.name, sequence_options)
                     if guess:
                         st.caption(f"💡 Suggestion d'après le nom du fichier : {sequence_labels.get(guess, guess)}")
+                elif choice in seq_seen:
+                    # Deux fichiers assignes a la meme sequence ecraseraient
+                    # silencieusement l'un des deux resultats
+                    # (results_by_sequence est indexe par nom de sequence,
+                    # voir _execute_batch) - on ecarte le doublon plutot que
+                    # de laisser un fichier disparaitre sans aucune trace.
+                    duplicate_files.append(f.name)
                 else:
+                    seq_seen.add(choice)
                     sequence_assignments.append((f, choice))
 
-            unassigned = len(html_files) - len(sequence_assignments)
+            if duplicate_files:
+                st.warning(
+                    "⚠️ Plusieurs fichiers pointent vers la même séquence, seul le premier sera "
+                    f"comparé : {', '.join(duplicate_files)}."
+                )
+
+            unassigned = len(html_files) - len(sequence_assignments) - len(duplicate_files)
             if unassigned:
                 st.warning(
                     f"⚠️ {unassigned} fichier(s) sans séquence sélectionnée : ils ne seront pas comparés."
@@ -1971,6 +2015,37 @@ else:
 # les deux vrais dans ce cas, voir plus haut), qa_mode reste le mode unique
 # teste pour toutes les sequences.
 qa_mode = "wording" if mode == "Wording" else "url"
+
+# =========================
+# EFFACE LE DERNIER RESULTAT SI LES ENTREES ONT CHANGE
+# =========================
+# Sans ca, changer de fichier, de type de test (mode), de sequence/onglet
+# choisi, ou (mode multi-sequences) l'association fichier -> sequence d'un
+# des fichiers du lot, sans recliquer sur "Comparer", laissait l'ancien
+# resultat affiche (voir le commentaire sur la persistance de last_run plus
+# bas) : il pouvait alors etre confondu avec un resultat correspondant a la
+# selection courante. Place ICI (apres que sequence_assignments/
+# combined_sequence_assignments soient finalises par les blocs ci-dessus, et
+# non juste apres l'upload des fichiers) pour que la signature reflete aussi
+# ces associations - une simple re-association de fichier ne change ni le
+# fichier ni le mode, donc une signature basee uniquement sur ceux-ci la
+# manquerait. Comparee au rerun PRECEDENT (pas au dernier run archive) : un
+# rerun sans changement reel (interaction avec un autre widget de la page)
+# ne doit pas effacer le resultat en cours.
+if batch_mode and mode == "Wording + URL":
+    assignments_signature = tuple((f.name, w, u) for f, w, u in combined_sequence_assignments)
+elif batch_mode:
+    assignments_signature = tuple((f.name, s) for f, s in sequence_assignments)
+else:
+    assignments_signature = (wording_keyword, url_keyword)
+
+current_inputs_signature = _current_inputs_signature(
+    mode, batch_mode, excel_file, html_file, html_files, assignments_signature
+)
+previous_inputs_signature = st.session_state.get("_inputs_signature")
+if previous_inputs_signature is not None and previous_inputs_signature != current_inputs_signature:
+    st.session_state.pop("last_run", None)
+st.session_state["_inputs_signature"] = current_inputs_signature
 
 # =========================
 # DIAGNOSTIC EXCEL (avant de lancer la QA, hors mode multi-séquences)

@@ -195,6 +195,52 @@ class TestPopulatedHistory:
         assert at.subheader[0].value == "France — choisissez un trigger"
 
 
+class TestOverviewSearchBox:
+    """Champ "🔍 Rechercher une séquence" du panneau "Vue d'ensemble" : doit
+    rester une recherche texte litterale, jamais interpretee comme une
+    regex (voir mask = ...str.contains(..., regex=False) dans
+    pages/1_Historique.py) - un utilisateur peut taper des caracteres
+    speciaux regex (parenthese non fermee, point, crochet...) sans faire
+    planter toute la page."""
+
+    def _seed_two_sequences(self):
+        record_run(
+            "SEQ 1", "wording", total=10, ok=8, ko=2, score=80.0,
+            country="France", trigger="revamp_inac", sequence="SEQ 1",
+        )
+        record_run(
+            "SEQ 2", "wording", total=10, ok=10, ko=0, score=100.0,
+            country="Germany", trigger="welcome", sequence="SEQ 2",
+        )
+
+    def test_regex_metacharacters_in_search_do_not_crash_the_page(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        self._seed_two_sequences()
+
+        at = _run_page()
+        # Parenthese non fermee : un regex invalide si interprete comme tel
+        # (re.error / pyarrow.lib.ArrowInvalid avant le correctif regex=False).
+        at.text_input(key="history_search").set_value("SEQ (1").run()
+
+        assert not at.exception
+        rows = at.dataframe[0].value.to_dict("records")
+        # Recherche litterale de "SEQ (1" : aucune séquence archivée ne
+        # contient cette sous-chaine exacte -> aucun resultat, mais pas de crash.
+        assert rows == []
+
+    def test_search_still_behaves_as_a_plain_literal_substring_filter(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        self._seed_two_sequences()
+
+        at = _run_page()
+        at.text_input(key="history_search").set_value("SEQ 1").run()
+
+        assert not at.exception
+        rows = at.dataframe[0].value.to_dict("records")
+        assert len(rows) == 1
+        assert rows[0]["Séquence"] == "SEQ 1"
+
+
 class TestRecentSequences:
     """Boutons "🕘 Récemment consultées" au-dessus du fil d'Ariane (voir
     _record_recent_sequence) : permettent de revenir directement a une

@@ -108,6 +108,24 @@ def _refresh_backup(path: str) -> None:
         pass
 
 
+def _restore_from_backup(path: str) -> bool:
+    """Ecrase `path` avec le contenu de son `.bak` s'il existe. Utilise par
+    _with_connection avant une ecriture sur une base tronquee a 0 octet (voir
+    plus bas) : repartir de la derniere version connue-saine avant d'inserer
+    evite que la ligne inseree ensuite se retrouve seule dans une base
+    "fraiche", que _refresh_backup ecraserait alors par-dessus la sauvegarde
+    qui contenait l'historique reel. Retourne True si une sauvegarde
+    existait et a ete restauree avec succes."""
+    backup = _backup_path(path)
+    if not os.path.exists(backup):
+        return False
+    try:
+        shutil.copy2(backup, path)
+        return True
+    except OSError:
+        return False
+
+
 def _with_connection(path: str, fn, default=None, mutates: bool = False):
     """Ouvre une connexion SQLite sur `path`, execute `fn(conn)` sous
     `_LOCK`, et retourne son resultat - ou `default` si la moindre erreur
@@ -118,8 +136,31 @@ def _with_connection(path: str, fn, default=None, mutates: bool = False):
     son os.makedirs) comme ne le faisait auparavant que record_run.
     `mutates=True` rafraichit la sauvegarde .bak apres succes (voir
     _refresh_backup) pour les fonctions qui modifient la base plutot que la
-    lisent seulement."""
+    lisent seulement.
+
+    Garde-fou special pour un fichier tronque a 0 octet (ex. synchronisation
+    OneDrive interrompue en plein ecriture) : sqlite3.connect() suivi de
+    `CREATE TABLE IF NOT EXISTS` reussirait silencieusement sur un fichier
+    vide (SQLite y voit une base neuve, pas une erreur), ce qui serait
+    indistinguable d'une base valide qui se trouve juste vide. Sans ce
+    garde-fou, une lecture y verrait [] au lieu de retomber sur .bak (voir
+    _select_entries, qui ne se replie que sur une erreur), et une ecriture
+    qui suivrait (mutates=True) inserterait sa ligne dans cette base
+    quasi-vide puis rafraichirait .bak avec elle - detruisant de facon
+    permanente la derniere sauvegarde connue-saine. On traite donc ce cas
+    comme une erreur de lecture (`default`), et pour une ecriture on
+    restaure d'abord .bak (s'il existe) avant de continuer, plutot que de
+    laisser l'ecriture repartir de zero puis ecraser la sauvegarde."""
     with _LOCK:
+        if os.path.exists(path) and os.path.getsize(path) == 0:
+            if not mutates:
+                return default
+            if os.path.exists(_backup_path(path)) and not _restore_from_backup(path):
+                # Sauvegarde presente mais restauration impossible (ex.
+                # permissions insuffisantes) : ne surtout pas continuer sur
+                # cette base vide, ce qui ecraserait ensuite la sauvegarde
+                # saine avec un quasi-rien (voir _refresh_backup ci-dessous).
+                return default
         try:
             with contextlib.closing(_connect(path)) as conn:
                 conn.executescript(_SCHEMA)

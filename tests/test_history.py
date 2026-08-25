@@ -100,6 +100,46 @@ class TestRecordAndLoadHistory:
         assert len(entries) == 1
         assert entries[0]["score"] == 80.0
 
+    def test_truncated_primary_db_falls_back_to_backup_and_does_not_lose_data_on_next_write(self, tmp_path):
+        # Bug reproduit : une synchronisation OneDrive interrompue peut
+        # tronquer history.db a 0 octet. sqlite3.connect() + CREATE TABLE
+        # IF NOT EXISTS reussissent silencieusement sur un fichier vide (une
+        # base SQLite valide, juste vide), ce qui est indistinguable d'une
+        # base valide qui se trouve juste vide si on ne verifie rien de
+        # plus : une lecture y verrait [] plutot que de retomber sur .bak,
+        # et un record_run qui suivrait ecraserait .bak (mutates=True) avec
+        # cette base quasi-vide, detruisant l'historique reel de facon
+        # permanente.
+        path = str(tmp_path / "history.db")
+        record_run("SEQ 1", "wording", 10, 8, 2, 80.0, path=path,
+                   country="Germany", trigger="T", sequence="SEQ 1")
+        record_run("SEQ 1", "wording", 10, 9, 1, 90.0, path=path,
+                   country="Germany", trigger="T", sequence="SEQ 1")
+        record_run("SEQ 1", "wording", 10, 10, 0, 100.0, path=path,
+                   country="Germany", trigger="T", sequence="SEQ 1")
+        assert os.path.exists(path + ".bak")
+
+        # Simule la troncature a 0 octet (fichier existant, mais vide).
+        with open(path, "wb"):
+            pass
+        assert os.path.getsize(path) == 0
+
+        # Une lecture doit toujours retrouver l'historique reel via .bak,
+        # pas un historique vide silencieusement accepte comme valide.
+        entries = load_history(path=path)
+        assert [e["score"] for e in entries] == [80.0, 90.0, 100.0]
+
+        # Un nouvel enregistrement ne doit ni se perdre, ni ecraser .bak
+        # avec moins de donnees que ce qu'il contenait avant la troncature.
+        record_run("SEQ 1", "wording", 10, 10, 0, 95.0, path=path,
+                   country="Germany", trigger="T", sequence="SEQ 1")
+
+        entries_after = load_history(path=path)
+        assert [e["score"] for e in entries_after] == [80.0, 90.0, 100.0, 95.0]
+
+        backup_entries = load_history(path=path + ".bak")
+        assert len(backup_entries) == 4
+
     def test_returns_empty_list_when_backup_is_also_corrupted(self, tmp_path):
         path = tmp_path / "history.db"
         backup = tmp_path / "history.db.bak"

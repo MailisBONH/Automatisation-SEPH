@@ -54,8 +54,8 @@ def build_combined_report(country: str, trigger: str, sequence: str):
     if not wording_reports or not url_reports:
         return None, None
 
-    wording_df = pd.read_excel(wording_reports[0], sheet_name="Details", engine="openpyxl")
-    url_df = pd.read_excel(url_reports[0], sheet_name="Details", engine="openpyxl")
+    wording_df = pd.read_excel(wording_reports[0], sheet_name="Details", engine="openpyxl").fillna("")
+    url_df = pd.read_excel(url_reports[0], sheet_name="Details", engine="openpyxl").fillna("")
 
     wording_total, wording_ok = len(wording_df), int((wording_df["Status"] == "OK").sum())
     url_total, url_ok = len(url_df), int((url_df["Status"] == "OK").sum())

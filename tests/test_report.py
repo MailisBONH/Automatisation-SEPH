@@ -1,6 +1,6 @@
 import pandas as pd
 import pytest
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 
 import qa.report as report
 from qa.report import (
@@ -224,6 +224,22 @@ class TestSaveReport:
         assert len(ko_df) == 2
         assert set(ko_df["Status"]) == {"KO"}
 
+    def test_all_ok_run_produces_a_reloadable_file(self, tmp_path):
+        # Regression : quand tous les resultats sont OK, l'onglet "KO Only"
+        # se retrouve avec 0 ligne. Sur la colonne-largeur-auto,
+        # Series.astype(str).map(len).max() sur une colonne vide renvoie nan
+        # (float) SANS lever - le except Exception ne rattrape donc rien, et
+        # openpyxl ecrit nan comme largeur de colonne : le .xlsx produit est
+        # corrompu et load_workbook() leve un TypeError a la relecture. Le
+        # vrai signal de regression ici est bien la relecture, pas juste
+        # l'absence d'exception au save().
+        results = [_row("OK", html_order=0), _row("OK", html_order=1)]
+        path = save_report(results, "SEQ ALL OK", mode="wording")
+
+        wb = load_workbook(path)
+        assert wb.sheetnames == ["Summary", "Details", "KO Only"]
+        assert wb["KO Only"].max_row == 1  # uniquement la ligne d'en-tete
+
     def test_url_mode_uses_url_specific_columns_and_header_labels(self, tmp_path):
         results = [{
             "Component Name": "", "Source Section": "SEQ 1 FID", "Expected Class": "audit-component-cta",
@@ -236,6 +252,26 @@ class TestSaveReport:
         details = pd.read_excel(path, sheet_name="Details")
         assert "URL attendue (Excel)" in details.columns
         assert "Section (FID/NON FID)" in details.columns
+
+    def test_empty_results_do_not_crash_in_wording_mode(self, tmp_path):
+        # Regression : pd.DataFrame([]) a 0 colonne, donc l'ancien code
+        # (df["Status"] == "OK") levait un KeyError('Status') pour une
+        # sequence legitimement sans aucune ligne de resultat.
+        path = save_report([], "SEQ EMPTY", mode="wording")
+
+        wb = load_workbook(path)
+        assert wb.sheetnames == ["Summary", "Details", "KO Only"]
+        assert wb["Details"].max_row == 1
+        assert wb["KO Only"].max_row == 1
+
+    def test_empty_results_do_not_crash_in_url_mode(self, tmp_path):
+        path = save_report([], "SEQ EMPTY URL", mode="url")
+
+        wb = load_workbook(path)
+        assert wb.sheetnames == ["Summary", "Details", "KO Only"]
+        details = pd.read_excel(path, sheet_name="Details")
+        assert "URL attendue (Excel)" in details.columns
+        assert len(details) == 0
 
 
 class TestSaveConsolidatedReport:

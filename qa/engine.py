@@ -66,10 +66,19 @@ def run_qa_for_sequence(html_file, excel_file, keyword, mode="wording", include_
 
         sibling_sheet, sibling_wordings = load_sibling_sequence_wordings(excel_file, sheet)
         if sibling_sheet:
-            existing_keys = {(w["norm"], w.get("Technical")) for w in excel_wordings}
+            # Cle sur la totalite des variantes (pas seulement norm_variants[0],
+            # voir "norm" dans qa.excel_loader) : un wording frere dont seule la
+            # PREMIERE branche coincide avec un wording deja present (mais dont
+            # une autre branche differe reellement) n'est pas un vrai doublon -
+            # cette branche differente doit etre fusionnee, pas silencieusement
+            # perdue.
+            def _wording_key(w):
+                return (tuple(w.get("norm_variants") or [w["norm"]]), w.get("Technical"))
+
+            existing_keys = {_wording_key(w) for w in excel_wordings}
             new_sibling_wordings = [
                 w for w in sibling_wordings
-                if (w["norm"], w.get("Technical")) not in existing_keys
+                if _wording_key(w) not in existing_keys
             ]
             skipped = len(sibling_wordings) - len(new_sibling_wordings)
             if skipped and DEBUG_MODE:
@@ -126,29 +135,49 @@ def run_qa_for_sequence(html_file, excel_file, keyword, mode="wording", include_
                 excel_urls = excel_urls + sibling_urls
 
         # Deduplique par URL normalisee (ordre/encodage des parametres
-        # ignore), quel que soit le label : une meme destination ne doit
-        # etre testee qu'UNE fois, meme si elle apparait sous 2 labels ou
-        # 2 sections differentes (typiquement un lien identique repris tel
-        # quel entre FID et NON FID) - sinon elle produirait 2 lignes
-        # OK/KO redondantes pour le meme constat. run_url_qa ne filtre
-        # jamais par label pour le matching lui-meme (seulement pour
-        # l'affichage), donc ce dedoublonnage ne fait perdre aucune
-        # verification reelle. S'applique que la section ait un frere ou
+        # ignore) : une meme destination ne doit produire qu'UNE ligne de
+        # resultat, meme si elle apparait sous 2 labels ou 2 sections
+        # differentes (typiquement un lien identique repris tel quel entre
+        # FID et NON FID) - sinon elle produirait 2 lignes OK/KO redondantes
+        # pour le meme constat. S'applique que la section ait un frere ou
         # non - une meme section peut deja lister la meme URL 2 fois sous
         # des labels differents.
-        seen_urls = set()
-        deduped_urls = []
+        #
+        # Si les doublons portent des labels DIFFERENTS, on les FUSIONNE
+        # (join " / ") plutot que de garder arbitrairement le premier : le
+        # lien peut legitimement vivre dans l'un OU l'autre composant selon
+        # l'audience qui a rendu ce HTML (meme principe que la fusion des
+        # wordings freres ci-dessus) - jeter le second label ferait
+        # remonter un faux KO "mauvais composant" des que le HTML place le
+        # lien dans le composant du label ecarte. qa.url_qa.run_url_qa
+        # accepte un match sur N'IMPORTE LEQUEL des labels d'une entree
+        # ainsi fusionnee.
+        merged_by_key = {}
+        order = []
         for u in excel_urls:
-            raw_url = u.get("url", "") if isinstance(u, dict) else str(u)
+            is_dict = isinstance(u, dict)
+            raw_url = u.get("url", "") if is_dict else str(u)
+            label = (u.get("label", "") if is_dict else "") or ""
+            section = u.get("Section", "") if is_dict else ""
             key = normalize_url(raw_url)
-            if key in seen_urls:
-                continue
-            seen_urls.add(key)
-            deduped_urls.append(u)
+            if key not in merged_by_key:
+                merged_by_key[key] = {"url": raw_url, "labels": [], "Section": section}
+                order.append(key)
+            if label and label not in merged_by_key[key]["labels"]:
+                merged_by_key[key]["labels"].append(label)
+
+        deduped_urls = [
+            {
+                "url": merged_by_key[key]["url"],
+                "label": " / ".join(merged_by_key[key]["labels"]),
+                "Section": merged_by_key[key]["Section"],
+            }
+            for key in order
+        ]
 
         skipped = len(excel_urls) - len(deduped_urls)
         if skipped and DEBUG_MODE:
-            print(f"➖ {skipped} URL(s) dupliquée(s) (même destination normalisée) ignorée(s)")
+            print(f"➖ {skipped} URL(s) dupliquée(s) (même destination normalisée) fusionnée(s)")
         excel_urls = deduped_urls
 
         results = run_url_qa(raw_html, excel_urls)

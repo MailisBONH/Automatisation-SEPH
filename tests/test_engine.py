@@ -108,6 +108,26 @@ class TestRunQaForSequenceMergesSiblingSheet:
         assert len(footer_rows) == 2
         assert all(r["Status"] == "KO" for r in footer_rows)
 
+    def test_sibling_wording_with_a_second_branch_not_in_the_primary_sheet_is_still_merged(self, tmp_path):
+        # Regression : le filtre de doublon comparait auparavant seulement la
+        # PREMIERE branche d'un wording conditionnel AEM (norm_variants[0]) -
+        # un wording frere dont seule cette premiere branche coincidait avec
+        # un wording deja present etait alors traite comme un doublon complet
+        # et silencieusement ecarte, perdant sa seconde branche (pourtant
+        # reellement differente et potentiellement rendue par le HTML).
+        excel_file = _make_wording_workbook(tmp_path, {
+            "SEQ 1 NON LOYAL": [["Loyalty", "Text", "Hello", "audit-component-loyalty"]],
+            "SEQ 1 LOYAL": [
+                ["Loyalty", "Text", "<% if(n>1){%>Hello<%}else{%>Goodbye<%}%>", "audit-component-loyalty"],
+            ],
+        })
+        html_file = _make_html(tmp_path, "Goodbye", "audit-component-loyalty")
+
+        results, sheet = run_qa_for_sequence(html_file, excel_file, "SEQ 1 NON LOYAL", mode="wording")
+
+        matched = [r for r in results if r["HTML Wording"] == "Goodbye"]
+        assert matched and matched[0]["Status"] == "OK"
+
 
 class TestRunQaForSequenceMergesSiblingUrlSection:
     """
@@ -195,6 +215,43 @@ class TestRunQaForSequenceMergesSiblingUrlSection:
         matched = [r for r in results if r["HTML Wording"] == "https://example.com/shared"]
         assert len(matched) == 1
         assert matched[0]["Status"] == "OK"
+
+    def test_sibling_url_different_label_accepts_placement_matching_either_label(self, tmp_path):
+        # Regression : avant le fix, la fusion par URL normalisee ne
+        # conservait que le PREMIER label rencontre ("audit-component-header")
+        # et perdait le second ("audit-component-social") - si le HTML place
+        # legitimement le lien dans le composant de la seconde audience
+        # (FID), cela produisait un faux KO "Wrong component" alors que le
+        # lien est correctement place pour cette audience-la.
+        path = tmp_path / "utm_diff_label_placement.xlsx"
+        rows = [
+            [None, "!! CHECK !!", None, None, None, None, None, None],
+            [None, "URL", "SOURCE", "MEDIUM", "CAMPAIGN", "SEQUENCE", "VERSION", "<< TRACKED URL >>"],
+            [None, "Insert url here", "Mandatory", "Mandatory", "TRIGGER", "SEQ", "VERSION", None],
+            [None, "SEQ 1 NON FID", None, None, None, None, None, None],
+            ["audit-component-header", "https://example.com/", "trigger", "email", "revamp_inac", "seq1", "",
+             "https://example.com/shared"],
+            [None, "SEQ 1 FID", None, None, None, None, None, None],
+            ["audit-component-social", "https://example.com/", "trigger", "email", "revamp_inac", "seq1", "",
+             "https://example.com/shared"],
+        ]
+        with pd.ExcelWriter(path) as writer:
+            pd.DataFrame(rows).to_excel(writer, sheet_name="UTM TRIGGER", index=False, header=False)
+
+        # Le lien est place dans le composant "social" (l'audience FID), pas
+        # "header" (le premier label rencontre lors de la fusion).
+        html_path = tmp_path / "email.html"
+        html_path.write_text(
+            '<div class="audit-component-social"><a href="https://example.com/shared">Shop</a></div>',
+            encoding="utf-8",
+        )
+
+        results, sheet = run_qa_for_sequence(str(html_path), str(path), "SEQ 1 NON FID", mode="url")
+
+        matched = [r for r in results if r["HTML Wording"] == "https://example.com/shared"]
+        assert len(matched) == 1
+        assert matched[0]["Status"] == "OK"
+        assert matched[0]["Error Type"] != "URL in wrong component"
 
 
 class TestDebugModeGatesMergeDiagnosticPrints:

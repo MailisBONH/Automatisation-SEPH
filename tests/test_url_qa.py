@@ -90,6 +90,21 @@ class TestUnexpectedHtmlUrlNotInExcel:
         assert len(results) == 2
         assert all(r["Error Type"] == KO_UNEXPECTED_URL for r in results)
 
+    def test_second_occurrence_matching_only_functionally_is_not_flagged_as_unexpected(self):
+        # Regression : meme URL Excel presente 2 fois dans le HTML sous 2
+        # formes litterales differentes (CTA duplique en header/footer, avec
+        # les parametres UTM reordonnes dans la seconde occurrence). Seul le
+        # premier lien ("Exact") est choisi pour la ligne de resultat, mais
+        # le second doit quand meme etre reconnu comme correspondant a cette
+        # meme URL Excel (au moins "fonctionnellement") plutot que signale a
+        # tort comme "Unexpected URL (not in Excel)".
+        html = (
+            '<a href="https://example.com/?utm_source=x&utm_medium=y">Header CTA</a>'
+            '<a href="https://example.com/?utm_medium=y&utm_source=x">Footer CTA</a>'
+        )
+        results = run_url_qa(html, [excel_entry("https://example.com/?utm_source=x&utm_medium=y")])
+        assert not any(r["Error Type"] == KO_UNEXPECTED_URL for r in results)
+
 
 class TestAemConditionalUrls:
     """

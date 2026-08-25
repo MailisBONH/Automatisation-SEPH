@@ -498,6 +498,49 @@ class TestCurrentInputsSignature:
         sig_batch = home._current_inputs_signature("Wording", True, excel, None, [])
         assert sig_simple != sig_batch
 
+    def test_changing_the_assignments_signature_changes_the_overall_signature(self):
+        # Regression : re-associer un fichier a une autre sequence (mode
+        # multi-sequences) sans changer ni fichier ni mode doit quand meme
+        # changer la signature globale - sans quoi last_run resterait affiche
+        # a tort apres une re-association (voir home.py, le calcul de
+        # assignments_signature juste avant l'appel a cette fonction).
+        excel = _FakeUploadedFile(b"excel-bytes", name="ref.xlsx")
+        html_files = [_FakeUploadedFile(b"html-bytes", name="mail.html")]
+        sig_before = home._current_inputs_signature(
+            "Wording", True, excel, None, html_files, assignments_signature=(("mail.html", "SEQ 1"),)
+        )
+        sig_after = home._current_inputs_signature(
+            "Wording", True, excel, None, html_files, assignments_signature=(("mail.html", "SEQ 2"),)
+        )
+        assert sig_before != sig_after
+
+    def test_default_assignments_signature_is_backward_compatible(self):
+        # assignments_signature est optionnel (valeur par defaut ()) pour que
+        # les appels existants (mode simple, avant l'ajout de ce parametre)
+        # restent valides sans le fournir explicitement.
+        excel = _FakeUploadedFile(b"excel-bytes", name="ref.xlsx")
+        sig_without_arg = home._current_inputs_signature("Wording", False, excel, None, None)
+        sig_with_empty_tuple = home._current_inputs_signature("Wording", False, excel, None, None, ())
+        assert sig_without_arg == sig_with_empty_tuple
+
+
+class TestSequenceWidgetKey:
+    """_sequence_widget_key (voir home.py) - regression test pour le crash
+    "StreamlitDuplicateElementKey" quand deux fichiers HTML uploades en mode
+    batch partagent le meme nom (courant pour un export "view-source" AEM
+    jamais renomme) : la cle du selectbox d'association doit rester unique
+    par (index, nom de fichier), pas seulement par nom."""
+
+    def test_same_filename_at_different_indices_gives_different_keys(self):
+        key_0 = home._sequence_widget_key("seq_choice_", 0, "email.html")
+        key_1 = home._sequence_widget_key("seq_choice_", 1, "email.html")
+        assert key_0 != key_1
+
+    def test_different_prefixes_give_different_keys_for_the_same_file(self):
+        # wseq_/useq_ (mode "Wording + URL" batch) ne doivent jamais collisionner
+        # entre eux pour le meme fichier au meme index.
+        assert home._sequence_widget_key("wseq_", 0, "email.html") != home._sequence_widget_key("useq_", 0, "email.html")
+
 
 class TestBestSequenceGuess:
     """_best_sequence_guess (coeur partage par _guess_sequence_choice -
@@ -542,8 +585,12 @@ class TestApplyHighConfidenceSequenceGuesses:
 
         home._apply_high_confidence_sequence_guesses(files, ["SEQ 1", "SEQ 2"], "seq_choice_")
 
-        assert home.st.session_state.get("seq_choice_SEQ1_export.html") == "SEQ 1"
-        assert "seq_choice_random_file.html" not in home.st.session_state
+        # Cle prefixee par l'index (voir _sequence_widget_key) : necessaire
+        # pour que deux fichiers de meme nom restent des widgets distincts
+        # (voir TestSequenceWidgetKey) - ce test verifie juste que CETTE
+        # fonction produit bien la cle attendue pour le fichier a l'index 0.
+        assert home.st.session_state.get(home._sequence_widget_key("seq_choice_", 0, "SEQ1_export.html")) == "SEQ 1"
+        assert home._sequence_widget_key("seq_choice_", 1, "random_file.html") not in home.st.session_state
 
 
 class TestRunItems:

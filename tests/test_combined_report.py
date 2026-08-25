@@ -1,3 +1,4 @@
+import openpyxl
 import pandas as pd
 import pytest
 
@@ -84,3 +85,44 @@ class TestBuildCombinedReport:
 
         url_sheet = pd.read_excel(path, sheet_name="URL")
         assert url_sheet["URL attendue (Excel)"].iloc[0] == "https://x"
+
+    def test_empty_error_type_stays_a_string_cell_not_nan(self, tmp_path, isolated_output):
+        """
+        Une ligne OK a "Error Type" vide dans le rapport source : pd.read_excel
+        renvoie NaN (float) pour cette cellule vide, pas "". Sans le
+        .fillna("") applique juste apres la lecture (voir
+        qa.combined_report.build_combined_report), ce NaN (un float) est
+        ecrit tel quel dans le classeur combine par _write_df_sheet,
+        produisant une cellule de type numerique (openpyxl : data_type
+        == "n") au lieu d'une cellule texte (data_type == "s" ou
+        "inlineStr" selon la version d'openpyxl - jamais "n") pour ce qui
+        devrait rester une simple chaine vide.
+        """
+        wording_path = tmp_path / "wording_report.xlsx"
+        _make_details_report(
+            wording_path,
+            [{"Status": "OK", "Error Type": "", "Excel Wording": "Hello"}],
+        )
+        archive.archive_report(str(wording_path), "Germany", "Revamp Inac", "SEQ 1", mode="wording")
+
+        url_path = tmp_path / "url_report.xlsx"
+        _make_details_report(
+            url_path,
+            [{"Status": "OK", "Error Type": ""}],
+        )
+        archive.archive_report(str(url_path), "Germany", "Revamp Inac", "SEQ 1", mode="url")
+
+        path, _ = combined_report.build_combined_report("Germany", "Revamp Inac", "SEQ 1")
+
+        wb = openpyxl.load_workbook(path)
+
+        for sheet_name in ("Wording", "URL"):
+            ws = wb[sheet_name]
+            headers = [c.value for c in ws[1]]
+            error_type_col = headers.index("Error Type") + 1
+            cell = ws.cell(2, error_type_col)
+            assert cell.data_type in ("s", "inlineStr"), (
+                f"{sheet_name}: expected a string cell, got {cell.data_type!r} "
+                f"(value={cell.value!r}) - looks like an unfilled NaN was written"
+            )
+            assert cell.value in ("", None)

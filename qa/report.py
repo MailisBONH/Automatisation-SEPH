@@ -245,24 +245,49 @@ def _write_results_sheet(ws_target, df_data, header_color, columns, header_label
             if col_name == "Criticality" and val in crit_colors:
                 cell.font = Font(bold=True, color=crit_colors[val])
     for c, col in enumerate(columns, 1):
-        try:
-            max_len = max(df_data[col].astype(str).map(len).max(), len(col))
-        except Exception:
+        if len(df_data) == 0:
+            # Colonne (ou feuille entiere, ex: "KO Only" sur un run 100% OK)
+            # sans aucune ligne : appeler .max() sur une Series vide renvoie
+            # nan (float) SANS lever d'exception, donc le except ci-dessous
+            # ne s'en protege pas - nan finirait ecrit comme largeur de
+            # colonne, ce qui produit un .xlsx invalide (illisible par
+            # openpyxl.load_workbook ensuite). Voir historique bug report.
             max_len = len(col)
+        else:
+            try:
+                max_len = max(df_data[col].astype(str).map(len).max(), len(col))
+            except Exception:
+                max_len = len(col)
         ws_target.column_dimensions[get_column_letter(c)].width = min(max_len + 3, 60)
     ws_target.freeze_panes = "A2"
 
 
 def save_report(results: list, campaign_sheet_name: str, mode: str = "wording"):
-    df = pd.DataFrame(results)
+    columns = URL_COLUMNS if mode == "url" else BASE_COLUMNS
+    header_labels = URL_HEADER_LABELS if mode == "url" else None
+
+    if results:
+        df = pd.DataFrame(results)
+    else:
+        # results == [] (ex: sequence sans wording a verifier) : pd.DataFrame([])
+        # a 0 colonne, donc df["Status"] plus bas leverait un KeyError. On
+        # force les colonnes attendues pour ce mode + "Component Name" et
+        # "Criticality" (absentes de URL_COLUMNS mais toujours presentes
+        # dans les lignes reelles de qa.url_qa, et necessaires meme en mode
+        # url pour le tri via _sort_by_criticality/sort_results_by_html_order)
+        # afin d'obtenir un DataFrame a 0 ligne mais avec les bonnes colonnes
+        # - meme esprit que le guard existant de save_consolidated_report
+        # ci-dessous.
+        empty_columns = list(columns)
+        for extra_col in ("Component Name", "Criticality"):
+            if extra_col not in empty_columns:
+                empty_columns.append(extra_col)
+        df = pd.DataFrame(columns=empty_columns)
     total = len(df)
-    ok = len(df[df["Status"] == "OK"])
+    ok = len(df[df["Status"] == "OK"]) if total else 0
     score = round((ok / total) * 100, 2) if total else 0
 
     record_run(campaign_sheet_name, mode, total, ok, total - ok, score)
-
-    columns = URL_COLUMNS if mode == "url" else BASE_COLUMNS
-    header_labels = URL_HEADER_LABELS if mode == "url" else None
 
     wb = Workbook()
 

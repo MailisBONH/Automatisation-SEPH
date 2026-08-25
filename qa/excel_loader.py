@@ -69,12 +69,25 @@ def _open_excel_file(path: str) -> pd.ExcelFile:
 # =========================
 # LECTURE EXCEL
 # =========================
+def _keyword_matches_name(keyword: str, name: str) -> bool:
+    """
+    True si keyword apparait comme mot/phrase ENTIERE (bornes \\b) dans name,
+    insensible a la casse.
+
+    Une simple sous-chaine (`in`) matcherait a tort un keyword court comme
+    "SEQ 1" contre un nom plus long qui commence pareil, ex: "SEQ 10 NON
+    LOYAL" - meme principe de bornes que SEQ_NUMBER_PATTERN dans qa/config.py
+    pour la detection de numero de sequence.
+    """
+    return re.search(r"\b" + re.escape(keyword.lower()) + r"\b", name.lower()) is not None
+
+
 def find_sheet(excel_file: str, keyword: str):
     xls = _open_excel_file(excel_file)
 
     matches = [
         sheet for sheet in xls.sheet_names
-        if keyword.lower() in sheet.lower()
+        if _keyword_matches_name(keyword, sheet)
     ]
 
     # Aucun match
@@ -117,9 +130,19 @@ def find_column(df: pd.DataFrame, keyword) -> str:
 
         if len(matches) == 0:
             issues.append(f"aucune colonne ne correspond à '{kw}'")
-        else:
-            cols_list = ", ".join(str(c) for c in matches)
-            issues.append(f"plusieurs colonnes correspondent à '{kw}' ({cols_list})")
+            continue
+
+        # Ambigu (>1) : une ambiguite reelle sur CE mot-cle ne doit jamais
+        # etre masquee par un mot-cle de repli suivant qui, lui, resoudrait
+        # une colonne differente et sans rapport de facon unique - on
+        # arrete et on remonte l'ambiguite immediatement plutot que de
+        # continuer la boucle (contrairement au cas "aucune colonne" ci-
+        # dessus, ou essayer le mot-cle suivant reste legitime).
+        cols_list = ", ".join(str(c) for c in matches)
+        raise ValueError(
+            f"Impossible de déterminer la colonne wording : plusieurs colonnes correspondent à '{kw}' "
+            f"({cols_list}). Merci de vérifier le nom de la colonne wording."
+        )
 
     raise ValueError(
         "Impossible de déterminer la colonne wording : " + " ; ".join(issues) + ". "
@@ -534,7 +557,7 @@ def load_excel_urls(excel_file: str, keyword: str) -> tuple:
         # Onglet sans decoupage en sequences : tout est dans la section "".
         return sheet, "", sections[""]
 
-    matches = [name for name in named_sections if keyword.lower() in name.lower()]
+    matches = [name for name in named_sections if _keyword_matches_name(keyword, name)]
 
     if len(matches) == 0:
         available = ", ".join(named_sections.keys())

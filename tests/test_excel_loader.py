@@ -48,6 +48,14 @@ class TestFindSheet:
         with pytest.raises(ValueError, match="Plusieurs feuilles"):
             find_sheet(path, "NON FID")
 
+    def test_short_sequence_keyword_does_not_match_longer_sequence_number(self, tmp_path):
+        # Regression : "SEQ 1" ne doit jamais matcher "SEQ 10 ..." par simple
+        # sous-chaine (prefixe numerique) - seul un onglet nomme "SEQ 1 ..."
+        # (ou "SEQ 1" seul) doit compter comme un match.
+        path = make_xlsx(tmp_path, {"SEQ 10 NON LOYAL": pd.DataFrame({"a": [1]})})
+        with pytest.raises(ValueError, match="Aucune feuille"):
+            find_sheet(path, "SEQ 1")
+
 
 class TestFindColumn:
     def test_single_keyword_match(self):
@@ -72,6 +80,16 @@ class TestFindColumn:
         df = pd.DataFrame(columns=["TEXT ENGLISH", "TEXT GERMAN"])
         with pytest.raises(ValueError, match="Impossible de déterminer"):
             find_column(df, "TEXT")
+
+    def test_ambiguous_first_candidate_raises_instead_of_falling_back(self):
+        # Regression : le premier mot-cle (preferentiel) matche 2 colonnes
+        # (ambigu, l'outil ne peut pas deviner laquelle), mais un second
+        # mot-cle de repli resoudrait une colonne unique sans rapport. C'est
+        # l'ambiguite du premier mot-cle qui doit remonter, pas le fallback
+        # silencieux sur "TEXT".
+        df = pd.DataFrame(columns=["TRANSLATION ENGLISH", "TRANSLATION GERMAN", "TEXT"])
+        with pytest.raises(ValueError, match="plusieurs colonnes correspondent à 'TRANSLATION'"):
+            find_column(df, ["TRANSLATION", "TEXT"])
 
 
 class TestFindSiblingSequenceSheet:

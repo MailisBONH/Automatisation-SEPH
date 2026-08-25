@@ -386,6 +386,7 @@ def run_wording_qa(html_texts, excel_wordings):
             # ci-dessous.
             if found_class:
                 row = make_row(excel_wordings[idx], item, h_text, "OK", "", sim, "Split (HTML ⊂ Excel)")
+                matched_excel_counts[idx] += 1
             else:
                 row = make_row(excel_wordings[idx], item, h_text, "KO", KO_COMPONENT_CLASS_NOT_FOUND, sim, "Split (HTML ⊂ Excel)")
             row["_html_order"] = i
