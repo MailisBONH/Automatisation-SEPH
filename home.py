@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import functools
 import getpass
+import hashlib
 import html
 import os
 import io
@@ -1231,6 +1232,35 @@ def ensure_archived(last_run):
         _prompt_missing_classification(last_run, guess, sequences)
 
 
+def _uploaded_file_identity(f):
+    """Identifiant (nom, hash du contenu) d'un fichier uploade via
+    st.file_uploader, ou None si le widget est vide. Le hash (pas seulement
+    .name) distingue deux uploads successifs d'un fichier different portant
+    le meme nom - et confirme au contraire qu'un rerun sans reupload
+    (interaction avec un widget quelconque de la page) porte bien sur EXACTEMENT
+    le meme contenu. Utilise par _current_inputs_signature ci-dessous pour
+    savoir si le dernier resultat affiche (last_run) doit etre efface."""
+    if f is None:
+        return None
+    return (f.name, hashlib.sha1(f.getvalue()).hexdigest())
+
+
+def _current_inputs_signature(mode, batch_mode, excel_file, html_file, html_files):
+    """Signature des entrees qui definissent CE que produirait un clic sur
+    "Comparer" (type de test + fichier(s) uploade(s)) - comparee au rerun
+    precedent plus bas dans le script pour effacer last_run des qu'elle
+    change, plutot que de laisser un ancien resultat affiche a tort alors
+    qu'il ne correspond plus a la selection courante (fichier remplace,
+    mode Wording/URL/Wording + URL change...)."""
+    return (
+        mode,
+        batch_mode,
+        _uploaded_file_identity(excel_file),
+        _uploaded_file_identity(html_file),
+        tuple(_uploaded_file_identity(f) for f in (html_files or [])),
+    )
+
+
 NO_SELECTION = "— Sélectionnez —"
 
 
@@ -1697,6 +1727,22 @@ if html_file:
     with open(html_path, "wb") as f:
         f.write(html_file.getvalue())
 
+# =========================
+# EFFACE LE DERNIER RESULTAT SI LES ENTREES ONT CHANGE
+# =========================
+# Sans ca, changer de fichier ou de type de test (mode) sans recliquer sur
+# "Comparer" laissait l'ancien resultat affiche (voir le commentaire sur la
+# persistance de last_run plus bas) : il pouvait alors etre confondu avec un
+# resultat correspondant a la selection courante. Comparee au rerun
+# PRECEDENT (pas au dernier run archive) : un rerun sans changement reel
+# (interaction avec un autre widget de la page) ne doit pas effacer le
+# resultat en cours.
+current_inputs_signature = _current_inputs_signature(mode, batch_mode, excel_file, html_file, html_files)
+previous_inputs_signature = st.session_state.get("_inputs_signature")
+if previous_inputs_signature is not None and previous_inputs_signature != current_inputs_signature:
+    st.session_state.pop("last_run", None)
+st.session_state["_inputs_signature"] = current_inputs_signature
+
 sequence_assignments = []
 combined_sequence_assignments = []
 
@@ -2045,9 +2091,10 @@ if st.button(button_label, disabled=not comparer_ready):
             st.caption(f"Détail technique : {error_message}")
 
 # =========================
-# AFFICHAGE DU DERNIER RESULTAT (persiste entre reruns, ex: pendant que la
-# pop-up d'informations manquantes est ouverte, pour que le resultat reste
-# affiche sans devoir relancer toute la comparaison)
+# AFFICHAGE DU DERNIER RESULTAT (persiste entre reruns tant que les entrees
+# n'ont pas change - voir plus haut -, ex: pendant que la pop-up
+# d'informations manquantes est ouverte, pour que le resultat reste affiche
+# sans devoir relancer toute la comparaison)
 # =========================
 last_run = st.session_state.get("last_run")
 

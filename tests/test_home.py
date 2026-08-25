@@ -448,6 +448,57 @@ def _consolidated_panel(mode, results_by_sequence, report_path=None):
     }
 
 
+class TestCurrentInputsSignature:
+    """_uploaded_file_identity / _current_inputs_signature determinent si le
+    dernier resultat affiche (last_run) doit etre efface - voir home.py,
+    bloc "EFFACE LE DERNIER RESULTAT SI LES ENTREES ONT CHANGE"."""
+
+    def test_no_file_uploaded_gives_none_identity(self):
+        assert home._uploaded_file_identity(None) is None
+
+    def test_same_name_and_content_give_the_same_identity(self):
+        a = home._uploaded_file_identity(_FakeUploadedFile(b"hello", name="a.html"))
+        b = home._uploaded_file_identity(_FakeUploadedFile(b"hello", name="a.html"))
+        assert a == b
+
+    def test_different_content_under_the_same_name_gives_a_different_identity(self):
+        # Re-upload d'un fichier different sous le meme nom : ne doit pas
+        # etre confondu avec le precedent.
+        a = home._uploaded_file_identity(_FakeUploadedFile(b"hello", name="a.html"))
+        b = home._uploaded_file_identity(_FakeUploadedFile(b"goodbye", name="a.html"))
+        assert a != b
+
+    def test_identical_inputs_give_the_same_signature(self):
+        excel = _FakeUploadedFile(b"excel-bytes", name="ref.xlsx")
+        html_file = _FakeUploadedFile(b"html-bytes", name="mail.html")
+        sig1 = home._current_inputs_signature("Wording", False, excel, html_file, None)
+        sig2 = home._current_inputs_signature("Wording", False, excel, html_file, None)
+        assert sig1 == sig2
+
+    def test_replacing_the_html_file_changes_the_signature(self):
+        excel = _FakeUploadedFile(b"excel-bytes", name="ref.xlsx")
+        sig_before = home._current_inputs_signature(
+            "Wording", False, excel, _FakeUploadedFile(b"v1", name="mail.html"), None
+        )
+        sig_after = home._current_inputs_signature(
+            "Wording", False, excel, _FakeUploadedFile(b"v2", name="mail.html"), None
+        )
+        assert sig_before != sig_after
+
+    def test_changing_mode_changes_the_signature_even_with_the_same_files(self):
+        excel = _FakeUploadedFile(b"excel-bytes", name="ref.xlsx")
+        html_file = _FakeUploadedFile(b"html-bytes", name="mail.html")
+        sig_wording = home._current_inputs_signature("Wording", False, excel, html_file, None)
+        sig_url = home._current_inputs_signature("URL", False, excel, html_file, None)
+        assert sig_wording != sig_url
+
+    def test_toggling_batch_mode_changes_the_signature_even_with_the_same_mode(self):
+        excel = _FakeUploadedFile(b"excel-bytes", name="ref.xlsx")
+        sig_simple = home._current_inputs_signature("Wording", False, excel, None, None)
+        sig_batch = home._current_inputs_signature("Wording", True, excel, None, [])
+        assert sig_simple != sig_batch
+
+
 class TestBestSequenceGuess:
     """_best_sequence_guess (coeur partage par _guess_sequence_choice -
     suggestion affichee, seuil bas - et _apply_high_confidence_sequence_guesses
@@ -1430,3 +1481,58 @@ class TestHomeAppRendersLastRun:
         failing_expander = next(e for e in at.expander if e.label.startswith("⚠️ SEQ 2"))
         assert clean_expander.proto.expanded is False
         assert failing_expander.proto.expanded is True
+
+
+class TestHomeAppClearsLastRunOnInputChange:
+    """Regression test : changer le type de test (ou de fichier - non
+    simulable par AppTest, voir _FakeUploadedFile et TestCurrentInputsSignature
+    pour la couverture equivalente sur les fichiers) sans recliquer sur
+    "Comparer" doit effacer l'ancien resultat plutot que le laisser affiche a
+    tort (voir home.py, bloc "EFFACE LE DERNIER RESULTAT SI LES ENTREES ONT
+    CHANGE")."""
+
+    def _inject_last_run(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(home, "ensure_archived", lambda last_run: None)
+        report_path = tmp_path / "report.xlsx"
+        make_details_report(str(report_path), [{
+            "Component Name": "Header", "Element": "Title", "Source Sheet": "",
+            "Expected Class": "audit-component-header", "HTML Class": "audit-component-header",
+            "Excel Wording": "Hallo", "HTML Wording": "Hallo", "Status": "OK",
+            "Error Type": "", "Similarity": "100%", "Criticality": "", "Match Type": "Direct",
+        }])
+        last_run = {
+            "excel_path": "irrelevant.xlsx", "top_banner": None, "combined_score": None, "recap_rows": None,
+            "panels": [{
+                "mode": "wording", "consolidated": False,
+                "results_by_sequence": {"SEQ 1": [{"Status": "OK"}]},
+                "report_path": str(report_path), "download_filename": "r.xlsx",
+                "title": "Comparaison terminée", "tab_label": None,
+            }],
+            "debug_logs": "",
+        }
+        at = AppTest.from_file(HOME_PATH)
+        at.run()
+        at.session_state["last_run"] = last_run
+        at.run()
+        assert "last_run" in at.session_state  # sanity check avant le vrai scenario teste
+        return at
+
+    def test_rerun_without_any_change_keeps_the_result(self, tmp_path, monkeypatch):
+        # Un rerun "neutre" (equivalent a une interaction avec un widget qui
+        # n'affecte ni le mode ni les fichiers, ex: la case a cocher "Afficher
+        # uniquement les erreurs" dans le tableau de resultat) ne doit pas
+        # effacer un resultat toujours valide.
+        at = self._inject_last_run(tmp_path, monkeypatch)
+        at.run()
+        assert "last_run" in at.session_state
+
+    def test_switching_the_test_mode_clears_the_result(self, tmp_path, monkeypatch):
+        at = self._inject_last_run(tmp_path, monkeypatch)
+        at.radio[0].set_value("URL").run()
+        assert "last_run" not in at.session_state
+
+    def test_toggling_batch_mode_clears_the_result(self, tmp_path, monkeypatch):
+        at = self._inject_last_run(tmp_path, monkeypatch)
+        at.checkbox[0].set_value(True).run()  # case "Traiter plusieurs séquences en une fois"
+        assert "last_run" not in at.session_state
