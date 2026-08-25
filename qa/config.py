@@ -25,6 +25,30 @@ TEMP_CLEANUP_THROTTLE_SECONDS = 3600
 SCORE_COLOR_GOOD = 100
 SCORE_COLOR_WARN = 80
 
+
+def score_pct(ok, total, digits=1):
+    """Pourcentage OK/total arrondi a `digits` decimales, 0 si total est nul
+    (aucune ligne a tester - un onglet vide, une sequence sans resultat...)
+    plutot qu'une ZeroDivisionError. Formule partagee par qa/report.py et
+    qa/combined_report.py (et equivalente a home._score_pct) pour qu'aucun
+    de ces points d'appel ne divergent ni n'oublient la garde `if total`."""
+    return round(ok / total * 100, digits) if total else 0
+
+
+def filename_slug(name: str) -> str:
+    """Nom d'onglet/sequence rendu sur (lettres/chiffres/underscore/tiret
+    uniquement), pour construire un nom de FICHIER de rapport telecharge/
+    genere (ex. "SEQ 1 NON LOYAL" -> "SEQ_1_NON_LOYAL"). Partagee par
+    home.py et qa/report.py pour qu'un seul endroit definisse cette regle.
+
+    Distincte de qa.archive.safe_folder_name, qui ne neutralise que les
+    caracteres invalides pour un CHEMIN de DOSSIER (les espaces/parentheses
+    y restent volontairement, pour que Pays/Trigger/Sequence gardent un nom
+    lisible dans l'arborescence output/) - les deux fonctions repondent a un
+    besoin different (nom de fichier compact vs nom de dossier lisible), ne
+    pas les fusionner ni utiliser l'une a la place de l'autre."""
+    return re.sub(r"[^\w\-]", "_", name)
+
 # Detection de wordings dans la mauvaise langue (voir
 # qa.diagnostics.find_wrong_language_wordings) : longueur minimale d'un
 # texte pour que la detection de langue soit fiable, et nombre minimal
@@ -116,6 +140,20 @@ EXCLUDED_QA_ROWS = {
 # alt-text d'une image, jamais extrait/verifie par l'outil (voir
 # extract_texts_from_textcontribution, qui ne lit que le texte visible).
 EXCLUDED_QA_ELEMENTS = {"logo"}
+
+# Comme EXCLUDED_QA_ELEMENTS, mais en sous-chaine (insensible a la casse)
+# plutot qu'en nom exact : tout ELEMENT dont le nom CONTIENT un de ces
+# mots-cles est ignore, quel que soit le composant. Utile quand une famille
+# entiere de champs (ex: plusieurs variantes "logo header"/"logo footer"
+# jamais extraites/verifiees par l'outil, meme raison que EXCLUDED_QA_ELEMENTS
+# ci-dessus) doit etre exclue sans lister chaque variante exacte une par une.
+#
+# Pour un redacteur de contenu (qui ne modifie pas ce fichier lui-meme) qui
+# voudrait qu'un champ soit toujours ignore par la QA : il suffit de demander
+# a un developpeur d'ajouter UN mot-cle ici - pas besoin de connaitre la
+# structure tuple (COMPONENT, ELEMENT) de EXCLUDED_QA_ROWS ni le nom exact et
+# complet de l'ELEMENT vise.
+EXCLUDED_QA_ELEMENT_KEYWORDS = set()
 
 # =========================
 # CLASSEMENT HISTORIQUE (Pays / Trigger / Sequence)

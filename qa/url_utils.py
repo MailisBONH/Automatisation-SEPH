@@ -30,14 +30,18 @@ def normalize_url(url: str) -> str:
         # dedoublonnage.
         return url
 
+    scheme = parsed.scheme.lower()
+    netloc = parsed.netloc.lower()
+    path = parsed.path or "/"
+
     params = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
     sorted_params = sorted(params)
 
     rebuilt_query = urllib.parse.urlencode(sorted_params)
 
     if rebuilt_query:
-        return f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{rebuilt_query}"
-    return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+        return f"{scheme}://{netloc}{path}?{rebuilt_query}"
+    return f"{scheme}://{netloc}{path}"
 
 
 def is_query_ignored_domain(url: str) -> bool:
@@ -81,4 +85,4 @@ def strip_query(url: str) -> str:
         parsed = urllib.parse.urlparse(url)
     except ValueError:
         return url
-    return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+    return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{parsed.path}"

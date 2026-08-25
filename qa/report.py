@@ -1,5 +1,4 @@
 import os
-import re
 import difflib
 from datetime import datetime
 
@@ -12,7 +11,7 @@ from openpyxl.cell.text import InlineFont
 from openpyxl.cell.rich_text import TextBlock
 
 from qa.archive import prune_root_reports
-from qa.config import CRITICALITY_ORDER, OUTPUT_DIR, SCORE_COLOR_GOOD, SCORE_COLOR_WARN
+from qa.config import CRITICALITY_ORDER, OUTPUT_DIR, SCORE_COLOR_GOOD, SCORE_COLOR_WARN, filename_slug, score_pct
 from qa.history import record_run
 
 
@@ -262,6 +261,45 @@ def _write_results_sheet(ws_target, df_data, header_color, columns, header_label
     ws_target.freeze_panes = "A2"
 
 
+def _write_details_and_ko_sheets(wb, df: pd.DataFrame, total: int, columns: list,
+                                  header_labels: dict, mode: str, prefix_columns: list = None) -> None:
+    """
+    Ecrit les onglets "Details" (tri par ordre d'apparition HTML) et "KO
+    Only" (tri par criticite) communs a save_report et
+    save_consolidated_report - seule la presence d'une colonne
+    "Sequence" en tete de tri (prefix_columns) distingue les deux. Si
+    total == 0, le tri est sans effet (0 ligne) : on reutilise directement
+    df pour eviter d'appeler sort_values sur un DataFrame dont les colonnes
+    de tri pourraient ne pas correspondre exactement a `columns` (mode url
+    avec resultats vides, voir le guard de save_consolidated_report).
+    """
+    ws2 = wb.create_sheet("Details")
+    df_sorted = (
+        sort_results_by_html_order(df, prefix_columns=prefix_columns).reset_index(drop=True)
+        if total else df
+    )
+    _write_results_sheet(ws2, df_sorted, "4472C4", columns, header_labels, char_diff=(mode == "url"))
+
+    ws3 = wb.create_sheet("KO Only")
+    df_ko = (
+        _sort_by_criticality(df[df["Status"] == "KO"], prefix_columns=prefix_columns).reset_index(drop=True)
+        if total else df
+    )
+    _write_results_sheet(ws3, df_ko, "C00000", columns, header_labels, char_diff=(mode == "url"))
+
+
+def _save_workbook(wb: Workbook, filename: str, log_label: str) -> str:
+    """Sauvegarde finale commune a save_report/save_consolidated_report :
+    creation de OUTPUT_DIR, ecriture du .xlsx, purge des rapports racine
+    (voir qa.archive.prune_root_reports) et log console."""
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    path = os.path.join(OUTPUT_DIR, filename)
+    wb.save(path)
+    prune_root_reports()
+    print(f"📄 {log_label} : {path}")
+    return path
+
+
 def save_report(results: list, campaign_sheet_name: str, mode: str = "wording"):
     columns = URL_COLUMNS if mode == "url" else BASE_COLUMNS
     header_labels = URL_HEADER_LABELS if mode == "url" else None
@@ -285,7 +323,7 @@ def save_report(results: list, campaign_sheet_name: str, mode: str = "wording"):
         df = pd.DataFrame(columns=empty_columns)
     total = len(df)
     ok = len(df[df["Status"] == "OK"]) if total else 0
-    score = round((ok / total) * 100, 2) if total else 0
+    score = score_pct(ok, total, digits=2)
 
     record_run(campaign_sheet_name, mode, total, ok, total - ok, score)
 
@@ -299,25 +337,14 @@ def save_report(results: list, campaign_sheet_name: str, mode: str = "wording"):
     ]
     write_summary_sheet(ws, f"QA - {campaign_sheet_name}", meta, score)
 
-    # Details
-    ws2 = wb.create_sheet("Details")
-    df_sorted = sort_results_by_html_order(df).reset_index(drop=True)
-    _write_results_sheet(ws2, df_sorted, "4472C4", columns, header_labels, char_diff=(mode == "url"))
+    # Details + KO Only
+    _write_details_and_ko_sheets(wb, df, total, columns, header_labels, mode)
 
-    # KO Only
-    ws3 = wb.create_sheet("KO Only")
-    df_ko = _sort_by_criticality(df[df["Status"] == "KO"]).reset_index(drop=True)
-    _write_results_sheet(ws3, df_ko, "C00000", columns, header_labels, char_diff=(mode == "url"))
-
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    path = os.path.join(
-        OUTPUT_DIR,
-        f"QA_{campaign_sheet_name.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    return _save_workbook(
+        wb,
+        f"QA_{campaign_sheet_name.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+        "Rapport genere",
     )
-    wb.save(path)
-    prune_root_reports()
-    print(f"📄 Rapport genere : {path}")
-    return path
 
 
 def save_consolidated_report(results_by_sequence: dict, report_name: str = "Multi-sequences", mode: str = "wording"):
@@ -340,7 +367,7 @@ def save_consolidated_report(results_by_sequence: dict, report_name: str = "Mult
 
         seq_total = len(rows)
         seq_ok = sum(1 for r in rows if r.get("Status") == "OK")
-        seq_score = round((seq_ok / seq_total) * 100, 2) if seq_total else 0
+        seq_score = score_pct(seq_ok, seq_total, digits=2)
         per_sequence_stats.append((seq_name, seq_total, seq_ok, seq_total - seq_ok, seq_score))
         record_run(seq_name, mode, seq_total, seq_ok, seq_total - seq_ok, seq_score)
 
@@ -350,7 +377,7 @@ def save_consolidated_report(results_by_sequence: dict, report_name: str = "Mult
     df = pd.DataFrame(all_rows) if all_rows else pd.DataFrame(columns=["Sequence"] + BASE_COLUMNS)
     total = len(df)
     ok = len(df[df["Status"] == "OK"]) if total else 0
-    score = round((ok / total) * 100, 2) if total else 0
+    score = score_pct(ok, total, digits=2)
 
     wb = Workbook()
 
@@ -379,25 +406,12 @@ def save_consolidated_report(results_by_sequence: dict, report_name: str = "Mult
     for c, width in enumerate([30, 10, 10, 10, 10], start=1):
         ws.column_dimensions[get_column_letter(c)].width = width
 
-    # Details
-    ws2 = wb.create_sheet("Details")
-    df_sorted = sort_results_by_html_order(df, prefix_columns=["Sequence"]).reset_index(drop=True) if total else df
-    _write_results_sheet(ws2, df_sorted, "4472C4", columns, header_labels, char_diff=(mode == "url"))
+    # Details + KO Only
+    _write_details_and_ko_sheets(wb, df, total, columns, header_labels, mode, prefix_columns=["Sequence"])
 
-    # KO Only
-    ws3 = wb.create_sheet("KO Only")
-    df_ko = _sort_by_criticality(
-        df[df["Status"] == "KO"], prefix_columns=["Sequence"]
-    ).reset_index(drop=True) if total else df
-    _write_results_sheet(ws3, df_ko, "C00000", columns, header_labels, char_diff=(mode == "url"))
-
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    safe_name = re.sub(r"[^\w\-]", "_", report_name)
-    path = os.path.join(
-        OUTPUT_DIR,
-        f"QA_MULTI_{safe_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    safe_name = filename_slug(report_name)
+    return _save_workbook(
+        wb,
+        f"QA_MULTI_{safe_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+        "Rapport consolidé généré",
     )
-    wb.save(path)
-    prune_root_reports()
-    print(f"📄 Rapport consolidé généré : {path}")
-    return path

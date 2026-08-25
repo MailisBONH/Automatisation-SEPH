@@ -1,5 +1,3 @@
-import difflib
-
 from qa.config import (
     MIN_TEXT_LENGTH,
     SIM_NEAR_EXACT,
@@ -15,7 +13,13 @@ from qa.config import (
     CRITICALITY_BY_ERROR_TYPE,
     DEFAULT_KO_CRITICALITY,
 )
-from qa.text_utils import clean_display_text, expand_conditional_variants, normalize, normalize_currency
+from qa.text_utils import (
+    clean_display_text,
+    expand_conditional_variants,
+    normalize,
+    normalize_currency,
+    similarity_ratio,
+)
 
 
 def criticality_for(error_type: str) -> str:
@@ -80,11 +84,7 @@ def _compare_single(html_text: str, excel_text: str) -> tuple:
     # -----------------------------
     # Similarité principale
     # -----------------------------
-    sim = difflib.SequenceMatcher(
-        None,
-        h.lower(),
-        e.lower()
-    ).ratio()
+    sim = similarity_ratio(h, e)
 
     similarity = round(sim * 100)
 
@@ -105,11 +105,7 @@ def _compare_single(html_text: str, excel_text: str) -> tuple:
         if hc == ec:
             return ("OK", None, 100, "Currency exact")
 
-        sim2 = difflib.SequenceMatcher(
-            None,
-            hc.lower(),
-            ec.lower()
-        ).ratio()
+        sim2 = similarity_ratio(hc, ec)
 
         similarity2 = round(sim2 * 100)
 
@@ -311,7 +307,7 @@ def _similarity_with_boosts(a_norm: str, a_curr: str, b_norm: str, b_curr: str) 
     - fallback devise : si les deux textes ont une forme "devise" normalisee
       (normalize_currency), on retient la meilleure des deux similarites.
     """
-    sim = difflib.SequenceMatcher(None, a_norm.lower(), b_norm.lower()).ratio()
+    sim = similarity_ratio(a_norm, b_norm)
 
     if len(a_norm) >= 8 and len(b_norm) >= 8:
         ratio = min(len(a_norm), len(b_norm)) / max(len(a_norm), len(b_norm))
@@ -320,10 +316,27 @@ def _similarity_with_boosts(a_norm: str, a_curr: str, b_norm: str, b_curr: str) 
             sim = max(sim, 0.70)
 
     if a_curr and b_curr:
-        sim2 = difflib.SequenceMatcher(None, a_curr.lower(), b_curr.lower()).ratio()
+        sim2 = similarity_ratio(a_curr, b_curr)
         sim = max(sim, sim2)
 
     return sim
+
+
+def _best_similarity_for_variants(h_norm_variants: list, h_curr_variants: list, excel_entry: dict) -> float:
+    """
+    Coeur de _best_similarity_to_excel, factorise a part pour que
+    find_closest_match puisse precalculer les variantes normalisees du cote
+    HTML UNE SEULE FOIS par appel (avant sa boucle sur excel_wordings) plutot
+    que de les recalculer a chaque wording Excel visite - voir
+    find_closest_match, ou seul le cote Excel change entre deux iterations.
+    """
+    best = 0.0
+    for h_norm, h_curr in zip(h_norm_variants, h_curr_variants):
+        for e_norm, e_curr in zip(excel_entry["norm_variants"], excel_entry["curr_variants"]):
+            sim = _similarity_with_boosts(h_norm, h_curr, e_norm, e_curr)
+            if sim > best:
+                best = sim
+    return best
 
 
 def _best_similarity_to_excel(html_text: str, excel_entry: dict) -> float:
@@ -336,15 +349,10 @@ def _best_similarity_to_excel(html_text: str, excel_entry: dict) -> float:
     branche a la fois de chaque cote, donc la meilleure correspondance
     possible est le signal pertinent, pas la moyenne ou la 1ere variante.
     """
-    best = 0.0
-    for h_raw in expand_conditional_variants(html_text):
-        h_norm = normalize(h_raw)
-        h_curr = normalize_currency(h_raw)
-        for e_norm, e_curr in zip(excel_entry["norm_variants"], excel_entry["curr_variants"]):
-            sim = _similarity_with_boosts(h_norm, h_curr, e_norm, e_curr)
-            if sim > best:
-                best = sim
-    return best
+    h_raws = expand_conditional_variants(html_text)
+    h_norm_variants = [normalize(h_raw) for h_raw in h_raws]
+    h_curr_variants = [normalize_currency(h_raw) for h_raw in h_raws]
+    return _best_similarity_for_variants(h_norm_variants, h_curr_variants, excel_entry)
 
 
 def find_closest_match(html_item: dict, excel_wordings: list, matched_excel_idx: set,
@@ -366,6 +374,13 @@ def find_closest_match(html_item: dict, excel_wordings: list, matched_excel_idx:
     if not h_norm:
         return None
 
+    # Cote HTML, precalcule UNE FOIS ici (pas a chaque wording Excel visite
+    # ci-dessous) : seul le cote Excel change entre deux iterations de la
+    # boucle, voir _best_similarity_for_variants.
+    h_raws = expand_conditional_variants(h_text)
+    h_norm_variants = [normalize(h_raw) for h_raw in h_raws]
+    h_curr_variants = [normalize_currency(h_raw) for h_raw in h_raws]
+
     best_idx = None
     best_sim = 0.0
 
@@ -381,7 +396,7 @@ def find_closest_match(html_item: dict, excel_wordings: list, matched_excel_idx:
 
         # On inclut les cellules deja matchees : le "Missing wording" peut
         # pointer vers une cellule deja matchee par un autre element HTML.
-        sim = _best_similarity_to_excel(h_text, ex)
+        sim = _best_similarity_for_variants(h_norm_variants, h_curr_variants, ex)
 
         if sim > best_sim:
             best_sim = sim

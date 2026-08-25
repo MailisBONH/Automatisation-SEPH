@@ -1,4 +1,11 @@
-from qa.text_utils import clean_text, expand_conditional_variants, is_valid, normalize, normalize_currency
+from qa.text_utils import (
+    clean_text,
+    expand_conditional_variants,
+    is_valid,
+    normalize,
+    normalize_currency,
+    similarity_ratio,
+)
 
 
 class TestNormalize:
@@ -97,6 +104,25 @@ class TestExpandConditionalVariants:
         raw = "<% if(n>1){%>same<%}else{%>same<%}%>"
         assert expand_conditional_variants(raw) == ["same"]
 
+    def test_if_else_nested_inside_an_if_only_branch_is_resolved_correctly(self):
+        # Regression : un if/else VRAIMENT imbrique (pas seulement sequentiel)
+        # dans la branche if d'un bloc englobant sans else faisait
+        # auparavant confondre la fermeture/le else DU BLOC IMBRIQUE avec
+        # celle du bloc englobant (recherche regex non-greedy la plus proche,
+        # sans notion de profondeur) - la branche "outer=true, inner=false"
+        # n'etait alors jamais produite, et une variante contenait un residu
+        # de tag AEM non nettoye ("Z<%}%>").
+        raw = "<% if(a){%>X<% if(b){%>Y<%}else{%>Z<%}%><%}%>"
+        variants = expand_conditional_variants(raw)
+        assert set(variants) == {"XY", "XZ", ""}
+        assert not any("<%" in v for v in variants)
+
+    def test_if_else_nested_inside_the_else_branch_is_resolved_correctly(self):
+        raw = "<% if(a){%>X<%}else{%><% if(b){%>Y<%}else{%>Z<%}%><%}%>"
+        variants = expand_conditional_variants(raw)
+        assert set(variants) == {"X", "Y", "Z"}
+        assert not any("<%" in v for v in variants)
+
 
 class TestNormalizeCurrency:
     def test_removes_pipe_separator_between_amounts(self):
@@ -124,6 +150,36 @@ class TestIsValid:
 
     def test_rejects_mostly_technical_characters(self):
         assert is_valid("<div class='x'>") is False
+
+    def test_rejects_css_or_js_style_comment_block(self):
+        # Regression : le pattern etait mistype (r"^/\/\*", equivalent a
+        # r"^//\*" - un slash EN TROP) et ne matchait donc jamais un
+        # commentaire "/* ... */" reellement leake dans le texte extrait
+        # (ex. depuis un <style>/<script> mal ferme).
+        assert is_valid("/* Comment block style */") is False
+
+
+class TestSimilarityRatio:
+    def test_both_empty_returns_1(self):
+        assert similarity_ratio("", "") == 1.0
+
+    def test_none_inputs_treated_as_empty(self):
+        assert similarity_ratio(None, None) == 1.0
+        assert similarity_ratio(None, "") == 1.0
+
+    def test_default_is_case_insensitive(self):
+        assert similarity_ratio("Discover now", "discover now") == 1.0
+
+    def test_case_sensitive_true_preserves_case_differences(self):
+        assert similarity_ratio("Discover now", "discover now", case_sensitive=True) < 1.0
+
+    def test_partial_match_returns_a_fraction_between_0_and_1(self):
+        ratio = similarity_ratio("Discover our new arrivals", "Discover our new arrival")
+        assert 0.0 < ratio < 1.0
+
+    def test_completely_different_text_is_low(self):
+        ratio = similarity_ratio("Discover now", "Buy shoes today")
+        assert ratio < 0.5
 
 
 class TestCleanText:

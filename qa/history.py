@@ -79,6 +79,18 @@ CREATE INDEX IF NOT EXISTS idx_runs_sheet ON runs(sheet);
 CREATE INDEX IF NOT EXISTS idx_runs_classification ON runs(country, trigger_name, sequence);
 """
 
+# Colonnes/placeholders de l'INSERT dans `runs`, partages entre record_run
+# (une ligne, conn.execute) et migrate_legacy_jsonl_history (plusieurs
+# lignes, conn.executemany) pour ne pas dupliquer cette liste de 12 colonnes
+# a deux endroits - seule la construction du/des tuple(s) de valeurs reste
+# propre a chaque appelant (kwargs normalises pour l'un, entry.get(...) pour
+# l'autre), execute() et executemany() acceptant tous deux ce meme SQL.
+_INSERT_RUN_SQL = (
+    "INSERT INTO runs (timestamp, sheet, mode, total, ok, ko, score, "
+    "country, trigger_name, sequence, error_types, tested_by) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+)
+
 
 def _connect(path: str) -> sqlite3.Connection:
     directory = os.path.dirname(path)
@@ -260,20 +272,19 @@ def migrate_legacy_jsonl_history(legacy_path: str = LEGACY_HISTORY_PATH, path: s
 
         with contextlib.closing(_connect(path)) as conn:
             conn.executescript(_SCHEMA)
-            for entry in entries:
-                error_types = entry.get("error_types")
-                conn.execute(
-                    "INSERT INTO runs (timestamp, sheet, mode, total, ok, ko, score, "
-                    "country, trigger_name, sequence, error_types, tested_by) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            conn.executemany(
+                _INSERT_RUN_SQL,
+                (
                     (
                         entry.get("timestamp"), entry.get("sheet"), entry.get("mode"),
                         entry.get("total"), entry.get("ok"), entry.get("ko"), entry.get("score"),
                         entry.get("country"), entry.get("trigger"), entry.get("sequence"),
-                        json.dumps(error_types, ensure_ascii=False) if error_types else None,
+                        json.dumps(entry["error_types"], ensure_ascii=False) if entry.get("error_types") else None,
                         entry.get("tested_by"),
-                    ),
-                )
+                    )
+                    for entry in entries
+                ),
+            )
             conn.commit()
         _refresh_backup(path)
 
@@ -309,9 +320,7 @@ def record_run(sheet: str, mode: str, total: int, ok: int, ko: int, score: float
 
     def _insert(conn):
         conn.execute(
-            "INSERT INTO runs (timestamp, sheet, mode, total, ok, ko, score, "
-            "country, trigger_name, sequence, error_types, tested_by) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            _INSERT_RUN_SQL,
             (
                 timestamp, sheet, mode, total, ok, ko, score,
                 country or None, trigger or None, sequence or None,

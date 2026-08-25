@@ -142,6 +142,31 @@ class TestExtractTextsFromTextcontribution:
         items = _extract(html)
         assert items[0]["component_class"] == "audit-component-loyalty"
 
+    def test_identical_text_in_two_different_components_is_extracted_separately(self):
+        # Regression : `seen` etait un unique set partage sur TOUT le
+        # document (toutes les blocs text-contribution confondus). Un meme
+        # wording (ex: un CTA "Shop now") present dans deux composants
+        # differents (header et footer) etait alors extrait une seule fois
+        # pour le premier composant rencontre, et silencieusement supprime
+        # pour le second - alors que ce sont deux ecarts potentiels
+        # distincts, chacun attache a son propre composant.
+        html = (
+            '<div class="text-contribution">'
+            '<div class="audit-component-header"><a href="/shop">Shop now</a></div>'
+            "</div>"
+            '<div class="text-contribution">'
+            '<div class="audit-component-hero"><a href="/shop-2">Shop now</a></div>'
+            "</div>"
+        )
+        items = _extract(html)
+
+        matches = [i for i in items if i["text"] == "Shop now"]
+        assert len(matches) == 2
+        assert {i["component_class"] for i in matches} == {
+            "audit-component-header",
+            "audit-component-hero",
+        }
+
     def test_individual_link_inside_legal_or_footer_component_is_excluded(self):
         # Un lien individuel dans un composant legal/footer n'est jamais
         # extrait a part - son texte est deja couvert par le paragraphe
@@ -157,6 +182,27 @@ class TestExtractTextsFromTextcontribution:
         items = _extract(html)
         assert len(items) == 1
         assert items[0]["text"] == "Contact us at Legal notice for details"
+
+    def test_individual_link_inside_any_component_with_extractable_ancestor_is_excluded(self):
+        # Regression : le filtrage des liens redondants ne doit plus
+        # dependre d'un mot-cle de classe ("legal"/"footer") mais du meme
+        # mecanisme structurel que celui utilise pour les tags de pure
+        # emphase (_has_extractable_ancestor_within) - un lien imbrique dans
+        # un <p> deja extrait est redondant quel que soit le nom du
+        # composant qui l'englobe. Ici "audit-component-disclaimer" n'est
+        # PAS dans LEGAL_MENTION_CLASS_KEYWORDS : avec l'ancienne approche
+        # par mot-cle uniquement, ce lien aurait ete extrait a tort en plus
+        # du paragraphe complet.
+        html = (
+            '<div class="text-contribution">'
+            '<div class="audit-component-disclaimer">'
+            '<p>See our <a href="/unsubscribe">unsubscribe</a> options below</p>'
+            "</div>"
+            "</div>"
+        )
+        items = _extract(html)
+        assert len(items) == 1
+        assert items[0]["text"] == "See our unsubscribe options below"
 
 
 class TestGenericTitleClassResolution:
@@ -260,6 +306,26 @@ class TestGenericTitleClassResolution:
         items = _extract_with_titles(html)
 
         assert all(i["text"] != "Lien seul" for i in items)
+
+    def test_multi_descendant_title_outside_block_resolves_component_class(self):
+        # Regression : build_title_to_component_map keye sa map sur le
+        # texte COMPLET du wrapper audit-generique-title (ex: "Discover your
+        # benefits" pour <h2>Discover</h2><span>your benefits</span>), mais
+        # la boucle de resolution hors bloc text-contribution cherchait avec
+        # le texte PARTIEL de chaque descendant ("Discover" puis "your
+        # benefits" separement) - la cle ne correspondait donc jamais a une
+        # entree de la map, et component_class resolvait a None a tort pour
+        # les deux descendants.
+        html = (
+            '<div class="audit-generique-title"><h2>Discover</h2><span>your benefits</span></div>'
+            '<div class="audit-component-benefit"><p>Some content</p></div>'
+        )
+        items = _extract_with_titles(html)
+
+        discover = next(i for i in items if i["text"] == "Discover")
+        benefits = next(i for i in items if i["text"] == "your benefits")
+        assert discover["component_class"] == "audit-component-benefit"
+        assert benefits["component_class"] == "audit-component-benefit"
 
     def test_duplicate_generic_titles_are_deduplicated(self):
         # Deux titres generiques identiques (hors de tout text-contribution) :

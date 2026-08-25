@@ -16,6 +16,7 @@ EXCEL_READ_ERRORS = (ValueError, OSError, KeyError, BadZipFile, InvalidFileExcep
 
 from qa.config import (
     EXCEL_PLACEHOLDER_PATTERN,
+    EXCLUDED_QA_ELEMENT_KEYWORDS,
     EXCLUDED_QA_ELEMENTS,
     EXCLUDED_QA_ROWS,
     GENERIC_SHEET_KEYWORD,
@@ -97,7 +98,16 @@ def find_sheet(excel_file: str, keyword: str):
             "Merci de vérifier votre Campaign keyword."
         )
 
-    # Plusieurs matchs
+    # Plusieurs matchs : limitation deliberee (pas un oubli) - find_sheet
+    # exige toujours EXACTEMENT une feuille correspondante, meme si un
+    # classeur reel avait legitimement 2 onglets partageant le meme mot-cle
+    # (ex: 2 onglets GENERIC, ou 2 onglets UTM). Savoir si de tels onglets
+    # devraient alors etre combines, ou si l'un des deux devrait etre choisi,
+    # est une question produit qui depend du cas d'usage appelant (voir
+    # load_generic_wordings, _locate_url_sheet_layout...) et ne peut pas etre
+    # decidee ici sans risquer de fusionner a tort 2 onglets sans rapport -
+    # on remonte donc l'ambiguite avec la liste des feuilles en cause plutot
+    # que de deviner.
     if len(matches) > 1:
         sheets_list = ", ".join(matches)
         raise ValueError(
@@ -192,7 +202,15 @@ def _parse_wording_rows(df: pd.DataFrame, wording_column: str, sheet_label: str 
         comp_norm = str(comp).strip().lower() if comp else ""
         elem_norm = elem.lower()
 
-        if (comp_norm, elem_norm) in EXCLUDED_QA_ROWS or elem_norm in EXCLUDED_QA_ELEMENTS:
+        # Exclusion exacte (paire COMPONENT+ELEMENT, ou ELEMENT seul) ou par
+        # mot-cle (sous-chaine de ELEMENT, voir qa.config.EXCLUDED_QA_ELEMENT_KEYWORDS
+        # pour le cas d'usage : exclure toute une famille de champs sans
+        # lister chaque variante exacte).
+        if (
+            (comp_norm, elem_norm) in EXCLUDED_QA_ROWS
+            or elem_norm in EXCLUDED_QA_ELEMENTS
+            or any(kw.lower() in elem_norm for kw in EXCLUDED_QA_ELEMENT_KEYWORDS)
+        ):
             continue
 
         wording = row.get(wording_column)
@@ -297,6 +315,46 @@ def _find_sibling_name(name: str, candidate_names: list) -> str:
 
     if len(candidates) == 1:
         return candidates[0]
+    return None
+
+
+def find_unrecognized_audience_variant(sheet_names: list, resolved_sheet: str) -> str:
+    """
+    Detecte un onglet/section "variante d'audience" NON reconnue (ni
+    LOYAL/NON LOYAL, ni FID/NON FID - _loyalty_status() renvoie None) qui
+    partage pourtant le meme numero de SEQ que resolved_sheet - ex: un
+    onglet "SEQ 1 VIP" ajoute a cote de "SEQ 1 LOYAL"/"SEQ 1 NON LOYAL" pour
+    une 3e audience.
+
+    Le modele frere actuel (voir _find_sibling_name/_loyalty_status) est
+    volontairement binaire LOYAL/NON LOYAL : un tel onglet n'est jamais
+    fusionne avec quoi que ce soit, et ce SILENCIEUSEMENT (aucun
+    avertissement). Cette fonction se limite a EXPOSER cette detection (elle
+    ne modifie ni ne contourne la fusion frere elle-meme) pour qu'un appelant
+    (diagnostic Excel de l'UI, ou un futur hook dans qa/diagnostics.py) puisse
+    avertir l'utilisateur qu'un onglet ressemblant a une sequence existe mais
+    n'a ete pris en compte par aucune fusion.
+
+    Retourne le nom du premier onglet correspondant trouve dans sheet_names
+    (autre que resolved_sheet, meme numero de SEQ, _loyalty_status() ==
+    None), ou None si resolved_sheet lui-meme n'a pas de numero de SEQ, ou si
+    aucun candidat ne correspond.
+    """
+    match = SEQ_NUMBER_PATTERN.search(resolved_sheet.upper())
+    if not match:
+        return None
+
+    seq_num = int(match.group(1))
+
+    for candidate in sheet_names:
+        if candidate == resolved_sheet:
+            continue
+        candidate_match = SEQ_NUMBER_PATTERN.search(candidate.upper())
+        if not candidate_match or int(candidate_match.group(1)) != seq_num:
+            continue
+        if _loyalty_status(candidate) is None:
+            return candidate
+
     return None
 
 
@@ -423,7 +481,7 @@ def _find_cell(raw: pd.DataFrame, label: str):
 URL_LABEL_COL_IDX = 0  # colonne (la plus a gauche) portant le nom du bloc (HEADER, ALGO, CLEAN...)
 
 
-def _parse_url_sections(raw: pd.DataFrame, header_row_idx: int, section_col_idx: int, tracked_col_idx: int,
+def _parse_url_sections(raw: pd.DataFrame, header_row_idx: int, section_col_idx, tracked_col_idx: int,
                          label_col_idx: int = URL_LABEL_COL_IDX) -> dict:
     """
     Decoupe les lignes de l'onglet UTM en sequences. Une ligne "separateur"
@@ -432,6 +490,14 @@ def _parse_url_sections(raw: pd.DataFrame, header_row_idx: int, section_col_idx:
     sont rattachees jusqu'au separateur suivant. Les lignes de donnees
     trouvees avant le premier separateur sont rattachees a la sequence "" (cas
     d'un onglet sans decoupage en sequences).
+
+    section_col_idx peut etre None : aucune colonne de labels de sequence
+    n'a ete trouvee dans l'onglet (meme la ligne d'en-tete ne la contient
+    pas, voir _locate_url_sheet_layout), donc aucune ligne separateur ne peut
+    etre identifiee - toutes les lignes de donnees sont alors rattachees a la
+    sequence "" (cas "a plat" degenere, voir load_excel_urls qui appelle
+    cette fonction avec section_col_idx=None dans ce cas plutot que de
+    reimplementer sa propre boucle de parcours des lignes).
 
     Chaque URL est associee au nom du bloc auquel elle appartient (colonne
     label_col_idx, ex: "HEADER", "ALGO"...), retrouve par report vers le bas
@@ -454,7 +520,7 @@ def _parse_url_sections(raw: pd.DataFrame, header_row_idx: int, section_col_idx:
         if count == 0:
             continue
 
-        if count == 1 and non_null.iloc[section_col_idx]:
+        if section_col_idx is not None and count == 1 and non_null.iloc[section_col_idx]:
             current = str(row.iloc[section_col_idx]).strip()
             sections.setdefault(current, [])
             last_label = ""
@@ -534,21 +600,15 @@ def load_excel_urls(excel_file: str, keyword: str) -> tuple:
 
     if section_col_idx is None:
         # Pas de colonne "URL" (label de sequence) : impossible de decouper
-        # en sequences, on retourne tout l'onglet sans filtrer.
-        urls = []
-        last_label = ""
-        for r in range(header_row_idx + 1, len(raw)):
-            row = raw.iloc[r]
-            label_val = row.iloc[URL_LABEL_COL_IDX] if URL_LABEL_COL_IDX < len(row) else None
-            if pd.notna(label_val) and str(label_val).strip():
-                last_label = str(label_val).strip()
-
-            value = row.iloc[tracked_col_idx]
-            if pd.notna(value):
-                url = str(value).strip()
-                if url:
-                    urls.append({"label": last_label, "url": url, "Section": ""})
-        return sheet, "", urls
+        # en sequences, on retourne tout l'onglet sans filtrer. Reutilise
+        # _parse_url_sections (avec section_col_idx=None, qui desactive
+        # simplement la detection de ligne separateur - tout est alors
+        # rattache a la sequence "") plutot que de maintenir ici une seconde
+        # boucle de parcours des lignes qui pourrait diverger de celle-ci
+        # lors d'un futur correctif (cellule fusionnee, ligne vide,
+        # particularite d'encodage...).
+        sections = _parse_url_sections(raw, header_row_idx, section_col_idx, tracked_col_idx)
+        return sheet, "", sections[""]
 
     sections = _parse_url_sections(raw, header_row_idx, section_col_idx, tracked_col_idx)
     named_sections = {name: urls for name, urls in sections.items() if name and urls}

@@ -15,7 +15,7 @@ from collections import Counter
 from qa.archive import archive_report
 from qa.classification import detect_classification, normalize_sequence_name, resolve_sequence_alias
 from qa.cleanup import cleanup_old_temp_files_throttled
-from qa.config import GENERIC_SHEET_KEYWORD
+from qa.config import GENERIC_SHEET_KEYWORD, filename_slug
 from qa.combined_report import build_combined_report
 from qa.diagnostics import (
     find_duplicate_components,
@@ -559,8 +559,8 @@ def _execute_single_or_combined_test(html_path, excel_path, test_wording, test_u
             )
 
             today = datetime.now().strftime("%Y-%m-%d")
-            safe_wording_name = re.sub(r"[^\w\-]", "_", wording_sheet_name)
-            safe_url_name = re.sub(r"[^\w\-]", "_", url_sheet_name)
+            safe_wording_name = filename_slug(wording_sheet_name)
+            safe_url_name = filename_slug(url_sheet_name)
 
             wording_total = len(wording_results)
             wording_ok = sum(1 for r in wording_results if r["Status"] == "OK")
@@ -612,7 +612,7 @@ def _execute_single_or_combined_test(html_path, excel_path, test_wording, test_u
             )
 
             today = datetime.now().strftime("%Y-%m-%d")
-            safe_sheet_name = re.sub(r"[^\w\-]", "_", sheet_name)
+            safe_sheet_name = filename_slug(sheet_name)
 
             last_run = {
                 "excel_path": excel_path,
@@ -729,10 +729,7 @@ def _render_summary_and_charts(df):
 
     total = ok_count + ko_count
 
-    success_rate = round(
-        ok_count / total * 100,
-        1
-    ) if total else 0
+    success_rate = _score_pct(ok_count, total)
 
     st.metric(
         "Taux de réussite QA",
@@ -796,13 +793,15 @@ def _render_summary_and_charts(df):
             )
 
 
-def _render_table(results, mode, key_suffix):
+def _render_table(df_display, mode, key_suffix):
     """Tableau AgGrid detaille (lignes vertes/rouges, diff mot-a-mot en gras
-    rouge sur les KO en mode wording) pour un jeu de resultats, sans
-    metriques ni bouton de telechargement (voir render_results_block /
-    render_grouped_results pour la vue complete)."""
-    _, df_display = _prepare_display_df(results, mode)
-
+    rouge sur les KO en mode wording) pour un jeu de resultats DEJA PREPARE
+    par _prepare_display_df (voir render_results_block / render_grouped_results
+    pour la vue complete) - prend directement df_display plutot que les
+    resultats bruts, pour que render_results_block n'ait pas a appeler
+    _prepare_display_df deux fois (une pour les metriques/graphiques, une
+    ici) sur le meme jeu de resultats : le diff mot-a-mot/caractere par
+    caractere qu'elle calcule est le plus couteux de tout le rendu."""
     show_only_errors = st.checkbox(
         "🔎 Afficher uniquement les erreurs (KO)",
         key=f"filter_ko_{key_suffix}"
@@ -911,9 +910,9 @@ def render_results_block(results, report_path, title, download_filename, mode="w
 
     st.success(f"✅ {title}")
 
-    df, _ = _prepare_display_df(results, mode)
+    df, df_display = _prepare_display_df(results, mode)
     _render_summary_and_charts(df)
-    _render_table(results, mode, key_suffix=download_filename)
+    _render_table(df_display, mode, key_suffix=download_filename)
 
     with open(report_path, "rb") as f:
         st.download_button(
@@ -967,7 +966,8 @@ def render_grouped_results(results_by_sequence, mode, report_path, download_file
         # les sequences propres (icon "✅") restent repliees, rien a y faire.
         with st.expander(f"{icon} {seq} — {seq_ok}/{seq_total} OK ({seq_score}%)", expanded=not all_ok):
             if rows:
-                _render_table(rows, mode, key_suffix=f"{download_filename}_{seq}")
+                _, seq_df_display = _prepare_display_df(rows, mode)
+                _render_table(seq_df_display, mode, key_suffix=f"{download_filename}_{seq}")
             else:
                 st.caption("Aucun résultat pour cette séquence.")
 
@@ -1060,6 +1060,18 @@ def _do_archive(last_run, country, trigger):
     summary_lines = []
     combined_error_types = {}
 
+    # Items deja archives/enregistres lors d'une precedente tentative (partielle)
+    # de CE MEME run - voir plus bas. Necessaire pour que ensure_archived
+    # (idempotent par construction, voir son docstring) le reste vraiment en
+    # cas d'echec PARTIEL : sans ce suivi, un rerun apres une erreur
+    # survenue au milieu de la boucle ci-dessous relancerait TOUTE la boucle
+    # depuis le debut, ré-archivant/ré-enregistrant (record_run) les items
+    # deja traites avec succes - produisant des entrees d'historique
+    # dupliquees pour eux.
+    archive_key = _archive_key(last_run)
+    done_items_key = archive_key + "::done_items"
+    done_items = set(st.session_state.get(done_items_key, set()))
+
     try:
         # Utilisateur du systeme d'exploitation (ex: "mbonhomme") : l'outil
         # n'a pas de systeme d'authentification propre, donc pas d'autre
@@ -1072,7 +1084,7 @@ def _do_archive(last_run, country, trigger):
     except OSError:
         tested_by = None
 
-    for item in _run_items(last_run):
+    for i, item in enumerate(_run_items(last_run)):
         sequence = resolve_sequence_alias(country, trigger, normalize_sequence_name(item["sequence"]))
         resolved_sequences.add(sequence)
 
@@ -1092,6 +1104,9 @@ def _do_archive(last_run, country, trigger):
             f"- **{escape_teams_markdown(item['sequence'])}** ({item['mode']}) : {score}% ({ok}/{total} OK)"
         )
 
+        if i in done_items:
+            continue
+
         report_path = item["report_path"] or save_report(rows, item["sequence"], mode=item["mode"])
         archive_report(report_path, country, trigger, sequence, mode=item["mode"])
         record_run(
@@ -1099,6 +1114,8 @@ def _do_archive(last_run, country, trigger):
             country=country, trigger=trigger, sequence=sequence, error_types=dict(error_types),
             tested_by=tested_by,
         )
+        done_items.add(i)
+        st.session_state[done_items_key] = set(done_items)
 
     for sequence in resolved_sequences:
         combined_path, combined_stats = build_combined_report(country, trigger, sequence)
@@ -1284,7 +1301,23 @@ def _best_sequence_guess(filename, options):
     sequence, et le score de confiance associe (0.0 si aucun nom exploitable
     dans filename). Coeur partage par _guess_sequence_choice (suggestion
     affichee, seuil bas) et _apply_high_confidence_sequence_guesses
-    (pre-association en masse, seuil haut)."""
+    (pre-association en masse, seuil haut).
+
+    Simple wrapper qui convertit `options` (accepte n'importe quel iterable,
+    liste incluse) en tuple avant de deleguer a la version cachee - un
+    functools.lru_cache exige des arguments hashables, donc ne peut pas
+    s'appliquer directement a une fonction qui accepte une liste."""
+    return _best_sequence_guess_cached(filename, tuple(options))
+
+
+@functools.lru_cache(maxsize=256)
+def _best_sequence_guess_cached(filename, options):
+    """Coeur cache de _best_sequence_guess (voir ce docstring) - cle par
+    (filename, options). Sans ce cache, choisir la sequence d'UN fichier en
+    mode batch relance le fuzzy-matching difflib pour TOUS les autres
+    fichiers encore non assignes a chaque rerun Streamlit qui suit (widget
+    quelconque de la page), alors que le nom du fichier et la liste des
+    sequences n'ont pas change entre-temps."""
     base = re.sub(r"[^a-z0-9]", "", os.path.splitext(filename)[0].lower())
     if not base:
         return None, 0.0
@@ -1511,6 +1544,19 @@ def _run_excel_diagnostics(excel_path, html_path, test_wording, test_url,
             messages.append(("error", f"❌ {e}"))
 
     return messages
+
+
+def _file_cache_key(path):
+    """(chemin, mtime_ns, taille) d'un fichier - cle de cache pour un
+    wrapper @functools.lru_cache (meme principe que
+    qa.excel_loader._cached_excel_file) : invalide automatiquement le cache
+    d'un rerun a l'autre si le fichier a ete reecrit (nouvel upload) sous le
+    meme chemin temporaire fixe par session. Retourne (path, None, None)
+    sans appeler os.stat si path est vide (rien a stat-er)."""
+    if not path:
+        return path, None, None
+    stat = os.stat(path)
+    return path, stat.st_mtime_ns, stat.st_size
 
 
 @functools.lru_cache(maxsize=8)
@@ -2085,6 +2131,43 @@ if excel_path and batch_mode:
         for level, text in batch_diagnostic_messages:
             _DIAGNOSTIC_RENDERERS[level](text)
 
+def _show_batch_debug_logs(debug_logs):
+    """Affichage d'echec commun aux modes batch/combined-batch (voir le
+    bouton Comparer plus bas) : logs de debug d'extraction HTML/Excel dans
+    un expander, seul indice disponible quand AUCUN fichier du lot n'a
+    produit de resultat (sinon chaque fichier en echec a deja son propre
+    st.error() via error_messages)."""
+    with st.expander("🐛 Logs de debug (extraction HTML/Excel)"):
+        st.code(debug_logs or "Aucun log.", language=None)
+
+
+def _show_simple_mode_failure(error_message):
+    """Affichage d'echec du mode simple (voir le bouton Comparer plus bas) :
+    message generique a l'utilisateur (fichier illisible), detail technique
+    (message d'exception brut) en dessous."""
+    st.error(
+        "❌ Impossible d'analyser ces fichiers. Vérifiez qu'il s'agit bien d'un "
+        "export HTML valide (\"view-source\" AEM ou HTML brut) et d'un classeur "
+        "Excel non corrompu, puis réessayez."
+    )
+    st.caption(f"Détail technique : {error_message}")
+
+
+def _store_or_clear_last_run(last_run, on_failure):
+    """Stocke `last_run` dans session_state s'il contient un resultat,
+    sinon l'efface et delegue l'affichage de l'echec a `on_failure`
+    (callback sans argument - _show_batch_debug_logs ou
+    _show_simple_mode_failure, chacun avec ses propres arguments deja
+    lies) : partage par les 3 branches du bouton Comparer plus bas, qui ne
+    different plus que par l'executeur appele et le contenu de
+    on_failure."""
+    if last_run is not None:
+        st.session_state["last_run"] = last_run
+    else:
+        st.session_state.pop("last_run", None)
+        on_failure()
+
+
 # =========================
 # BOUTON COMPARER
 # =========================
@@ -2121,49 +2204,25 @@ if st.button(button_label, disabled=not comparer_ready):
             last_run, error_messages, debug_logs = _execute_combined_batch(
                 excel_path, combined_sequence_assignments, include_generic, session_id
             )
-
         for message in error_messages:
             st.error(message)
-
-        if last_run is not None:
-            st.session_state["last_run"] = last_run
-        else:
-            st.session_state.pop("last_run", None)
-            with st.expander("🐛 Logs de debug (extraction HTML/Excel)"):
-                st.code(debug_logs or "Aucun log.", language=None)
+        _store_or_clear_last_run(last_run, lambda: _show_batch_debug_logs(debug_logs))
 
     elif batch_mode:
         with st.spinner("Analyse en cours..."):
             last_run, error_messages, debug_logs = _execute_batch(
                 excel_path, sequence_assignments, qa_mode, include_generic, session_id
             )
-
         for message in error_messages:
             st.error(message)
-
-        if last_run is not None:
-            st.session_state["last_run"] = last_run
-        else:
-            st.session_state.pop("last_run", None)
-            with st.expander("🐛 Logs de debug (extraction HTML/Excel)"):
-                st.code(debug_logs or "Aucun log.", language=None)
+        _store_or_clear_last_run(last_run, lambda: _show_batch_debug_logs(debug_logs))
 
     else:
         with st.spinner("Analyse en cours..."):
             last_run, error_message = _execute_single_or_combined_test(
                 html_path, excel_path, test_wording, test_url, wording_keyword, url_keyword, include_generic
             )
-
-        if last_run is not None:
-            st.session_state["last_run"] = last_run
-        else:
-            st.session_state.pop("last_run", None)
-            st.error(
-                "❌ Impossible d'analyser ces fichiers. Vérifiez qu'il s'agit bien d'un "
-                "export HTML valide (\"view-source\" AEM ou HTML brut) et d'un classeur "
-                "Excel non corrompu, puis réessayez."
-            )
-            st.caption(f"Détail technique : {error_message}")
+        _store_or_clear_last_run(last_run, lambda: _show_simple_mode_failure(error_message))
 
 # =========================
 # AFFICHAGE DU DERNIER RESULTAT (persiste entre reruns tant que les entrees

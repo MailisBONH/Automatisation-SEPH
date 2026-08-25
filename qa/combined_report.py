@@ -14,7 +14,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.utils.dataframe import dataframe_to_rows
 
 from qa.archive import archive_report, list_reports, prune_root_reports
-from qa.config import OUTPUT_DIR
+from qa.config import OUTPUT_DIR, score_pct
 from qa.report import status_fill_color, write_summary_sheet
 
 
@@ -62,10 +62,10 @@ def build_combined_report(country: str, trigger: str, sequence: str):
 
     total = wording_total + url_total
     ok = wording_ok + url_ok
-    score = round(ok / total * 100, 2) if total else 0
+    score = score_pct(ok, total, digits=2)
 
-    wording_score = round(wording_ok / wording_total * 100, 2) if wording_total else 0
-    url_score = round(url_ok / url_total * 100, 2) if url_total else 0
+    wording_score = score_pct(wording_ok, wording_total, digits=2)
+    url_score = score_pct(url_ok, url_total, digits=2)
 
     wb = Workbook()
 

@@ -4,6 +4,7 @@ import time
 import pandas as pd
 import pytest
 
+import qa.excel_loader as excel_loader_module
 from conftest import make_utm_workbook, make_wording_workbook
 from qa.excel_loader import (
     _open_excel_file,
@@ -11,6 +12,7 @@ from qa.excel_loader import (
     find_sheet,
     find_sibling_sequence_sheet,
     find_sibling_url_section,
+    find_unrecognized_audience_variant,
     list_url_sequence_choices,
     list_wording_sheet_choices,
     load_excel_urls,
@@ -300,6 +302,29 @@ class TestLoadExcelUrlsWithoutUrlLabelColumn:
         # Le label (colonne la plus a gauche) est report vers le bas quand vide.
         assert [u["label"] for u in urls] == ["HEADER", "HEADER"]
 
+    def test_blank_row_between_data_rows_is_skipped(self, tmp_path):
+        # Regression : cette branche ("URL" absente meme de l'en-tete)
+        # reutilise desormais _parse_url_sections (avec section_col_idx=None)
+        # au lieu de sa propre boucle - verifie qu'une ligne totalement vide
+        # au milieu des donnees est toujours ignoree sans casser le report du
+        # label ni la suite des URLs, comme avant ce refactor.
+        path = tmp_path / "utm_no_url_column_blank_row.xlsx"
+        rows = [
+            [None, "SOURCE", "MEDIUM", "CAMPAIGN", "SEQUENCE", "VERSION", "<< TRACKED URL >>"],
+            ["HEADER", "trigger", "email", "revamp_inac", "seq1", "", "https://example.com/a"],
+            [None, None, None, None, None, None, None],
+            [None, "trigger", "email", "revamp_inac", "seq1", "", "https://example.com/b"],
+        ]
+        with pd.ExcelWriter(path) as writer:
+            pd.DataFrame(rows).to_excel(writer, sheet_name="UTM TRIGGER", index=False, header=False)
+
+        sheet, section_name, urls = load_excel_urls(str(path), "anything")
+
+        assert section_name == ""
+        assert [u["url"] for u in urls] == ["https://example.com/a", "https://example.com/b"]
+        assert [u["label"] for u in urls] == ["HEADER", "HEADER"]
+        assert [u["Section"] for u in urls] == ["", ""]
+
 
 class TestFindSiblingUrlSection:
     """
@@ -412,3 +437,89 @@ class TestOpenExcelFileCache:
 
         assert second.sheet_names == ["Second"]
         assert second is not first
+
+
+class TestFindUnrecognizedAudienceVariant:
+    """
+    Le modele frere LOYAL/NON LOYAL (ou FID/NON FID) est volontairement
+    binaire (voir _loyalty_status/_find_sibling_name) : un onglet qui partage
+    le meme numero de SEQ mais n'a NI mot-cle LOYAL NI mot-cle NON LOYAL
+    (ex: une 3e audience "VIP") n'est jamais fusionne avec quoi que ce soit,
+    silencieusement. find_unrecognized_audience_variant se limite a exposer
+    cette detection, sans changer le comportement de fusion.
+    """
+
+    def test_detects_a_third_audience_variant_sharing_the_same_seq_number(self):
+        sheet_names = ["SEQ 1 NON LOYAL", "SEQ 1 LOYAL", "SEQ 1 VIP", "GENERIC"]
+        assert find_unrecognized_audience_variant(sheet_names, "SEQ 1 NON LOYAL") == "SEQ 1 VIP"
+
+    def test_returns_none_when_no_unrecognized_variant_exists(self):
+        sheet_names = ["SEQ 1 NON LOYAL", "SEQ 1 LOYAL", "GENERIC"]
+        assert find_unrecognized_audience_variant(sheet_names, "SEQ 1 NON LOYAL") is None
+
+    def test_returns_none_when_resolved_sheet_has_no_sequence_number(self):
+        sheet_names = ["GENERIC", "SEQ 1 VIP"]
+        assert find_unrecognized_audience_variant(sheet_names, "GENERIC") is None
+
+    def test_ignores_variants_with_a_different_sequence_number(self):
+        sheet_names = ["SEQ 1 NON LOYAL", "SEQ 2 VIP"]
+        assert find_unrecognized_audience_variant(sheet_names, "SEQ 1 NON LOYAL") is None
+
+    def test_does_not_flag_the_resolved_sheet_itself(self):
+        # Un onglet qui n'a lui-meme pas de mot-cle fidelite (ex: "SEQ 1"
+        # simple) ne doit pas se signaler lui-meme comme variante inconnue.
+        sheet_names = ["SEQ 1", "SEQ 1 LOYAL"]
+        assert find_unrecognized_audience_variant(sheet_names, "SEQ 1") is None
+
+
+class TestExcludedQaElementKeywords:
+    """
+    EXCLUDED_QA_ELEMENT_KEYWORDS (qa.config) complete les exclusions exactes
+    (EXCLUDED_QA_ROWS/EXCLUDED_QA_ELEMENTS) par une correspondance en
+    sous-chaine, insensible a la casse, sur ELEMENT - pour exclure toute une
+    famille de champs sans lister chaque variante exacte.
+    """
+
+    def _row(self, component, element, wording="Un wording assez long", technical="audit-component-x"):
+        return [component, element, wording, technical]
+
+    def test_element_matching_a_configured_keyword_is_excluded(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(excel_loader_module, "EXCLUDED_QA_ELEMENT_KEYWORDS", {"promo code"})
+        path = make_wording_workbook(tmp_path, {
+            "SEQ 1": [
+                self._row("Header", "Promo Code Banner"),
+                self._row("Header", "Title"),
+            ],
+        })
+        _, wordings = load_excel_wordings(path, "SEQ 1")
+        elements = [w["Element"] for w in wordings]
+        assert "Promo Code Banner" not in elements
+        assert "Title" in elements
+
+    def test_keyword_match_is_case_insensitive(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(excel_loader_module, "EXCLUDED_QA_ELEMENT_KEYWORDS", {"PROMO CODE"})
+        path = make_wording_workbook(tmp_path, {
+            "SEQ 1": [self._row("Header", "promo code banner")],
+        })
+        _, wordings = load_excel_wordings(path, "SEQ 1")
+        assert wordings == []
+
+    def test_existing_exact_exclusions_still_work_when_keyword_list_is_empty(self, tmp_path, monkeypatch):
+        # Regression : EXCLUDED_QA_ELEMENT_KEYWORDS vide (comportement par
+        # defaut) ne doit rien changer aux exclusions exactes existantes.
+        monkeypatch.setattr(excel_loader_module, "EXCLUDED_QA_ELEMENT_KEYWORDS", set())
+        path = make_wording_workbook(tmp_path, {
+            "SEQ 1": [self._row("Any", "logo"), self._row("Header", "Title")],
+        })
+        _, wordings = load_excel_wordings(path, "SEQ 1")
+        elements = [w["Element"] for w in wordings]
+        assert "logo" not in elements
+        assert "Title" in elements
+
+    def test_unrelated_element_is_not_excluded_by_an_unrelated_keyword(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(excel_loader_module, "EXCLUDED_QA_ELEMENT_KEYWORDS", {"promo code"})
+        path = make_wording_workbook(tmp_path, {
+            "SEQ 1": [self._row("Header", "Title")],
+        })
+        _, wordings = load_excel_wordings(path, "SEQ 1")
+        assert len(wordings) == 1

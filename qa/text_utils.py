@@ -57,7 +57,7 @@ def is_valid(text: str) -> bool:
         return False
     t_low = t.lower()
     invalid_patterns = [
-        r"^<", r"^/\/\*", r"^http", r"^mailto:", r"^/content/",
+        r"^<", r"^/\*", r"^http", r"^mailto:", r"^/content/",
         r"charset", r"viewport", r"xmlns", r"doctype",
         r"role=", r"style=", r"class=",
         r"^\d+$", r"^#[0-9A-Fa-f]{3,8}$", r"^\d+(px|em|%)$", r"mso-",
@@ -132,14 +132,69 @@ def normalize(text: str) -> str:
     return s.strip()
 
 
-_IF_ELSE_PATTERN = re.compile(
-    r"<%\s*if\s*\([^{]*?\)\s*\{\s*%>(.*?)<%\s*\}\s*else\s*\{\s*%>(.*?)<%\s*\}\s*%>",
+_IF_OPEN_PATTERN = re.compile(r"<%\s*if\s*\([^{]*?\)\s*\{\s*%>", re.IGNORECASE)
+_IF_ELSE_TOKEN_PATTERN = re.compile(r"<%\s*\}\s*else\s*\{\s*%>", re.IGNORECASE)
+_IF_CLOSE_TOKEN_PATTERN = re.compile(r"<%\s*\}\s*%>", re.IGNORECASE)
+# Alternation des 3 marqueurs ci-dessus, pour parcourir sequentiellement les
+# tokens qui suivent un "<% if %>" - voir _find_conditional_block. Les 3
+# patterns divergent tous des le caractere suivant "<%\s*", donc l'ordre des
+# branches ne cree aucune ambiguite (jamais deux alternatives ne matchent a
+# la meme position).
+_CONDITIONAL_TOKEN_PATTERN = re.compile(
+    "(?P<OPEN>{open})|(?P<ELSE>{else_})|(?P<CLOSE>{close})".format(
+        open=_IF_OPEN_PATTERN.pattern, else_=_IF_ELSE_TOKEN_PATTERN.pattern, close=_IF_CLOSE_TOKEN_PATTERN.pattern
+    ),
     re.DOTALL | re.IGNORECASE,
 )
-_IF_ONLY_PATTERN = re.compile(
-    r"<%\s*if\s*\([^{]*?\)\s*\{\s*%>(.*?)<%\s*\}\s*%>",
-    re.DOTALL | re.IGNORECASE,
-)
+
+
+def _find_conditional_block(text: str):
+    """
+    Trouve le PREMIER bloc <% if(...) {%> ... <% } [else {%> ...] %> de
+    `text`, en respectant l'imbrication : un if/else imbrique DANS la
+    branche if (ou else) du bloc englobant n'est plus confondu avec le
+    else/la fermeture de ce bloc englobant (voir le "depth" ci-dessous).
+
+    Retourne (start, if_body, else_body_ou_None, end) - end etant la
+    position juste apres la fermeture du bloc TROUVE (pas celle d'un bloc
+    imbrique) - ou None si aucun bloc bien forme n'est trouve. Le corps
+    d'un bloc imbrique n'est PAS lui-meme resolu ici : expand_conditional_variants
+    le retrouvera comme bloc a part entiere au round suivant, une fois la
+    substitution de CE bloc appliquee.
+    """
+    m_open = _IF_OPEN_PATTERN.search(text)
+    if not m_open:
+        return None
+
+    depth = 0
+    if_end = None
+    else_start = None
+    pos = m_open.end()
+
+    while pos <= len(text):
+        m = _CONDITIONAL_TOKEN_PATTERN.search(text, pos)
+        if not m:
+            return None  # bloc mal forme (fermeture manquante) - laisse tel quel
+
+        kind = m.lastgroup
+        if kind == "OPEN":
+            depth += 1
+        elif kind == "ELSE" and depth == 0 and if_end is None:
+            if_end = m.start()
+            else_start = m.end()
+        elif kind == "CLOSE" and depth == 0:
+            if if_end is None:
+                return (m_open.start(), text[m_open.end():m.start()], None, m.end())
+            return (m_open.start(), text[m_open.end():if_end], text[else_start:m.start()], m.end())
+        elif kind == "CLOSE":
+            depth -= 1
+        # Un ELSE rencontre a depth > 0 (ou un second ELSE au meme niveau,
+        # improbable en AEM valide) appartient a un bloc imbrique : ignore
+        # pour le comptage de profondeur, il sera retrouve comme faisant
+        # partie du corps du bloc imbrique.
+        pos = m.end()
+
+    return None
 
 
 def expand_conditional_variants(text: str, max_variants: int = 8) -> list:
@@ -155,8 +210,13 @@ def expand_conditional_variants(text: str, max_variants: int = 8) -> list:
     matche ni l'une ni l'autre). Ici, chaque branche devient sa propre
     variante ; le rendu final n'affichera qu'une seule branche a la fois,
     donc matcher N'IMPORTE LAQUELLE des variantes doit compter comme un
-    match. Gere aussi les conditions sequentielles/imbriquees dans un meme
-    texte (une nouvelle passe de resolution par round, jusqu'a 6 rounds).
+    match. Gere aussi bien les conditions sequentielles (plusieurs blocs
+    l'un apres l'autre) que VRAIMENT imbriquees (un if/else a l'interieur
+    d'une branche d'un autre) - voir _find_conditional_block - via une
+    nouvelle passe de resolution par round (jusqu'a 6 rounds) : chaque round
+    ne resout que le bloc le plus EXTERIEUR de chaque variante, le bloc
+    imbrique restant dans le corps substitue est retrouve comme bloc a part
+    entiere au round suivant.
 
     Retourne [text] (liste a un seul element) si aucun bloc conditionnel
     n'est trouve - le cas courant, sans aucun cout supplementaire.
@@ -169,19 +229,14 @@ def expand_conditional_variants(text: str, max_variants: int = 8) -> list:
         next_variants = []
         any_resolved = False
         for v in variants:
-            m = _IF_ELSE_PATTERN.search(v)
-            if m:
-                any_resolved = True
-                next_variants.append(v[:m.start()] + m.group(1) + v[m.end():])
-                next_variants.append(v[:m.start()] + m.group(2) + v[m.end():])
+            block = _find_conditional_block(v)
+            if not block:
+                next_variants.append(v)
                 continue
-            m = _IF_ONLY_PATTERN.search(v)
-            if m:
-                any_resolved = True
-                next_variants.append(v[:m.start()] + m.group(1) + v[m.end():])
-                next_variants.append(v[:m.start()] + v[m.end():])
-                continue
-            next_variants.append(v)
+            any_resolved = True
+            start, if_body, else_body, end = block
+            next_variants.append(v[:start] + if_body + v[end:])
+            next_variants.append(v[:start] + (else_body if else_body is not None else "") + v[end:])
         variants = next_variants[:max_variants]
         if not any_resolved:
             break
@@ -220,6 +275,30 @@ def clean_display_text(raw_text: str, reference_text: str = None) -> str:
             best_sim = sim
             best = v
     return clean_text(best)
+
+
+def similarity_ratio(a: str, b: str, case_sensitive: bool = False) -> float:
+    """
+    Similarite caractere par caractere entre deux textes (0.0-1.0), via
+    difflib.SequenceMatcher - factorise ici pour eviter que qa.matching
+    (comparaison principale + _similarity_with_boosts) et qa.url_qa
+    (_char_similarity) redefinissent chacun la meme logique (minuscules +
+    cas particulier des chaines vides).
+
+    Insensible a la casse par defaut (les deux textes sont mis en
+    minuscules) : c'est le comportement de TOUS les appels existants
+    remplaces par cette fonction. Une difference de casse pure est deja
+    detectee separement et plus tot dans qa.matching.compare (KO_CASE_MISMATCH,
+    sur les textes normalises avant meme d'atteindre ce calcul de
+    similarite) - passer case_sensitive=True reste possible pour un futur
+    appelant qui aurait besoin de preserver la casse ici meme.
+    """
+    a, b = str(a or ""), str(b or "")
+    if not case_sensitive:
+        a, b = a.lower(), b.lower()
+    if not a and not b:
+        return 1.0
+    return difflib.SequenceMatcher(None, a, b).ratio()
 
 
 def normalize_currency(text: str) -> str:

@@ -17,6 +17,7 @@ import streamlit as st
 from qa.archive import delete_sequence_dir, list_reports, move_sequence_dir
 from qa.classification import migrate_legacy_loyalty_sequences
 from qa.history import (
+    HISTORY_PATH,
     aggregate_error_types,
     build_history_tree,
     delete_classification,
@@ -59,6 +60,90 @@ def _record_recent_sequence(country, trigger, sequence):
     recent.insert(0, (country, trigger, sequence))
     st.session_state["recent_sequences"] = recent[:MAX_RECENT_SEQUENCES]
 
+
+def _forget_recent_sequence(country, trigger, sequence):
+    """Retire (country, trigger, sequence) de l'historique de consultation de
+    la session s'il y figure - a appeler quand cette identite vient d'etre
+    renommee/fusionnee ou supprimee, pour ne pas laisser un quicklink mort
+    pointer vers un pays/trigger/sequence qui n'existe plus (voir aussi le
+    garde-fou de navigation plus bas qui gere le meme cas de figure)."""
+    st.session_state["recent_sequences"] = [
+        k for k in st.session_state["recent_sequences"] if k != (country, trigger, sequence)
+    ]
+
+# Compteur global, incremente uniquement quand un evenement change ce que
+# load_classified_history()/build_history_tree() retournerait (renommage/
+# fusion, suppression, migration retroactive - voir _bump_history_version
+# et tous ses appelants plus bas) - passe en argument a
+# _load_history_overview ci-dessous pour que st.cache_data traite un
+# changement de version comme une nouvelle cle de cache, sans avoir a
+# deviner "la base a-t-elle change" via un mtime de fichier ou un TTL.
+if "history_version" not in st.session_state:
+    st.session_state["history_version"] = 0
+
+
+def _bump_history_version():
+    """A appeler juste apres toute mutation reussie de l'historique classe
+    (rename/fusion, suppression, migration retroactive) - voir le
+    commentaire au-dessus de l'initialisation de history_version.
+    Sans cet appel, _load_history_overview continuerait de servir un arbre
+    perime indefiniment (le cache n'a ni TTL ni invalidation automatique)."""
+    st.session_state["history_version"] += 1
+
+
+def _history_db_stat():
+    """(mtime_ns, taille) de qa.history.HISTORY_PATH (relatif au cwd courant,
+    voir qa.config.OUTPUT_DIR), ou None si la base n'existe pas encore -
+    passe a _load_history_overview en plus de history_version pour que TOUTE
+    ecriture dans cette base (pas seulement celles faites depuis CETTE page)
+    invalide le cache : record_run (archivage d'un nouveau run depuis
+    home.py), migrate_legacy_jsonl_history/migrate_legacy_loyalty_sequences,
+    ou meme une modification faite depuis un autre onglet/session, ecrivent
+    tous dans le meme fichier SQLite et en changent donc le mtime/la taille -
+    contrairement a history_version (compteur propre a CETTE page/session),
+    qui ne peut par construction detecter que ses propres mutations."""
+    if not os.path.exists(HISTORY_PATH):
+        return None
+    stat = os.stat(HISTORY_PATH)
+    return stat.st_mtime_ns, stat.st_size
+
+
+@st.cache_data(show_spinner=False)
+def _load_history_overview(version: int, cwd: str, db_stat):
+    """
+    Lecture de l'historique classe + construction de l'arbre de navigation
+    (voir qa.history.load_classified_history/build_history_tree), mise en
+    cache par st.cache_data : sans ce cache, cette lecture SQL + construction
+    d'arbre s'executerait a chaque interaction avec N'IMPORTE QUEL widget de
+    la page (taper dans la recherche, cocher une case...), Streamlit
+    reexecutant tout le script a chaque rerun - alors que le resultat ne
+    change en realite que si la base a ete ecrite depuis le dernier rerun.
+
+    Cle de cache a 3 composantes, toutes necessaires :
+    - `db_stat` (voir _history_db_stat) : (mtime_ns, taille) du fichier
+      SQLite lui-meme - detecte AUTOMATIQUEMENT toute ecriture, qu'elle
+      vienne du formulaire de renommage/suppression de cette page, d'un
+      archivage depuis home.py, d'une migration retroactive, ou d'une autre
+      session/onglet. C'est la garantie de fraicheur reelle : sans elle, une
+      mutation qui ne passe pas par _bump_history_version() (voir plus bas)
+      resterait invisible tant que ce compteur ne bouge pas.
+    - `version` (compteur session_state, voir _bump_history_version) :
+      bumpe explicitement juste apres les mutations faites DEPUIS cette page
+      (rename/fusion, suppression, migration) - redondant avec db_stat pour
+      ces cas precis (l'ecriture SQL change deja le mtime), mais documente
+      intentionnellement chaque point de mutation connu de cette page.
+    - `cwd` (os.getcwd()) : qa.history.HISTORY_PATH est un chemin RELATIF
+      ("output/history.db"), donc 2 sessions avec un repertoire de travail
+      different lisent en realite 2 bases differentes - sans cwd dans la
+      cle, l'une pourrait recevoir a tort l'arbre en cache de l'autre. Sans
+      consequence en usage reel (un seul repertoire de travail par
+      deploiement), mais necessaire a l'isolation des tests (chaque test
+      tourne dans son propre tmp_path).
+    """
+    entries = load_classified_history()
+    return entries, build_history_tree(entries=entries)
+
+
 # Migration unique et idempotente de l'ancien historique JSONL vers SQLite
 # (voir qa.history.migrate_legacy_jsonl_history) - AVANT toute lecture de
 # l'historique sur cette page (build_history_tree ci-dessous, et
@@ -70,6 +155,12 @@ if migrate_legacy_jsonl_history():
         "plus robuste. Aucune donnée perdue : l'ancien fichier est conservé sur disque "
         "(suffixe `.migrated`)."
     )
+    # Ce qu'un futur appel a _load_history_overview retournerait vient de
+    # changer (toutes les entrees legacy viennent d'etre importees) - sans
+    # ce bump, un cache deja chauffe avant la migration (improbable au tout
+    # premier rerun, mais pas impossible sur une session qui a deja tourne)
+    # continuerait de servir l'arbre d'avant migration.
+    _bump_history_version()
 
 # Reprise retroactive, silencieuse et idempotente : toute sequence encore
 # archivee sous un ancien nom qualifie LOYAL/NON LOYAL/FID/NON FID (avant
@@ -81,14 +172,21 @@ if migrated:
         f"🔀 {len(migrated)} séquence(s) archivée(s) sous un ancien nom LOYAL/NON LOYAL/FID/NON FID "
         "fusionnée(s) automatiquement vers leur nom unifié."
     )
+    # Idem : migrate_legacy_loyalty_sequences vient de reecrire des lignes
+    # de classification (rewrite_classification), ce que _load_history_overview
+    # doit refleter au prochain appel.
+    _bump_history_version()
 
 # Une seule lecture de la base pour les deux usages ci-dessous (l'arbre de
-# navigation ET la liste a plat pour les statistiques d'erreurs) : sans
-# `entries=`, build_history_tree relirait une deuxieme fois toute la table
-# en interne via load_classified_history, a chaque interaction avec un
-# widget de la page (Streamlit reexecute tout le script a chaque rerun).
-all_classified_entries = load_classified_history()
-tree = build_history_tree(entries=all_classified_entries)
+# navigation ET la liste a plat pour les statistiques d'erreurs), mise en
+# cache par _load_history_overview (voir sa docstring) : sans `entries=`,
+# build_history_tree relirait une deuxieme fois toute la table en interne via
+# load_classified_history, et sans le cache, cette lecture+construction
+# tournerait a chaque interaction avec un widget de la page (Streamlit
+# reexecute tout le script a chaque rerun).
+all_classified_entries, tree = _load_history_overview(
+    st.session_state["history_version"], os.getcwd(), _history_db_stat()
+)
 
 if not tree:
     st.info(
@@ -97,6 +195,20 @@ if not tree:
         "n'a pas pu être détecté)."
     )
     st.stop()
+
+# Le pays/trigger/sequence memorise dans nav (session_state) peut ne plus
+# exister dans l'arbre qu'on vient de reconstruire (ex: sequence renommee/
+# fusionnee ou supprimee via le panneau "Gerer cette sequence" plus bas, ou
+# via un autre onglet) - sans ce garde-fou, tree[nav["country"]] etc. plus
+# bas leverait un KeyError et planterait toute la page. On retombe alors
+# silencieusement au niveau superieur, comme si rien n'etait selectionne a
+# ce niveau (et en-dessous).
+if nav["country"] not in tree:
+    nav["country"], nav["trigger"], nav["sequence"] = None, None, None
+elif nav["trigger"] not in tree[nav["country"]]:
+    nav["trigger"], nav["sequence"] = None, None
+elif nav["sequence"] not in tree[nav["country"]][nav["trigger"]]:
+    nav["sequence"] = None
 
 
 # =========================
@@ -200,6 +312,47 @@ def _render_diff_result(mode, diff):
             st.dataframe(_diff_entries_to_df(category_entries, mode), use_container_width=True, hide_index=True)
 
 
+@st.cache_data(show_spinner=False)
+def _cached_report_diff(country: str, trigger: str, sequence: str, mode: str, report_stats: tuple) -> dict:
+    """
+    Cache de load_last_two_reports_diff par (country, trigger, sequence,
+    mode, report_stats) - meme principe de cle que qa.excel_loader.
+    _cached_excel_file et home._cached_excel_diagnostics : report_stats (voir
+    _report_diff_cache_key) encode le chemin + mtime_ns + taille des (au
+    plus 2) rapports Excel actuellement les plus recents pour cette
+    combinaison, donc toute rotation (nouveau rapport archive, ancien
+    supprime) change forcement report_stats et invalide naturellement cette
+    entree de cache - sans avoir a detecter ce changement explicitement.
+
+    st.cache_data plutot que functools.lru_cache (contrairement aux deux
+    references ci-dessus, qui vivent dans un module important normalement) :
+    cette fonction est definie dans le corps d'une page Streamlit, reexecute
+    de A a Z a chaque rerun - un functools.lru_cache reattache directement
+    ici serait donc lui-meme redefini (nouvelle fonction, nouveau cache vide)
+    a chaque rerun et n'offrirait aucune retention reelle d'un rerun a
+    l'autre, contrairement a st.cache_data dont le cache vit hors de l'espace
+    de noms du script et survit justement a cette reexecution.
+    """
+    return load_last_two_reports_diff(country, trigger, sequence, mode)
+
+
+def _report_diff_cache_key(country: str, trigger: str, sequence: str, mode: str) -> tuple:
+    """Chemin absolu + mtime_ns + taille des (au plus 2) rapports actuellement
+    les plus recents pour (country, trigger, sequence, mode) - voir
+    _cached_report_diff. Recalculee a chaque appel (juste des os.stat sur au
+    plus 2 fichiers, negligeable) : c'est justement ce qui permet de detecter
+    une rotation (nouveau rapport archive, ancien supprime par KEEP_REPORTS)
+    sans avoir a la signaler explicitement depuis qa.archive. os.path.abspath
+    (qa.archive.list_reports renvoie des chemins RELATIFS au cwd courant,
+    voir qa.config.OUTPUT_DIR) plutot que le chemin relatif brut : 2 process/
+    sessions avec un repertoire de travail different ne doivent jamais
+    partager une entree de cache juste parce que le meme chemin relatif s'y
+    resout par coincidence a un fichier different (constant en usage reel,
+    mais chaque test tourne dans son propre tmp_path)."""
+    reports = list_reports(country, trigger, sequence, mode=mode)[:2]
+    return tuple((os.path.abspath(path), os.stat(path).st_mtime_ns, os.stat(path).st_size) for path in reports)
+
+
 def render_report_diff(country, trigger, sequence):
     """
     Diff entre les 2 derniers rapports archives (wording et/ou url) d'une
@@ -208,10 +361,18 @@ def render_report_diff(country, trigger, sequence):
     composants/wordings/URLs ont regresse, ete corriges ou change de nature,
     plutot que juste "le score a baisse de X points". Purement local (relit
     des rapports Excel deja generes sur disque, aucun appel reseau).
+
+    load_last_two_reports_diff (via _cached_report_diff) reparse jusqu'a 2
+    classeurs Excel par mode (pandas/openpyxl) - couteux a refaire a chaque
+    interaction avec N'IMPORTE QUEL widget de la page (Streamlit reexecute
+    tout le script a chaque rerun, meme quand cet expander reste replie),
+    donc mis en cache par identite de fichier (mtime+taille, voir
+    _report_diff_cache_key) plutot que recalcule ici sans condition.
     """
     any_diff = False
     for mode in ("wording", "url"):
-        diff = load_last_two_reports_diff(country, trigger, sequence, mode)
+        cache_key = _report_diff_cache_key(country, trigger, sequence, mode)
+        diff = _cached_report_diff(country, trigger, sequence, mode, cache_key)
         if diff is None:
             continue
         any_diff = True
@@ -523,7 +684,16 @@ else:
             else:
                 move_sequence_dir(country, trigger, sequence, new_country, new_trigger, new_sequence)
                 rewrite_classification(country, trigger, sequence, new_country, new_trigger, new_sequence)
+                # Ce que _load_history_overview retournerait vient de changer
+                # (rewrite_classification) - le rerun juste en-dessous doit
+                # voir la nouvelle identite, pas un arbre mis en cache avant
+                # le renommage.
+                _bump_history_version()
                 nav["country"], nav["trigger"], nav["sequence"] = new_country, new_trigger, new_sequence
+                # L'ancienne identite ne doit pas rester comme quicklink mort
+                # dans "Recemment consultees" - on la remplace par la nouvelle.
+                _forget_recent_sequence(country, trigger, sequence)
+                _record_recent_sequence(new_country, new_trigger, new_sequence)
                 st.success(f"Renommé en **{new_country} / {new_trigger} / {new_sequence}**.")
                 st.rerun()
 
@@ -539,6 +709,13 @@ else:
         if st.button("🗑️ Supprimer cette séquence", disabled=not confirm_delete):
             delete_sequence_dir(country, trigger, sequence)
             delete_classification(country, trigger, sequence)
+            # Ce que _load_history_overview retournerait vient de changer
+            # (delete_classification) - meme raison que dans le formulaire de
+            # renommage ci-dessus.
+            _bump_history_version()
             nav["country"], nav["trigger"], nav["sequence"] = None, None, None
+            # La sequence supprimee ne doit pas rester comme quicklink mort
+            # dans "Recemment consultees".
+            _forget_recent_sequence(country, trigger, sequence)
             st.success("Séquence supprimée.")
             st.rerun()

@@ -11,6 +11,7 @@ from qa.config import (
     KO_WORDING_RELOCATED,
     KO_UNEXPECTED_WORDING,
     KO_MISSING_WORDING,
+    score_pct,
 )
 from qa.matching import (
     criticality_for,
@@ -143,52 +144,26 @@ def _closest_match_row(item, h_text, html_order, excel_wordings, matched_excel_c
     else:
         status, error_type = "KO", KO_WORDING_MISMATCH
 
-    criticality = "" if status == "OK" else criticality_for(error_type)
     match_type = "Closest Match Accepted" if status == "OK" else "Closest Match"
 
-    return {
-        "Component Name": ex_closest["Component"],
-        "Element": ex_closest["Element"],
-        "Source Sheet": ex_closest.get("Sheet", ""),
-        "Expected Class": expected_class,
-        "HTML Class": found_class or "none",
-        "Excel Wording": clean_display_text(ex_closest["Wording"], h_text),
-        "HTML Wording": clean_display_text(h_text, ex_closest["Wording"]),
-        "Status": status,
-        "Error Type": error_type,
-        "Similarity": f"{round(c_sim * 100)}%",
-        "Criticality": criticality,
-        "Match Type": match_type,
-        "_html_order": html_order
-    }
+    row = make_row(ex_closest, item, h_text, status, error_type, round(c_sim * 100), match_type)
+    row["_html_order"] = html_order
+    return row
 
 
-def _shared_conditional_branch_row(ex, excel_display, html_display, found_class, best_h_sim, best_h_idx) -> dict:
+def _shared_conditional_branch_row(ex, closest_item, best_h_sim, best_h_idx) -> dict:
     """Ligne "Shared conditional branch" (KO_COMPONENT_CLASS_NOT_FOUND si la
     classe HTML est inconnue, sinon OK) - voir _unmatched_excel_rows pour le
     contexte complet de ce cas."""
+    found_class = closest_item.get("component_class")
     if found_class:
-        status, error_type, criticality = "OK", "", ""
+        status, error_type = "OK", ""
     else:
-        status = "KO"
-        error_type = KO_COMPONENT_CLASS_NOT_FOUND
-        criticality = criticality_for(KO_COMPONENT_CLASS_NOT_FOUND)
+        status, error_type = "KO", KO_COMPONENT_CLASS_NOT_FOUND
 
-    return {
-        "Component Name": ex["Component"],
-        "Element": ex["Element"],
-        "Source Sheet": ex.get("Sheet", ""),
-        "Expected Class": ex.get("Technical"),
-        "HTML Class": found_class or "none",
-        "Excel Wording": excel_display,
-        "HTML Wording": html_display,
-        "Status": status,
-        "Error Type": error_type,
-        "Similarity": f"{round(best_h_sim * 100)}%",
-        "Criticality": criticality,
-        "Match Type": "Shared conditional branch",
-        "_html_order": best_h_idx
-    }
+    row = make_row(ex, closest_item, closest_item["text"], status, error_type, round(best_h_sim * 100), "Shared conditional branch")
+    row["_html_order"] = best_h_idx
+    return row
 
 
 def _unmatched_excel_row(ex, html_texts, ko_pairs) -> dict:
@@ -255,23 +230,11 @@ def _unmatched_excel_row(ex, html_texts, ko_pairs) -> dict:
     )
 
     if shared_branch:
-        return _shared_conditional_branch_row(ex, excel_display, html_display, found_class, best_h_sim, best_h_idx)
+        return _shared_conditional_branch_row(ex, closest_item, best_h_sim, best_h_idx)
 
-    return {
-        "Component Name": ex["Component"],
-        "Element": ex["Element"],
-        "Source Sheet": ex.get("Sheet", ""),
-        "Expected Class": ex.get("Technical"),
-        "HTML Class": found_class or "none",
-        "Excel Wording": excel_display,
-        "HTML Wording": html_display,
-        "Status": "KO",
-        "Error Type": KO_WORDING_RELOCATED,
-        "Similarity": f"{round(best_h_sim * 100)}%",
-        "Criticality": criticality_for(KO_WORDING_RELOCATED),
-        "Match Type": "Closest match",
-        "_html_order": best_h_idx
-    }
+    row = make_row(ex, closest_item, closest_item["text"], "KO", KO_WORDING_RELOCATED, round(best_h_sim * 100), "Closest match")
+    row["_html_order"] = best_h_idx
+    return row
 
 
 def _unmatched_excel_rows(excel_wordings, html_texts, matched_excel_counts, results_so_far) -> list:
@@ -435,6 +398,6 @@ def run_wording_qa(html_texts, excel_wordings):
     if DEBUG_MODE:
         print("\n" + "=" * 70)
         print(f"✅ Total: {total} | OK: {ok} | KO: {total-ok} | "
-              f"Score: {round((ok/total)*100, 2) if total else 0}%")
+              f"Score: {score_pct(ok, total, digits=2)}%")
         print("=" * 70)
     return results

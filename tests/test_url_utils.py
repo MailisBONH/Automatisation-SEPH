@@ -48,6 +48,13 @@ class TestStripQuery:
         # ne doit jamais faire planter tout le run pour un seul lien casse.
         assert strip_query("http://[::1/path") == "http://[::1/path"
 
+    def test_host_is_case_insensitive_but_path_case_is_preserved(self):
+        # Le schema/domaine sont insensibles a la casse (spec URL, et en
+        # pratique cote navigateurs/serveurs) - contrairement au chemin, qui
+        # peut etre genuinement sensible a la casse et ne doit pas etre touche.
+        assert strip_query("https://Example.com/Path?x=1") == \
+            strip_query("https://example.com/Path?x=1")
+
 
 class TestNormalizeUrl:
     """
@@ -92,3 +99,17 @@ class TestNormalizeUrl:
         # Meme repli que strip_query : ne doit jamais faire planter tout le
         # run pour un seul lien casse dans le HTML.
         assert normalize_url("http://[::1/path") == "http://[::1/path"
+
+    def test_host_is_case_insensitive_but_path_case_is_preserved(self):
+        # Le schema/domaine sont insensibles a la casse - contrairement au
+        # chemin, qui peut etre genuinement sensible a la casse et ne doit
+        # pas etre touche.
+        assert normalize_url("https://Example.com/Path?x=1") == \
+            normalize_url("https://example.com/Path?x=1")
+
+    def test_empty_path_normalizes_same_as_root_slash(self):
+        # Un chemin vide et un chemin "/" pointent tous les deux vers la
+        # racine du domaine - meme destination reelle, meme si urlparse()
+        # renvoie "" pour le premier et "/" pour le second.
+        assert normalize_url("https://www.example.com?x=1") == \
+            normalize_url("https://www.example.com/?x=1")

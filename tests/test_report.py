@@ -3,6 +3,7 @@ import pytest
 from openpyxl import Workbook, load_workbook
 
 import qa.report as report
+from qa.config import score_pct
 from qa.report import (
     _sort_by_criticality,
     build_rich_diff,
@@ -101,6 +102,22 @@ def _row(status, excel="Hello", html="Hello", component="Header", element="Title
         "Similarity": "100%" if status == "OK" else "50%", "Criticality": criticality,
         "Match Type": "Direct", "_html_order": html_order,
     }
+
+
+class TestScorePct:
+    """qa.config.score_pct : formule de score partagee par qa/report.py et
+    qa/combined_report.py (au lieu de la re-deriver a chaque endroit)."""
+
+    def test_returns_zero_when_total_is_zero(self):
+        # Pas de ZeroDivisionError : une sequence sans aucune ligne a
+        # tester doit produire un score de 0, pas une exception.
+        assert score_pct(0, 0) == 0
+
+    def test_rounds_to_requested_digits(self):
+        assert score_pct(2, 3, digits=2) == 66.67
+
+    def test_default_digits_is_one(self):
+        assert score_pct(2, 3) == 66.7
 
 
 class TestScoreFillColor:

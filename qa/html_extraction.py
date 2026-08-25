@@ -122,10 +122,16 @@ def extract_texts_from_textcontribution(soup: BeautifulSoup, title_to_component:
     contre le meme wording Excel (ou, pire, faire matcher a tort ce court
     fragment isole contre une cellule Excel totalement sans rapport).
     Seule la deduplication par texte exact est maintenue par ailleurs (evite
-    vrais doublons).
+    vrais doublons) - mais SCOPEE PAR COMPOSANT (cle = component_class,
+    y compris None) : `seen` est un dict {component_class: {textes vus}}.
+    Un texte identique repete a l'INTERIEUR d'un meme composant (ex: <p> et
+    <span> voisins portant le meme wording) reste deduplique, mais le meme
+    wording utilise par DEUX composants differents (ex: un CTA "Shop now"
+    dans le header ET dans le footer) doit rester deux entrees distinctes -
+    un set global unique les confondrait a tort.
     """
     results = []
-    seen = set()
+    seen = {}
 
     blocks = soup.find_all(class_="text-contribution")
 
@@ -158,10 +164,6 @@ def extract_texts_from_textcontribution(soup: BeautifulSoup, title_to_component:
             if text.strip().lower() == "edit":
                 continue
 
-            if text in seen:
-                continue
-
-
             component_class = find_component_class(el)
             if component_class is None:
                 # Aucun ancetre audit-component : el est peut-etre a
@@ -174,14 +176,40 @@ def extract_texts_from_textcontribution(soup: BeautifulSoup, title_to_component:
                 # le laissant resolu a None pour toujours.
                 component_class = find_generic_title_class(el, title_to_component)
 
+            # Dedup SCOPEE au composant resolu (voir docstring de la
+            # fonction) : deux composants differents partageant le meme
+            # wording ne doivent pas se masquer l'un l'autre.
+            component_seen = seen.setdefault(component_class, set())
+            if text in component_seen:
+                continue
 
-            # Ignore les liens individuels des mentions legales/footer : leur
-            # texte est deja couvert par le paragraphe complet qui les
-            # englobe (extrait separement via le fallback texte-brut-du-bloc).
-            if (
-                el.name.lower() == "a"
-                and component_class
-                and any(kw in component_class.lower() for kw in LEGAL_MENTION_CLASS_KEYWORDS)
+            # Ignore les liens individuels dont le texte est deja couvert par
+            # un ancetre extractible qui les englobe (ex: <a> a l'interieur
+            # d'un <p> - ce <p> sera lui-meme extrait integralement plus haut
+            # dans cette meme boucle, rendant le lien redondant). C'est le
+            # MEME mecanisme de "couverture par un ancetre deja extractible"
+            # que celui utilise ci-dessus pour les tags de pure emphase
+            # (_has_extractable_ancestor_within) - generalise ici aux liens,
+            # au lieu de se limiter aux composants dont la classe contient
+            # litteralement "legal"/"footer" (LEGAL_MENTION_CLASS_KEYWORDS).
+            # N'IMPORTE QUEL composant ayant cette meme structure (un lien
+            # inline dans un paragraphe/titre deja extrait) beneficie
+            # desormais du meme filtrage, sans avoir besoin d'ajouter un
+            # nouveau mot-cle a chaque nouveau type de composant concerne.
+            #
+            # Le mot-cle est conserve en repli (OR) : il couvre un cas que le
+            # check structurel ne detecte pas - un lien de mentions
+            # legales/footer AUTONOME, sans paragraphe englobant (une simple
+            # rangee de liens "Privacy Policy | Terms | Unsubscribe"), qui
+            # n'a alors aucun ancetre extractible entre lui et la borne du
+            # bloc, mais reste neanmoins deja couvert par le texte brut du
+            # bloc extrait via le fallback plus bas.
+            if el.name.lower() == "a" and (
+                _has_extractable_ancestor_within(el, block)
+                or (
+                    component_class
+                    and any(kw in component_class.lower() for kw in LEGAL_MENTION_CLASS_KEYWORDS)
+                )
             ):
                 continue
 
@@ -193,7 +221,7 @@ def extract_texts_from_textcontribution(soup: BeautifulSoup, title_to_component:
                 "component_class": component_class
             }
             results.append(item)
-            seen.add(text)
+            component_seen.add(text)
             block_child_texts.append(text)
 
         # Fallback : texte nu du bloc. Ne contribue que si son contenu n'est
@@ -214,20 +242,23 @@ def extract_texts_from_textcontribution(soup: BeautifulSoup, title_to_component:
         remaining = " ".join(remaining.split())
         fully_covered_by_children = len(remaining) < MIN_TEXT_LENGTH
 
+        block_component_class = find_component_class(block) or find_generic_title_class(block, title_to_component)
+        block_component_seen = seen.setdefault(block_component_class, set())
+
         if (
             block_text
             and is_valid(block_check_text)
-            and block_text not in seen
+            and block_text not in block_component_seen
             and not fully_covered_by_children
         ):
             item = {
                 "text": block_text,
                 "tag": "div",
                 "type": "Text",
-                "component_class": find_component_class(block) or find_generic_title_class(block, title_to_component)
+                "component_class": block_component_class
             }
             results.append(item)
-            seen.add(block_text)
+            block_component_seen.add(block_text)
 
         # --- Traitement des audit-generique-title ---
     titles = soup.find_all(class_="audit-generique-title")
@@ -246,6 +277,15 @@ def extract_texts_from_textcontribution(soup: BeautifulSoup, title_to_component:
         ]
         candidates = descendants if descendants else [title_tag]
 
+        # Cle de resolution : le texte COMPLET du wrapper title_tag, exactement
+        # comme build_title_to_component_map l'a construite (voir sa
+        # docstring) - jamais le texte partiel d'un seul descendant. Quand le
+        # wrapper contient plusieurs enfants extractibles (ex:
+        # <h2>Discover</h2><span>your benefits</span>), la map est keyee sur
+        # "Discover your benefits" combine ; chercher avec "Discover" seul ne
+        # matcherait jamais et resoudrait component_class a None a tort.
+        wrapper_text_norm = normalize(title_tag.get_text(" ", strip=True))
+
         for el in candidates:
             if el.name.lower() not in {"h1", "h2", "h3", "p", "span", "b", "strong"}:
                 continue
@@ -256,12 +296,18 @@ def extract_texts_from_textcontribution(soup: BeautifulSoup, title_to_component:
 
             if not check_text or not is_valid(check_text):
                 continue
-            if text in seen:
-                continue
 
-            # Résolution de la classe composant via la map
-            text_norm = normalize(text)
-            component_class = title_to_component.get(text_norm)
+            # Résolution de la classe composant via la map (cle = texte
+            # complet du wrapper, cf. ci-dessus)
+            component_class = title_to_component.get(wrapper_text_norm)
+
+            # Meme dedup scopee par composant que dans la boucle principale
+            # (voir extract_texts_from_textcontribution) : `seen` est
+            # partage entre les deux boucles pour eviter de retraiter un
+            # titre deja extrait a l'interieur d'un bloc text-contribution.
+            component_seen = seen.setdefault(component_class, set())
+            if text in component_seen:
+                continue
 
             item = {
                 "text": text,
@@ -271,7 +317,7 @@ def extract_texts_from_textcontribution(soup: BeautifulSoup, title_to_component:
             }
 
             results.append(item)
-            seen.add(text)
+            component_seen.add(text)
 
     if DEBUG_MODE:
         print(f"✔ {len(results)} textes prêts pour la comparaison")

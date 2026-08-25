@@ -1038,6 +1038,51 @@ class TestDoArchive:
         entries = load_sequence_history("Germany", "Revamp Inac", "SEQ 1", path=self.history_path)
         assert any(e["mode"] == "wording" and e["score"] == 50.0 for e in entries)
 
+    def test_retrying_after_a_partial_failure_does_not_duplicate_already_archived_items(self, tmp_path, monkeypatch):
+        # Regression : si archive_report/record_run levait une exception au
+        # milieu de la boucle (ex. erreur I/O transitoire), archive_key
+        # n'etait jamais marque dans session_state (la fonction n'atteint
+        # jamais son retour normal) - le rerun Streamlit suivant relancait
+        # alors TOUTE la boucle depuis le debut via ensure_archived, ré-
+        # archivant/ré-enregistrant les items deja traites avec succes
+        # (entrees d'historique dupliquees pour eux).
+        from qa.history import load_sequence_history
+
+        report_path_1 = tmp_path / "report1.xlsx"
+        make_details_report(str(report_path_1), [{"Status": "OK"}])
+        report_path_2 = tmp_path / "report2.xlsx"
+        make_details_report(str(report_path_2), [{"Status": "OK"}])
+
+        last_run = {"panels": [
+            _single_panel("wording", "SEQ 1", [{"Status": "OK"}], report_path=str(report_path_1)),
+            _single_panel("wording", "SEQ 2", [{"Status": "OK"}], report_path=str(report_path_2)),
+        ]}
+
+        original_record_run = home.record_run
+        call_count = {"n": 0}
+
+        def _record_run_failing_on_second_item(*args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 2:
+                raise OSError("erreur I/O transitoire simulee")
+            return original_record_run(*args, **kwargs)
+
+        monkeypatch.setattr(home.st, "session_state", {})
+        monkeypatch.setattr(home, "record_run", _record_run_failing_on_second_item)
+
+        with pytest.raises(OSError):
+            home._do_archive(last_run, "Germany", "Revamp Inac")
+
+        # Reessai (equivalent au rerun Streamlit declenche par ensure_archived
+        # puisque archive_key n'a pas ete marque) - cette fois sans echec.
+        monkeypatch.setattr(home, "record_run", original_record_run)
+        home._do_archive(last_run, "Germany", "Revamp Inac")
+
+        entries_seq1 = load_sequence_history("Germany", "Revamp Inac", "SEQ 1", path=self.history_path)
+        entries_seq2 = load_sequence_history("Germany", "Revamp Inac", "SEQ 2", path=self.history_path)
+        assert len(entries_seq1) == 1
+        assert len(entries_seq2) == 1
+
     def test_escapes_markdown_special_characters_before_notifying_teams(self, tmp_path, monkeypatch):
         # Un onglet Excel peut porter n'importe quel nom (voir
         # qa.classification.normalize_sequence_name) : une "sequence"

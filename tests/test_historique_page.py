@@ -14,9 +14,12 @@ import os
 import streamlit as st
 from streamlit.testing.v1 import AppTest
 
+import qa.classification
+import qa.history
+import qa.report_diff
 from conftest import fake_incrementing_datetime, make_details_report
-from qa.archive import archive_report, list_reports
-from qa.history import load_sequence_history, record_run
+from qa.archive import archive_report, delete_sequence_dir, list_reports
+from qa.history import delete_classification, load_sequence_history, record_run
 
 PAGE_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "pages", "1_Historique.py")
 
@@ -492,3 +495,357 @@ class TestLegacyMigrationBanner:
         assert any("fusionnée(s) automatiquement" in i.value for i in at.info)
         assert load_sequence_history("France", "revamp_inac", "SEQ 1")
         assert not load_sequence_history("France", "revamp_inac", "SEQ 1 NON LOYAL")
+
+
+class TestStaleNavigationFallback:
+    """Bug 1 : si history_nav (session_state) pointe encore vers un
+    pays/trigger qui a disparu de l'arbre fraichement reconstruit (ex:
+    supprime/renomme ailleurs, ou par une autre session, entre deux reruns),
+    la page doit retomber silencieusement au niveau de navigation superieur
+    plutot que de planter avec un KeyError sur tree[...]."""
+
+    def _seed_two_sequences(self):
+        record_run(
+            "SEQ 1", "wording", total=10, ok=8, ko=2, score=80.0,
+            country="France", trigger="revamp_inac", sequence="SEQ 1",
+        )
+        record_run(
+            "SEQ 2", "wording", total=10, ok=10, ko=0, score=100.0,
+            country="Germany", trigger="welcome", sequence="SEQ 2",
+        )
+
+    def test_stale_country_falls_back_to_country_selection_without_crashing(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        self._seed_two_sequences()
+
+        at = _run_page()
+        at.button(key="nav_country_France").click().run()
+        at.button(key="nav_trigger_revamp_inac").click().run()
+
+        # "France" disparait entierement de l'arbre (supprimee "ailleurs"),
+        # mais history_nav en session_state pointe toujours dessus - comme si
+        # une autre session/onglet avait supprime cette sequence entre deux
+        # reruns de celle-ci.
+        delete_sequence_dir("France", "revamp_inac", "SEQ 1")
+        delete_classification("France", "revamp_inac", "SEQ 1")
+        assert at.session_state["history_nav"]["country"] == "France"
+
+        at.run()
+
+        assert not at.exception
+        assert at.subheader[0].value == "Choisissez un pays"
+        assert at.session_state["history_nav"] == {"country": None, "trigger": None, "sequence": None}
+
+    def test_stale_trigger_falls_back_to_trigger_selection_without_crashing(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        record_run(
+            "SEQ 1", "wording", total=10, ok=8, ko=2, score=80.0,
+            country="France", trigger="revamp_inac", sequence="SEQ 1",
+        )
+        record_run(
+            "SEQ 2", "wording", total=10, ok=10, ko=0, score=100.0,
+            country="France", trigger="other_trigger", sequence="SEQ 2",
+        )
+
+        at = _run_page()
+        at.button(key="nav_country_France").click().run()
+        at.button(key="nav_trigger_revamp_inac").click().run()
+
+        # Seul "revamp_inac" disparait (son unique sequence) - "France" reste
+        # valide (il lui reste "other_trigger"), mais history_nav pointe
+        # toujours vers le trigger disparu.
+        delete_sequence_dir("France", "revamp_inac", "SEQ 1")
+        delete_classification("France", "revamp_inac", "SEQ 1")
+
+        at.run()
+
+        assert not at.exception
+        assert at.subheader[0].value == "France — choisissez un trigger"
+        assert at.session_state["history_nav"] == {"country": "France", "trigger": None, "sequence": None}
+
+
+class TestRecentSequencesPruning:
+    """Bug 2 : renommer/fusionner ou supprimer une sequence ne doit pas
+    laisser son ancienne identite comme quicklink mort dans "Recemment
+    consultees" (voir _forget_recent_sequence)."""
+
+    def _seed_two_sequences(self):
+        record_run(
+            "SEQ 1", "wording", total=10, ok=8, ko=2, score=80.0,
+            country="France", trigger="revamp_inac", sequence="SEQ 1",
+        )
+        record_run(
+            "SEQ 2", "wording", total=10, ok=10, ko=0, score=100.0,
+            country="Germany", trigger="welcome", sequence="SEQ 2",
+        )
+
+    def _visit(self, at, country, trigger, sequence):
+        at.button(key=f"nav_country_{country}").click().run()
+        at.button(key=f"nav_trigger_{trigger}").click().run()
+        at.button(key=f"nav_sequence_{sequence}").click().run()
+
+    def test_deleting_a_recently_viewed_sequence_removes_its_quicklink(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        self._seed_two_sequences()
+
+        at = _run_page()
+        # SEQ 1 est vue en premier (elle finira dans "Recemment consultees"),
+        # puis on va sur SEQ 2 pour repartir a zero au niveau navigation.
+        self._visit(at, "France", "revamp_inac", "SEQ 1")
+        at.button[0].click().run()  # "🏠 Pays"
+        self._visit(at, "Germany", "welcome", "SEQ 2")
+        assert any(b.label == "📄 France / revamp_inac / SEQ 1" for b in at.button)
+
+        # On revient sur SEQ 1 via son quicklink, puis on la supprime.
+        recent_button = next(b for b in at.button if b.label == "📄 France / revamp_inac / SEQ 1")
+        recent_button.click().run()
+        at.checkbox(key="confirm_delete_France_revamp_inac_SEQ 1").set_value(True).run()
+        delete_button = next(b for b in at.button if b.label == "🗑️ Supprimer cette séquence")
+        delete_button.click().run()
+
+        assert not at.exception
+        assert ("France", "revamp_inac", "SEQ 1") not in at.session_state["recent_sequences"]
+        assert not any(b.label == "📄 France / revamp_inac / SEQ 1" for b in at.button)
+
+    def test_renaming_a_recently_viewed_sequence_replaces_its_quicklink(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        self._seed_two_sequences()
+
+        at = _run_page()
+        self._visit(at, "France", "revamp_inac", "SEQ 1")
+        at.button[0].click().run()  # "🏠 Pays"
+        self._visit(at, "Germany", "welcome", "SEQ 2")
+        assert any(b.label == "📄 France / revamp_inac / SEQ 1" for b in at.button)
+
+        recent_button = next(b for b in at.button if b.label == "📄 France / revamp_inac / SEQ 1")
+        recent_button.click().run()
+
+        at.text_input(key="rename_country").set_value("Germany")
+        at.text_input(key="rename_trigger").set_value("revamp_inac")
+        at.text_input(key="rename_sequence").set_value("SEQ 1")
+        submit_button = next(b for b in at.button if b.key and b.key.startswith("FormSubmitter"))
+        submit_button.click().run()
+
+        assert not at.exception
+        assert ("France", "revamp_inac", "SEQ 1") not in at.session_state["recent_sequences"]
+        assert ("Germany", "revamp_inac", "SEQ 1") in at.session_state["recent_sequences"]
+
+
+class TestHistoryOverviewCaching:
+    """load_classified_history()+build_history_tree() (la lecture SQL + la
+    construction de l'arbre de navigation) sont mis en cache par
+    _load_history_overview (st.cache_data, voir pages/1_Historique.py) pour
+    ne pas rerequeter/reconstruire l'arbre a CHAQUE interaction avec un
+    widget de la page - Streamlit reexecute tout le script a chaque rerun,
+    meme pour un rerun qui ne mute rien (taper dans la recherche, naviguer
+    dans les dossiers deja charges...).
+
+    migrate_legacy_loyalty_sequences() (qa.classification) appelle elle-meme
+    build_history_tree() SANS `entries=` a chaque rerun (reprise retroactive
+    idempotente, voir pages/1_Historique.py) - donc SA PROPRE lecture
+    interne de load_classified_history() est neutralisee ici (stub sans
+    effet) pour isoler precisement le comportement de _load_history_overview,
+    seule fonction concernee par cette amelioration."""
+
+    def _stub_out_loyalty_migration(self, monkeypatch):
+        monkeypatch.setattr(qa.classification, "migrate_legacy_loyalty_sequences", lambda: [])
+
+    def test_rerun_without_mutation_does_not_re_invoke_the_underlying_query(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        self._stub_out_loyalty_migration(monkeypatch)
+        record_run(
+            "SEQ 1", "wording", total=10, ok=8, ko=2, score=80.0,
+            country="France", trigger="revamp_inac", sequence="SEQ 1",
+        )
+
+        calls = {"n": 0}
+        original_load = qa.history.load_classified_history
+
+        def _counting_load(*args, **kwargs):
+            calls["n"] += 1
+            return original_load(*args, **kwargs)
+
+        monkeypatch.setattr(qa.history, "load_classified_history", _counting_load)
+
+        at = _run_page()
+        assert not at.exception
+        assert calls["n"] == 1  # premier appel : cache froid, un seul appel reel.
+
+        # Rerun sans aucune mutation de l'historique - juste taper dans le
+        # champ de recherche (widget de la page, section "Vue d'ensemble") :
+        # Streamlit reexecute tout le script, mais _load_history_overview
+        # doit servir le resultat deja en cache plutot que rerequeter la base.
+        at.text_input(key="history_search").set_value("SEQ 1").run()
+        assert not at.exception
+        assert calls["n"] == 1
+
+        # Un deuxieme rerun different (navigation dans les dossiers deja
+        # charges) ne doit pas non plus reinvoquer la requete.
+        at.button(key="nav_country_France").click().run()
+        assert not at.exception
+        assert calls["n"] == 1
+
+    def test_rename_action_is_visible_on_the_very_next_rerun(self, tmp_path, monkeypatch):
+        """Critique : sans invalidation correcte du cache, la "Vue
+        d'ensemble" continuerait d'afficher l'ancien pays juste apres un
+        renommage reussi, jusqu'au prochain redemarrage du process."""
+        monkeypatch.chdir(tmp_path)
+        self._stub_out_loyalty_migration(monkeypatch)
+        record_run(
+            "SEQ 1", "wording", total=10, ok=8, ko=2, score=80.0,
+            country="France", trigger="revamp_inac", sequence="SEQ 1",
+        )
+
+        at = _run_page()
+        at.button(key="nav_country_France").click().run()
+        at.button(key="nav_trigger_revamp_inac").click().run()
+        at.button(key="nav_sequence_SEQ 1").click().run()
+
+        at.text_input(key="rename_country").set_value("Germany")
+        at.text_input(key="rename_trigger").set_value("revamp_inac")
+        at.text_input(key="rename_sequence").set_value("SEQ 1")
+        submit_button = next(b for b in at.button if b.key and b.key.startswith("FormSubmitter"))
+        submit_button.click().run()
+
+        assert not at.exception
+        # Le tableau "Vue d'ensemble" (construit a partir de l'arbre mis en
+        # cache) doit refleter le renommage des ce meme rerun.
+        rows = at.dataframe[0].value.to_dict("records")
+        assert len(rows) == 1
+        assert rows[0]["Pays"] == "Germany"
+
+        # La navigation par dossiers (elle aussi construite depuis l'arbre
+        # mis en cache) ne doit plus proposer "France".
+        at.button[0].click().run()  # "🏠 Pays" : retour au choix de pays
+        assert any(b.label == "📁 Germany" for b in at.button)
+        assert not any(b.label == "📁 France" for b in at.button)
+
+    def test_delete_action_is_visible_on_the_very_next_rerun(self, tmp_path, monkeypatch):
+        """Critique : sans invalidation correcte du cache, la sequence
+        supprimee continuerait d'apparaitre dans la "Vue d'ensemble" et la
+        navigation par dossiers juste apres sa suppression."""
+        monkeypatch.chdir(tmp_path)
+        self._stub_out_loyalty_migration(monkeypatch)
+        record_run(
+            "SEQ 1", "wording", total=10, ok=8, ko=2, score=80.0,
+            country="France", trigger="revamp_inac", sequence="SEQ 1",
+        )
+        record_run(
+            "SEQ 2", "wording", total=10, ok=10, ko=0, score=100.0,
+            country="Germany", trigger="welcome", sequence="SEQ 2",
+        )
+
+        at = _run_page()
+        at.button(key="nav_country_France").click().run()
+        at.button(key="nav_trigger_revamp_inac").click().run()
+        at.button(key="nav_sequence_SEQ 1").click().run()
+
+        at.checkbox(key="confirm_delete_France_revamp_inac_SEQ 1").set_value(True).run()
+        delete_button = next(b for b in at.button if b.label == "🗑️ Supprimer cette séquence")
+        delete_button.click().run()
+
+        assert not at.exception
+        rows = at.dataframe[0].value.to_dict("records")
+        assert len(rows) == 1
+        assert rows[0]["Pays"] == "Germany"
+
+
+class TestReportDiffCaching:
+    """load_last_two_reports_diff() (relit et compare jusqu'a 2 classeurs
+    Excel par mode) est mis en cache par _cached_report_diff (st.cache_data,
+    cle sur le chemin absolu + mtime + taille des rapports concernes, voir
+    pages/1_Historique.py) pour ne pas reparser ces classeurs a CHAQUE
+    interaction avec un widget de la page, meme quand l'expander "Comparer
+    les 2 derniers rapports" reste replie (AppTest - comme Streamlit - execute
+    le contenu d'un expander independamment de son etat visuel)."""
+
+    def test_rerun_without_new_report_does_not_re_invoke_the_underlying_diff(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        fake_incrementing_datetime(monkeypatch)
+        record_run(
+            "SEQ 1", "wording", total=1, ok=0, ko=1, score=0.0,
+            country="France", trigger="revamp_inac", sequence="SEQ 1",
+        )
+
+        older = tmp_path / "older.xlsx"
+        make_details_report(older, [{
+            "Component Name": "Header", "Element": "Title", "Source Sheet": "SEQ 1",
+            "Status": "OK", "Error Type": "", "HTML Wording": "Bonjour",
+        }])
+        archive_report(str(older), "France", "revamp_inac", "SEQ 1", mode="wording")
+
+        newer = tmp_path / "newer.xlsx"
+        make_details_report(newer, [{
+            "Component Name": "Header", "Element": "Title", "Source Sheet": "SEQ 1",
+            "Status": "KO", "Error Type": "Content mismatch", "HTML Wording": "Bonsoir",
+        }])
+        archive_report(str(newer), "France", "revamp_inac", "SEQ 1", mode="wording")
+
+        calls = {"n": 0}
+        original_diff = qa.report_diff.load_last_two_reports_diff
+
+        def _counting_diff(*args, **kwargs):
+            calls["n"] += 1
+            return original_diff(*args, **kwargs)
+
+        monkeypatch.setattr(qa.report_diff, "load_last_two_reports_diff", _counting_diff)
+
+        at = _run_page()
+        at.button(key="nav_country_France").click().run()
+        at.button(key="nav_trigger_revamp_inac").click().run()
+        at.button(key="nav_sequence_SEQ 1").click().run()
+
+        assert not at.exception
+        # 2 modes essayes (wording, url) au premier affichage de la page de
+        # sequence : au plus 2 appels reels, meme si "url" retourne None
+        # faute de rapports.
+        first_call_count = calls["n"]
+        assert first_call_count >= 1
+
+        # Rerun sans qu'aucun nouveau rapport ne soit archive - juste cocher
+        # la case de confirmation de suppression (widget de la page, sans
+        # valider la suppression) : ne doit pas reparser/rediffer les
+        # classeurs Excel.
+        at.checkbox(key="confirm_delete_France_revamp_inac_SEQ 1").set_value(True).run()
+        assert not at.exception
+        assert calls["n"] == first_call_count
+
+    def test_new_archived_report_is_diffed_on_the_very_next_rerun(self, tmp_path, monkeypatch):
+        """Critique : une rotation (nouveau rapport archive, ancien evince
+        par KEEP_REPORTS) doit etre vue au rerun suivant, pas seulement apres
+        redemarrage du process - le panneau de diff ne doit jamais rester
+        bloque sur une comparaison perimee."""
+        monkeypatch.chdir(tmp_path)
+        fake_incrementing_datetime(monkeypatch)
+        record_run(
+            "SEQ 1", "wording", total=1, ok=0, ko=1, score=0.0,
+            country="France", trigger="revamp_inac", sequence="SEQ 1",
+        )
+
+        older = tmp_path / "older.xlsx"
+        make_details_report(older, [{
+            "Component Name": "Header", "Element": "Title", "Source Sheet": "SEQ 1",
+            "Status": "OK", "Error Type": "", "HTML Wording": "Bonjour",
+        }])
+        archive_report(str(older), "France", "revamp_inac", "SEQ 1", mode="wording")
+
+        at = _run_page()
+        at.button(key="nav_country_France").click().run()
+        at.button(key="nav_trigger_revamp_inac").click().run()
+        at.button(key="nav_sequence_SEQ 1").click().run()
+        assert any("rien à comparer encore" in c.value for c in at.caption)
+
+        # Un 2e rapport est archive "en dehors" de cette page (comme le
+        # ferait home.py apres une nouvelle comparaison), puis on rerun la
+        # MEME session sans redemarrer AppTest.
+        newer = tmp_path / "newer.xlsx"
+        make_details_report(newer, [{
+            "Component Name": "Header", "Element": "Title", "Source Sheet": "SEQ 1",
+            "Status": "KO", "Error Type": "Content mismatch", "HTML Wording": "Bonsoir",
+        }])
+        archive_report(str(newer), "France", "revamp_inac", "SEQ 1", mode="wording")
+
+        at.run()
+
+        assert not at.exception
+        assert any("1 régression(s)" in c.value for c in at.caption)

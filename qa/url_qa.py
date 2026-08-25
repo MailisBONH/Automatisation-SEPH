@@ -1,4 +1,3 @@
-import difflib
 import html
 
 from qa.config import (
@@ -9,10 +8,11 @@ from qa.config import (
     KO_URL_WRONG_COMPONENT,
     KO_URL_CLASS_NOT_FOUND,
     INFO_URL_QUERY_IGNORED,
+    score_pct,
 )
 from qa.html_extraction import extract_anchor_links
 from qa.matching import criticality_for
-from qa.text_utils import clean_display_text, clean_text, expand_conditional_variants
+from qa.text_utils import clean_display_text, clean_text, expand_conditional_variants, similarity_ratio
 from qa.url_utils import is_query_ignored_domain, normalize_url, strip_query
 
 
@@ -38,17 +38,6 @@ def _display_all_variants(raw_text: str) -> str:
         if v not in deduped:
             deduped.append(v)
     return " ET ".join(deduped)
-
-
-def _char_similarity(a: str, b: str) -> float:
-    """Similarite caractere par caractere (0-1, difflib.SequenceMatcher) -
-    contrairement au wording, une URL n'a pas d'espaces pour decouper en
-    "mots" ; comparer caractere par caractere est le seul decoupage qui ait
-    un sens ici."""
-    a, b = str(a or ""), str(b or "")
-    if not a and not b:
-        return 1.0
-    return difflib.SequenceMatcher(None, a.lower(), b.lower()).ratio()
 
 
 def _make_url_row(expected_class, found_class, excel_url, found_href, status, error, criticality, match_type,
@@ -83,7 +72,7 @@ def _make_url_row(expected_class, found_class, excel_url, found_href, status, er
         "HTML Wording": html_display,
         "Status": status,
         "Error Type": error,
-        "Similarity": f"{round(_char_similarity(excel_display, html_display) * 100)}%",
+        "Similarity": f"{round(similarity_ratio(excel_display, html_display) * 100)}%",
         "Criticality": criticality,
         "Match Type": match_type,
         "Occurrences": occurrences,
@@ -342,7 +331,7 @@ def run_url_qa(raw_html: str, excel_urls: list) -> list:
     if DEBUG_MODE:
         print("\n" + "=" * 70)
         print(f"✅ URLs - Total: {total} | OK: {ok} | KO: {total-ok} | "
-              f"Score: {round((ok/total)*100, 2) if total else 0}%")
+              f"Score: {score_pct(ok, total, digits=2)}%")
         print("=" * 70)
 
     return results
