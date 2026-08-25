@@ -42,6 +42,23 @@ if "history_nav" not in st.session_state:
 
 nav = st.session_state["history_nav"]
 
+MAX_RECENT_SEQUENCES = 5
+if "recent_sequences" not in st.session_state:
+    # Liste de (country, trigger, sequence), la plus recente en tete - voir
+    # _record_recent_sequence et les boutons "Recemment consultees" plus
+    # bas, pour revenir directement a une sequence deja regardee plus tot
+    # dans la session sans re-cliquer les 3 niveaux de dossiers a chaque fois.
+    st.session_state["recent_sequences"] = []
+
+
+def _record_recent_sequence(country, trigger, sequence):
+    """Enregistre (country, trigger, sequence) en tete de l'historique de
+    consultation de la session (sans doublon, borne a MAX_RECENT_SEQUENCES) -
+    a appeler des qu'une sequence est effectivement affichee (nav complet)."""
+    recent = [k for k in st.session_state["recent_sequences"] if k != (country, trigger, sequence)]
+    recent.insert(0, (country, trigger, sequence))
+    st.session_state["recent_sequences"] = recent[:MAX_RECENT_SEQUENCES]
+
 # Migration unique et idempotente de l'ancien historique JSONL vers SQLite
 # (voir qa.history.migrate_legacy_jsonl_history) - AVANT toute lecture de
 # l'historique sur cette page (build_history_tree ci-dessous, et
@@ -330,6 +347,26 @@ with st.expander("📊 Statistiques des erreurs (toutes séquences)", expanded=F
 st.divider()
 
 # =========================
+# RECEMMENT CONSULTEES
+# =========================
+current = (nav["country"], nav["trigger"], nav["sequence"])
+recent_sequences = [k for k in st.session_state["recent_sequences"] if k != current]
+if recent_sequences:
+    st.caption("🕘 Récemment consultées :")
+    recent_cols = st.columns(len(recent_sequences))
+    for col, (r_country, r_trigger, r_sequence) in zip(recent_cols, recent_sequences):
+        with col:
+            if st.button(
+                f"📄 {r_country} / {r_trigger} / {r_sequence}",
+                key=f"recent_{r_country}_{r_trigger}_{r_sequence}",
+                use_container_width=True,
+            ):
+                nav["country"], nav["trigger"], nav["sequence"] = r_country, r_trigger, r_sequence
+                st.rerun()
+
+    st.divider()
+
+# =========================
 # FIL D'ARIANE
 # =========================
 crumb_cols = st.columns([1, 1, 1, 5])
@@ -380,6 +417,7 @@ elif nav["sequence"] is None:
 
 else:
     country, trigger, sequence = nav["country"], nav["trigger"], nav["sequence"]
+    _record_recent_sequence(country, trigger, sequence)
     st.subheader(f"{country} / {trigger} / {sequence}")
     st.caption(
         "Wording et URL d'une même séquence partagent ce dossier et alimentent, "

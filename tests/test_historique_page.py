@@ -195,6 +195,59 @@ class TestPopulatedHistory:
         assert at.subheader[0].value == "France — choisissez un trigger"
 
 
+class TestRecentSequences:
+    """Boutons "🕘 Récemment consultées" au-dessus du fil d'Ariane (voir
+    _record_recent_sequence) : permettent de revenir directement a une
+    sequence deja regardee dans la session, sans re-cliquer les 3 niveaux
+    de dossiers a chaque fois."""
+
+    def _seed_two_sequences(self):
+        record_run(
+            "SEQ 1", "wording", total=10, ok=8, ko=2, score=80.0,
+            country="France", trigger="revamp_inac", sequence="SEQ 1",
+        )
+        record_run(
+            "SEQ 2", "wording", total=10, ok=10, ko=0, score=100.0,
+            country="Germany", trigger="welcome", sequence="SEQ 2",
+        )
+
+    def _visit(self, at, country, trigger, sequence):
+        at.button(key=f"nav_country_{country}").click().run()
+        at.button(key=f"nav_trigger_{trigger}").click().run()
+        at.button(key=f"nav_sequence_{sequence}").click().run()
+
+    def test_previously_visited_sequence_appears_as_a_recent_quick_link(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        self._seed_two_sequences()
+
+        at = _run_page()
+        self._visit(at, "France", "revamp_inac", "SEQ 1")
+
+        at.button[0].click().run()  # "🏠 Pays" : retour a la racine de la navigation
+        self._visit(at, "Germany", "welcome", "SEQ 2")
+
+        assert not at.exception
+        assert any("Récemment consultées" in c.value for c in at.caption)
+        assert any(b.label == "📄 France / revamp_inac / SEQ 1" for b in at.button)
+        # La sequence actuellement affichee n'apparait pas dans sa propre liste.
+        assert not any(b.label == "📄 Germany / welcome / SEQ 2" for b in at.button)
+
+    def test_clicking_a_recent_quick_link_navigates_directly_to_it(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        self._seed_two_sequences()
+
+        at = _run_page()
+        self._visit(at, "France", "revamp_inac", "SEQ 1")
+        at.button[0].click().run()
+        self._visit(at, "Germany", "welcome", "SEQ 2")
+
+        recent_button = next(b for b in at.button if b.label == "📄 France / revamp_inac / SEQ 1")
+        recent_button.click().run()
+
+        assert not at.exception
+        assert at.subheader[0].value == "France / revamp_inac / SEQ 1"
+
+
 class TestReportDownloads:
     def test_shows_a_download_button_per_archived_report(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)

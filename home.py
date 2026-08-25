@@ -14,6 +14,7 @@ from collections import Counter
 from qa.archive import archive_report
 from qa.classification import detect_classification, normalize_sequence_name, resolve_sequence_alias
 from qa.cleanup import cleanup_old_temp_files_throttled
+from qa.config import GENERIC_SHEET_KEYWORD
 from qa.combined_report import build_combined_report
 from qa.diagnostics import (
     find_duplicate_components,
@@ -38,6 +39,7 @@ from qa.history import find_regression, migrate_legacy_jsonl_history, record_run
 from qa.html_extraction import load_and_extract_html_texts
 from qa.notifications import escape_teams_markdown, send_teams_notification
 from qa.report import URL_HEADER_LABELS, save_consolidated_report, save_report, sort_results_by_html_order
+from qa.report_diff import load_last_two_reports_diff
 
 from datetime import datetime
 
@@ -955,9 +957,14 @@ def render_grouped_results(results_by_sequence, mode, report_path, download_file
         seq_total = len(rows)
         seq_ok = sum(1 for r in rows if r["Status"] == "OK")
         seq_score = _score_pct(seq_ok, seq_total)
-        icon = "✅" if seq_total and seq_ok == seq_total else "⚠️"
+        all_ok = bool(seq_total) and seq_ok == seq_total
+        icon = "✅" if all_ok else "⚠️"
 
-        with st.expander(f"{icon} {seq} — {seq_ok}/{seq_total} OK ({seq_score}%)"):
+        # Depliee par defaut des qu'il y a au moins un KO a regarder : sur
+        # un run multi-sequences, cliquer un par un chaque expander pour
+        # trouver les 2 sequences en echec parmi 8 est une perte de temps -
+        # les sequences propres (icon "✅") restent repliees, rien a y faire.
+        with st.expander(f"{icon} {seq} — {seq_ok}/{seq_total} OK ({seq_score}%)", expanded=not all_ok):
             if rows:
                 _render_table(rows, mode, key_suffix=f"{download_filename}_{seq}")
             else:
@@ -1011,6 +1018,18 @@ def _archive_key(last_run):
     derivee des report_path de tous les panels (1 pour un run mono-panel,
     typiquement 2 - wording + url - pour un run combine)."""
     return "archived::" + "::".join(str(panel["report_path"]) for panel in last_run["panels"])
+
+
+def _regression_component_label(entry, mode):
+    """Libelle lisible d'une entree "regressed" de qa.report_diff.diff_reports
+    (voir _do_archive) - le composant/element (wording) ou la classe
+    attendue/wording HTML (url) qui a concretement bascule de OK a KO,
+    plutot qu'un simple delta de score global."""
+    row = entry["current"] or entry["previous"]
+    if mode == "wording":
+        label = f"{row.get('Component Name') or ''} / {row.get('Element') or ''}".strip(" /")
+        return label or "?"
+    return row.get("Expected Class") or row.get("HTML Wording") or "?"
 
 
 def _do_archive(last_run, country, trigger):
@@ -1098,14 +1117,39 @@ def _do_archive(last_run, country, trigger):
                 tested_by=tested_by,
             )
 
+    # Enrichit chaque regression avec le detail des composants/wordings qui
+    # ont concretement bascule de OK a KO (voir qa.report_diff), au-dela du
+    # seul delta de score - le rapport venant d'etre archive ci-dessus,
+    # load_last_two_reports_diff peut deja comparer les 2 rapports les plus
+    # recents sur disque. "combined" n'est pas supporte par report_diff (2
+    # onglets Wording/URL distincts, pas un seul "Details" comparable) : on
+    # s'en tient alors au delta de score seul pour ce mode. Best-effort :
+    # une erreur de lecture ici ne doit jamais faire echouer l'archivage
+    # lui-meme, qui a deja reussi a ce stade.
+    for regression in regressions:
+        if regression["mode"] == "combined":
+            continue
+        try:
+            diff = load_last_two_reports_diff(country, trigger, regression["sequence"], regression["mode"])
+        except (OSError, ValueError):
+            continue
+        if diff:
+            regression["regressed_items"] = [
+                _regression_component_label(entry, regression["mode"]) for entry in diff["regressed"]
+            ]
+
     notification_lines = list(summary_lines)
     if regressions:
         notification_lines.append("")
         notification_lines.append("⚠️ **Régression(s) détectée(s) :**")
         for r in regressions:
+            items_suffix = ""
+            if r.get("regressed_items"):
+                escaped_items = [escape_teams_markdown(item) for item in r["regressed_items"]]
+                items_suffix = " : " + ", ".join(escaped_items)
             notification_lines.append(
                 f"- {escape_teams_markdown(r['sequence'])} ({r['mode']}) : "
-                f"{r['previous_score']}% → {r['current_score']}% ({r['delta']:+.1f} pts)"
+                f"{r['previous_score']}% → {r['current_score']}% ({r['delta']:+.1f} pts){items_suffix}"
             )
     # Fire-and-forget : send_teams_notification() reste synchrone et
     # unitairement testable (voir tests/test_notifications.py), mais
@@ -1190,18 +1234,25 @@ def ensure_archived(last_run):
 NO_SELECTION = "— Sélectionnez —"
 
 
-def _guess_sequence_choice(filename, options):
-    """Suggestion (jamais une pre-selection silencieuse, voir NO_SELECTION)
-    de la sequence la plus probable pour un fichier HTML uploade en mode
-    batch, a partir de la ressemblance entre son nom de fichier et le nom de
-    sequence - affichee en caption sous le menu deroulant tant qu'aucun
-    choix n'a ete fait, pour accelerer l'association sans jamais decider a
-    la place de l'utilisateur (une suggestion peut se tromper, une
-    pre-selection silencieuse ferait lancer la comparaison sur la mauvaise
-    campagne sans que personne ne s'en aperçoive)."""
+_SEQUENCE_GUESS_MIN_SCORE = 0.6
+# Seuil bien plus strict que la simple suggestion ci-dessous : reserve aux
+# cas ou le nom de sequence est explicitement contenu dans le nom du
+# fichier (voir _best_sequence_guess) - candidat a une PRE-ASSOCIATION en
+# masse (bouton "Appliquer les suggestions"), pas juste une caption
+# informative qu'on peut se permettre de voir se tromper de temps en temps.
+_SEQUENCE_GUESS_HIGH_CONFIDENCE_SCORE = 0.9
+
+
+def _best_sequence_guess(filename, options):
+    """Sequence la plus probable pour un fichier HTML uploade en mode batch,
+    a partir de la ressemblance entre son nom de fichier et le nom de
+    sequence, et le score de confiance associe (0.0 si aucun nom exploitable
+    dans filename). Coeur partage par _guess_sequence_choice (suggestion
+    affichee, seuil bas) et _apply_high_confidence_sequence_guesses
+    (pre-association en masse, seuil haut)."""
     base = re.sub(r"[^a-z0-9]", "", os.path.splitext(filename)[0].lower())
     if not base:
-        return None
+        return None, 0.0
 
     best_option, best_score = None, 0.0
     for option in options:
@@ -1214,7 +1265,36 @@ def _guess_sequence_choice(filename, options):
         if score > best_score:
             best_option, best_score = option, score
 
-    return best_option if best_score >= 0.6 else None
+    return best_option, best_score
+
+
+def _guess_sequence_choice(filename, options):
+    """Suggestion (jamais une pre-selection silencieuse, voir NO_SELECTION)
+    de la sequence la plus probable pour un fichier HTML uploade en mode
+    batch - affichee en caption sous le menu deroulant tant qu'aucun choix
+    n'a ete fait, pour accelerer l'association sans jamais decider a la
+    place de l'utilisateur (une suggestion peut se tromper, une
+    pre-selection silencieuse ferait lancer la comparaison sur la mauvaise
+    campagne sans que personne ne s'en aperçoive)."""
+    option, score = _best_sequence_guess(filename, options)
+    return option if score >= _SEQUENCE_GUESS_MIN_SCORE else None
+
+
+def _apply_high_confidence_sequence_guesses(files, options, key_prefix):
+    """Pre-remplit st.session_state[key_prefix + f.name] avec la suggestion
+    d'association fichier -> sequence, UNIQUEMENT quand elle est de tres
+    haute confiance (score >= _SEQUENCE_GUESS_HIGH_CONFIDENCE_SCORE, voir
+    _best_sequence_guess) - a appeler AVANT que les selectbox correspondants
+    ne soient instancies (Streamlit lit alors cette valeur comme selection
+    initiale), typiquement suivi d'un st.rerun(). Reste un choix EXPLICITE
+    de l'utilisateur (il doit cliquer le bouton "🪄 Appliquer les
+    suggestions"), jamais une pre-selection automatique silencieuse au
+    chargement de la page - meme principe que _guess_sequence_choice, avec
+    un seuil plus strict puisqu'ici la selection est appliquee sans relecture."""
+    for f in files:
+        option, score = _best_sequence_guess(f.name, options)
+        if option and score >= _SEQUENCE_GUESS_HIGH_CONFIDENCE_SCORE:
+            st.session_state[key_prefix + f.name] = option
 
 
 _DIAGNOSTIC_RENDERERS = {
@@ -1223,6 +1303,19 @@ _DIAGNOSTIC_RENDERERS = {
     "warning": st.warning,
     "error": st.error,
 }
+
+
+def _detect_generic_sheet_name(sheet_names):
+    """Nom du premier onglet dont le nom contient GENERIC_SHEET_KEYWORD
+    (voir qa.excel_loader.load_generic_wordings, meme mot-cle), ou None si
+    aucun. Utilise par le diagnostic pour signaler AVANT de lancer la
+    comparaison un onglet generique present mais pas fusionne (case a
+    cocher non cochee) : sans la fusion, les composants communs a toutes
+    les sequences qu'il contient (footer, mentions legales, fidelite...)
+    sont absents du referentiel de la sequence testee et ressortiraient a
+    tort en erreur (KO 'Unexpected wording'/'Text missing') - une fausse
+    alerte plutot qu'un vrai ecart de contenu."""
+    return next((s for s in sheet_names if GENERIC_SHEET_KEYWORD.lower() in s.lower()), None)
 
 
 def _run_excel_diagnostics(excel_path, html_path, test_wording, test_url,
@@ -1282,6 +1375,16 @@ def _run_excel_diagnostics(excel_path, html_path, test_wording, test_url,
                     combined_wordings += diag_generic_wordings
                 except ValueError as e:
                     messages.append(("error", f"❌ Composants génériques : {e}"))
+            else:
+                generic_sheet_name = _detect_generic_sheet_name(xls_preview.sheet_names)
+                if generic_sheet_name:
+                    messages.append(("warning",
+                        f"⚠️ Un onglet ressemblant aux composants génériques a été détecté "
+                        f"(**{generic_sheet_name}**), mais la case correspondante n'est pas cochée dans "
+                        "« ⚙️ Options avancées ». Si ce référentiel sépare bien footer/mentions légales/"
+                        "fidélité dans cet onglet, les composants concernés vont manquer côté Excel et "
+                        "ressortir à tort en erreur — cochez la case si c'est le cas."
+                    ))
 
             duplicates = find_duplicate_components(combined_wordings)
             if duplicates:
@@ -1398,6 +1501,64 @@ def _run_excel_diagnostics_cached(excel_path, html_path, test_wording, test_url,
     )
 
 
+def _run_excel_diagnostics_batch_mode(excel_path, include_generic, test_wording):
+    """Diagnostic Excel allege pour le mode multi-sequences (voir
+    _run_excel_diagnostics pour la version complete du mode simple) : il
+    n'y a pas de campagne/sequence unique a verifier ici (chaque fichier a
+    la sienne, associee plus haut), donc seulement les verifications qui ne
+    dependent pas d'une sequence precise - onglets detectes, onglet
+    generique si include_generic est coche, ou avertissement si un onglet
+    generique est detecte mais include_generic ne l'est pas (test_wording
+    uniquement : la case n'existe meme pas en mode url pur, voir
+    _detect_generic_sheet_name). Meme forme de retour que
+    _run_excel_diagnostics (liste de (level, text), voir _DIAGNOSTIC_RENDERERS)."""
+    messages = []
+
+    try:
+        xls_preview = _open_excel_file(excel_path)
+        messages.append(("caption", f"Onglets détectés : {', '.join(xls_preview.sheet_names)}"))
+    except EXCEL_READ_ERRORS as e:
+        messages.append(("error", f"Impossible de lire le fichier Excel : {e}"))
+        return messages
+
+    if include_generic:
+        try:
+            generic_sheet, generic_wordings = load_generic_wordings(excel_path)
+            messages.append(("success",
+                f"✅ Onglet générique trouvé : **{generic_sheet}** — "
+                f"{len(generic_wordings)} wording(s) génériques seront ajoutés"
+            ))
+        except ValueError as e:
+            messages.append(("error", f"❌ Composants génériques : {e}"))
+    elif test_wording:
+        generic_sheet_name = _detect_generic_sheet_name(xls_preview.sheet_names)
+        if generic_sheet_name:
+            messages.append(("warning",
+                f"⚠️ Un onglet ressemblant aux composants génériques a été détecté "
+                f"(**{generic_sheet_name}**), mais la case correspondante n'est pas cochée dans "
+                "« ⚙️ Options avancées ». Si ce référentiel sépare bien footer/mentions légales/"
+                "fidélité dans cet onglet, les composants concernés vont manquer côté Excel — pour "
+                "TOUTES les séquences de ce lot — et ressortir à tort en erreur : cochez la case si "
+                "c'est le cas."
+            ))
+
+    return messages
+
+
+@functools.lru_cache(maxsize=8)
+def _cached_excel_diagnostics_batch_mode(excel_path, excel_mtime_ns, excel_size, include_generic, test_wording):
+    """Cache de _run_excel_diagnostics_batch_mode - meme principe que
+    _cached_excel_diagnostics."""
+    return _run_excel_diagnostics_batch_mode(excel_path, include_generic, test_wording)
+
+
+def _run_excel_diagnostics_batch_mode_cached(excel_path, include_generic, test_wording):
+    stat = os.stat(excel_path)
+    return _cached_excel_diagnostics_batch_mode(
+        excel_path, stat.st_mtime_ns, stat.st_size, include_generic, test_wording
+    )
+
+
 st.set_page_config(page_title="QA Email Tool", layout="wide")
 
 header_col1, header_col2 = st.columns([5, 1])
@@ -1467,11 +1628,7 @@ mode = st.radio(
 test_wording = mode in ("Wording", "Wording + URL")
 test_url = mode in ("URL", "Wording + URL")
 
-# Repliees par defaut : ces deux reglages ne concernent qu'une minorite de
-# campagnes (plusieurs sequences a la fois, composants generiques dans un
-# onglet separe) - les laisser toujours visibles alourdissait la page pour
-# le cas le plus frequent (un seul HTML, mode Wording simple).
-with st.expander("⚙️ Options avancées"):
+with st.expander("⚙️ Options avancées", expanded=True):
     batch_mode = st.checkbox(
         "📦 Traiter plusieurs séquences en une fois (même Excel, plusieurs HTML)",
         help=(
@@ -1584,6 +1741,20 @@ if batch_mode and mode == "Wording + URL":
                     "est réutilisée automatiquement côté URL, aucun choix supplémentaire n'est nécessaire."
                 )
 
+            if st.button(
+                "🪄 Appliquer les suggestions à haute confiance",
+                key="apply_suggestions_combined_batch",
+                help=(
+                    "Pré-remplit les menus déroulants ci-dessous quand le nom du fichier contient "
+                    "explicitement le nom de la séquence Wording et/ou URL - les autres restent "
+                    "à choisir manuellement."
+                ),
+            ):
+                _apply_high_confidence_sequence_guesses(html_files, wording_sheet_names, "wseq_")
+                if url_sequence_names:
+                    _apply_high_confidence_sequence_guesses(html_files, url_sequence_names, "useq_")
+                st.rerun()
+
             for f in html_files:
                 col_a, col_b = st.columns(2)
                 with col_a:
@@ -1646,6 +1817,18 @@ elif batch_mode:
 
         if sequence_options:
             st.write("**Associe chaque fichier HTML à sa séquence :**")
+
+            if st.button(
+                "🪄 Appliquer les suggestions à haute confiance",
+                key="apply_suggestions_batch",
+                help=(
+                    "Pré-remplit les menus déroulants ci-dessous quand le nom du fichier contient "
+                    "explicitement le nom de la séquence - les autres restent à choisir manuellement."
+                ),
+            ):
+                _apply_high_confidence_sequence_guesses(html_files, sequence_options, "seq_choice_")
+                st.rerun()
+
             for f in html_files:
                 choice = st.selectbox(
                     f"Séquence pour **{f.name}**",
@@ -1767,22 +1950,52 @@ if excel_path and not batch_mode and not missing_keyword:
         for level, text in diagnostic_messages:
             _DIAGNOSTIC_RENDERERS[level](text)
 
+if excel_path and batch_mode:
+    # Version allegee (voir _run_excel_diagnostics_batch_mode) : pas de
+    # sequence unique a verifier en mode multi-sequences, seulement les
+    # onglets detectes et l'onglet generique le cas echeant.
+    batch_diagnostic_messages = _run_excel_diagnostics_batch_mode_cached(excel_path, include_generic, test_wording)
+    has_batch_diagnostic_issues = any(level in ("warning", "error") for level, _ in batch_diagnostic_messages)
+    batch_diagnostic_label = "🔍 Diagnostic du fichier Excel"
+    if has_batch_diagnostic_issues:
+        batch_diagnostic_label += " — ⚠️ point(s) à vérifier"
+
+    with st.expander(batch_diagnostic_label, expanded=has_batch_diagnostic_issues):
+        for level, text in batch_diagnostic_messages:
+            _DIAGNOSTIC_RENDERERS[level](text)
+
 # =========================
 # BOUTON COMPARER
 # =========================
 button_label = "🔍 Comparer toutes les séquences" if batch_mode else "🔍 Comparer"
 
-if st.button(button_label):
+# Calcule en amont si le bouton peut etre active, et pourquoi sinon - plutot
+# que de laisser cliquer un bouton toujours actif pour n'afficher l'erreur
+# qu'apres coup (aller-retour confus : "on dirait que c'est casse"). Chaque
+# condition miroir exactement le garde-fou qui existait auparavant dans le
+# gestionnaire de clic de chaque branche.
+if batch_mode and mode == "Wording + URL":
+    comparer_ready = bool(excel_path and combined_sequence_assignments)
+    comparer_missing = (
+        "Uploadez l'Excel et au moins un fichier HTML, puis associez chaque "
+        "fichier à sa séquence Wording et à sa séquence URL."
+    )
+elif batch_mode:
+    comparer_ready = bool(excel_path and sequence_assignments)
+    comparer_missing = "Uploadez l'Excel et au moins un fichier HTML, puis associez chaque fichier à sa séquence."
+elif html_file and excel_file:
+    comparer_ready = not missing_keyword
+    comparer_missing = "Sélectionnez une campagne/séquence dans la liste déroulante ci-dessus."
+else:
+    comparer_ready = False
+    comparer_missing = "Uploadez le fichier HTML et le fichier Excel ci-dessus."
+
+if not comparer_ready:
+    st.caption(f"ℹ️ {comparer_missing}")
+
+if st.button(button_label, disabled=not comparer_ready):
 
     if batch_mode and mode == "Wording + URL":
-
-        if not (excel_path and combined_sequence_assignments):
-            st.error(
-                "Merci d'uploader l'Excel et au moins un fichier HTML, puis d'associer chaque "
-                "fichier à sa séquence Wording et à sa séquence URL."
-            )
-            st.stop()
-
         with st.spinner("Analyse en cours..."):
             last_run, error_messages, debug_logs = _execute_combined_batch(
                 excel_path, combined_sequence_assignments, include_generic, session_id
@@ -1799,14 +2012,6 @@ if st.button(button_label):
                 st.code(debug_logs or "Aucun log.", language=None)
 
     elif batch_mode:
-
-        if not (excel_path and sequence_assignments):
-            st.error(
-                "Merci d'uploader l'Excel et au moins un fichier HTML, "
-                "puis d'associer chaque fichier à sa séquence."
-            )
-            st.stop()
-
         with st.spinner("Analyse en cours..."):
             last_run, error_messages, debug_logs = _execute_batch(
                 excel_path, sequence_assignments, qa_mode, include_generic, session_id
@@ -1822,12 +2027,7 @@ if st.button(button_label):
             with st.expander("🐛 Logs de debug (extraction HTML/Excel)"):
                 st.code(debug_logs or "Aucun log.", language=None)
 
-    elif html_file and excel_file:
-
-        if (test_wording and not wording_keyword) or (test_url and not url_ready):
-            st.error("Merci de sélectionner une campagne/séquence dans la liste déroulante.")
-            st.stop()
-
+    else:
         with st.spinner("Analyse en cours..."):
             last_run, error_message = _execute_single_or_combined_test(
                 html_path, excel_path, test_wording, test_url, wording_keyword, url_keyword, include_generic
@@ -1844,10 +2044,6 @@ if st.button(button_label):
             )
             st.caption(f"Détail technique : {error_message}")
 
-    else:
-        st.session_state.pop("last_run", None)
-        st.error("Merci d'uploader le HTML et l'Excel")
-
 # =========================
 # AFFICHAGE DU DERNIER RESULTAT (persiste entre reruns, ex: pendant que la
 # pop-up d'informations manquantes est ouverte, pour que le resultat reste
@@ -1856,6 +2052,26 @@ if st.button(button_label):
 last_run = st.session_state.get("last_run")
 
 if last_run:
+
+    # Archive AVANT tout affichage (peut ouvrir une pop-up de completion si
+    # pays/trigger manquent, voir ensure_archived) pour pouvoir remonter une
+    # eventuelle regression tout en haut de la page, avant meme le detail
+    # des resultats - une regression est le genre d'info qu'on ne veut pas
+    # decouvrir seulement en bas de page apres avoir tout fait defiler.
+    ensure_archived(last_run)
+    archived_state = st.session_state.get(_archive_key(last_run))
+
+    for r in (archived_state or {}).get("regressions") or []:
+        items_detail = ""
+        items = r.get("regressed_items")
+        if items:
+            shown = ", ".join(items[:5])
+            more = f" (+{len(items) - 5} autre(s))" if len(items) > 5 else ""
+            items_detail = f" — {shown}{more}"
+        st.warning(
+            f"⚠️ Régression détectée sur **{r['sequence']}** ({r['mode']}) : "
+            f"{r['previous_score']}% → {r['current_score']}% ({r['delta']:+.1f} pts){items_detail}"
+        )
 
     # Banniere/metrique dediees au mode "Wording + URL" simple (voir
     # _execute_single_or_combined_test) : aucun des autres modes ne les
@@ -1893,9 +2109,6 @@ if last_run:
     with st.expander("🐛 Logs de debug (extraction HTML/Excel)"):
         st.code(last_run.get("debug_logs") or "Aucun log.", language=None)
 
-    ensure_archived(last_run)
-
-    archived_state = st.session_state.get(_archive_key(last_run))
     if archived_state and archived_state.get("skipped"):
         st.caption("ℹ️ Ce rapport n'a pas été archivé dans l'historique.")
     elif archived_state:
@@ -1903,8 +2116,3 @@ if last_run:
             f"📁 Archivé automatiquement dans l'historique sous "
             f"**{archived_state['country']} / {archived_state['trigger']}**."
         )
-        for r in archived_state.get("regressions") or []:
-            st.warning(
-                f"⚠️ Régression détectée sur **{r['sequence']}** ({r['mode']}) : "
-                f"{r['previous_score']}% → {r['current_score']}% ({r['delta']:+.1f} pts)"
-            )

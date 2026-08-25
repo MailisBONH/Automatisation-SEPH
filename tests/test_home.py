@@ -21,7 +21,7 @@ import pandas as pd
 import pytest
 from streamlit.testing.v1 import AppTest
 
-from conftest import make_details_report, make_wording_workbook
+from conftest import fake_incrementing_datetime, make_details_report, make_wording_workbook
 
 HOME_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "home.py")
 
@@ -278,6 +278,91 @@ class TestRunExcelDiagnostics:
         assert has_issues(clean_excel) is False
         assert has_issues(dirty_excel) is True
 
+    def test_generic_sheet_detected_without_the_checkbox_produces_a_warning(self, tmp_path):
+        # Un onglet generique present mais non fusionne (case a cocher non
+        # cochee) laisserait les composants communs a toutes les sequences
+        # (footer, mentions legales...) manquer du referentiel et ressortir
+        # a tort en erreur - le diagnostic doit le signaler AVANT de
+        # comparer, pas apres coup dans les resultats.
+        excel_file = make_wording_workbook(tmp_path, {
+            "SEQ 1": [["Header", "Title", "Hallo Welt", "audit-component-header"]],
+            "GENERIC": [["Footer", "Legal", "Mentions légales", "audit-component-footer"]],
+        })
+
+        messages = home._run_excel_diagnostics(
+            excel_file, html_path=None, test_wording=True, test_url=False,
+            wording_keyword="SEQ 1", url_keyword="", include_generic=False
+        )
+
+        warning_text = next(
+            (text for level, text in messages if level == "warning" and "GENERIC" in text), None
+        )
+        assert warning_text is not None
+        assert "case correspondante n'est pas cochée" in warning_text
+
+    def test_generic_sheet_detected_with_the_checkbox_checked_produces_no_such_warning(self, tmp_path):
+        excel_file = make_wording_workbook(tmp_path, {
+            "SEQ 1": [["Header", "Title", "Hallo Welt", "audit-component-header"]],
+            "GENERIC": [["Footer", "Legal", "Mentions légales", "audit-component-footer"]],
+        })
+
+        messages = home._run_excel_diagnostics(
+            excel_file, html_path=None, test_wording=True, test_url=False,
+            wording_keyword="SEQ 1", url_keyword="", include_generic=True
+        )
+
+        assert not any("case correspondante n'est pas cochée" in text for _, text in messages)
+
+    def test_no_generic_sheet_produces_no_such_warning(self, tmp_path):
+        excel_file = make_wording_workbook(tmp_path, {
+            "SEQ 1": [["Header", "Title", "Hallo Welt", "audit-component-header"]],
+        })
+
+        messages = home._run_excel_diagnostics(
+            excel_file, html_path=None, test_wording=True, test_url=False,
+            wording_keyword="SEQ 1", url_keyword="", include_generic=False
+        )
+
+        assert not any("case correspondante n'est pas cochée" in text for _, text in messages)
+
+
+class TestDetectGenericSheetName:
+    def test_finds_a_sheet_containing_the_keyword_case_insensitively(self):
+        assert home._detect_generic_sheet_name(["SEQ 1", "Generic Components", "UTM TRIGGER"]) == "Generic Components"
+
+    def test_returns_none_when_no_sheet_matches(self):
+        assert home._detect_generic_sheet_name(["SEQ 1", "UTM TRIGGER"]) is None
+
+
+class TestRunExcelDiagnosticsBatchMode:
+    """Version allegee du diagnostic pour le mode multi-sequences (voir
+    _run_excel_diagnostics_batch_mode) : meme detection d'onglet generique
+    non fusionne que le mode simple, mais gatee par test_wording (la case
+    a cocher elle-meme n'existe pas en mode url pur)."""
+
+    def test_generic_sheet_detected_without_the_checkbox_produces_a_warning(self, tmp_path):
+        excel_file = make_wording_workbook(tmp_path, {
+            "SEQ 1": [["Header", "Title", "Hallo Welt", "audit-component-header"]],
+            "GENERIC": [["Footer", "Legal", "Mentions légales", "audit-component-footer"]],
+        })
+
+        messages = home._run_excel_diagnostics_batch_mode(excel_file, include_generic=False, test_wording=True)
+
+        assert any("GENERIC" in text and "case correspondante" in text for _, text in messages)
+
+    def test_url_only_mode_never_shows_the_generic_checkbox_warning(self, tmp_path):
+        # La case "composants generiques" n'existe meme pas en mode URL pur
+        # (voir home.py) - le diagnostic ne doit pas suggerer de cocher une
+        # case que l'utilisateur ne peut pas voir.
+        excel_file = make_wording_workbook(tmp_path, {
+            "SEQ 1": [["Header", "Title", "Hallo Welt", "audit-component-header"]],
+            "GENERIC": [["Footer", "Legal", "Mentions légales", "audit-component-footer"]],
+        })
+
+        messages = home._run_excel_diagnostics_batch_mode(excel_file, include_generic=False, test_wording=False)
+
+        assert not any("case correspondante" in text for _, text in messages)
+
 
 class TestRunExcelDiagnosticsCached:
     """_run_excel_diagnostics_cached (utilisee par la section DIAGNOSTIC
@@ -361,6 +446,53 @@ def _consolidated_panel(mode, results_by_sequence, report_path=None):
         "report_path": report_path, "download_filename": "r.xlsx",
         "title": "Comparaison terminée", "tab_label": mode,
     }
+
+
+class TestBestSequenceGuess:
+    """_best_sequence_guess (coeur partage par _guess_sequence_choice -
+    suggestion affichee, seuil bas - et _apply_high_confidence_sequence_guesses
+    - pre-association en masse, seuil haut, voir le bouton "Appliquer les
+    suggestions") - jusqu'ici jamais teste directement, seulement via l'UI."""
+
+    def test_sequence_name_contained_in_filename_is_a_high_confidence_match(self):
+        option, score = home._best_sequence_guess("SEQ1_Germany_email.html", ["SEQ 1", "SEQ 2"])
+        assert option == "SEQ 1"
+        assert score >= home._SEQUENCE_GUESS_HIGH_CONFIDENCE_SCORE
+
+    def test_unrelated_filename_scores_low(self):
+        option, score = home._best_sequence_guess("random_export.html", ["SEQ 1", "SEQ 2"])
+        assert score < home._SEQUENCE_GUESS_MIN_SCORE
+
+    def test_empty_filename_returns_none_and_zero(self):
+        option, score = home._best_sequence_guess("", ["SEQ 1"])
+        assert option is None
+        assert score == 0.0
+
+    def test_guess_sequence_choice_uses_the_low_threshold(self):
+        # SEQ 1 non contenu tel quel dans le nom de fichier ("seq_1", pas
+        # "seq1") : score en dessous du seuil haute confiance mais au-dessus
+        # du seuil de simple suggestion.
+        assert home._guess_sequence_choice("seq_1_export.html", ["SEQ 1"]) == "SEQ 1"
+
+
+class TestApplyHighConfidenceSequenceGuesses:
+    """Le bouton "🪄 Appliquer les suggestions à haute confiance" (mode
+    batch) pre-remplit st.session_state AVANT que les selectbox ne soient
+    instancies (voir home.py) - ce test verifie directement cette
+    pre-association, sans passer par un upload de fichier (non simulable,
+    voir _FakeUploadedFile)."""
+
+    def test_prefills_session_state_only_for_high_confidence_matches(self, monkeypatch):
+        files = [
+            _FakeUploadedFile(b"", name="SEQ1_export.html"),  # contient "SEQ 1" -> haute confiance
+            _FakeUploadedFile(b"", name="random_file.html"),  # aucun rapport -> pas de pre-remplissage
+        ]
+        monkeypatch.setattr(home.st, "session_state", {})
+
+        home._apply_high_confidence_sequence_guesses(files, ["SEQ 1", "SEQ 2"], "seq_choice_")
+
+        assert home.st.session_state.get("seq_choice_SEQ1_export.html") == "SEQ 1"
+        assert "seq_choice_random_file.html" not in home.st.session_state
 
 
 class TestRunItems:
@@ -937,6 +1069,65 @@ class TestDoArchive:
         assert regressions[0]["previous_score"] == 100.0
         assert regressions[0]["current_score"] == 20.0
 
+    def test_regression_is_enriched_with_the_components_that_actually_regressed(self, tmp_path, monkeypatch):
+        # Au-dela du delta de score seul : qa.report_diff sait dire
+        # PRECISEMENT quel composant est passe de OK a KO - _do_archive doit
+        # l'utiliser pour enrichir la regression (voir home.py, affiche en
+        # haut de page plutot qu'un simple pourcentage en bas).
+        # fake_incrementing_datetime : sans lui, les 2 rapports archives a
+        # la meme seconde porteraient le meme nom de fichier horodate et le
+        # second ecraserait le premier (voir qa.archive.archive_report),
+        # laissant list_reports n'en trouver qu'un seul - insuffisant pour
+        # load_last_two_reports_diff.
+        fake_incrementing_datetime(monkeypatch)
+        first_rows = [
+            {"Component Name": "Header", "Element": "Title", "Status": "OK"},
+            {"Component Name": "Footer", "Element": "Legal", "Status": "OK"},
+        ]
+        first_report = tmp_path / "first.xlsx"
+        make_details_report(str(first_report), first_rows)
+        first_run = {"panels": [_single_panel("wording", "SEQ 1 NON LOYAL", first_rows, report_path=str(first_report))]}
+        home._do_archive(first_run, "Germany", "Revamp Inac")
+
+        second_rows = [
+            {"Component Name": "Header", "Element": "Title", "Status": "KO"},
+            {"Component Name": "Footer", "Element": "Legal", "Status": "OK"},
+        ]
+        second_report = tmp_path / "second.xlsx"
+        make_details_report(str(second_report), second_rows)
+        second_run = {"panels": [_single_panel("wording", "SEQ 1 NON LOYAL", second_rows, report_path=str(second_report))]}
+
+        regressions = home._do_archive(second_run, "Germany", "Revamp Inac")
+
+        assert len(regressions) == 1
+        assert regressions[0]["regressed_items"] == ["Header / Title"]
+
+    def test_combined_mode_regression_has_no_regressed_items(self, tmp_path, monkeypatch):
+        # qa.report_diff ne supporte pas mode="combined" (2 onglets Wording/
+        # URL distincts, pas un seul "Details" comparable) - _do_archive ne
+        # doit pas planter pour autant, juste ne pas enrichir cette entree.
+        fake_incrementing_datetime(monkeypatch)
+
+        def _archive_once(wording_status, url_status, suffix):
+            wr = [{"Component Name": "Header", "Element": "Title", "Status": wording_status}]
+            ur = [{"Expected Class": "audit-component-cta", "Status": url_status}]
+            wording_report = tmp_path / f"wording_{suffix}.xlsx"
+            make_details_report(str(wording_report), wr)
+            url_report = tmp_path / f"url_{suffix}.xlsx"
+            make_details_report(str(url_report), ur)
+            last_run = {"panels": [
+                _single_panel("wording", "SEQ 1 NON LOYAL", wr, report_path=str(wording_report)),
+                _single_panel("url", "SEQ 1 NON FID", ur, report_path=str(url_report)),
+            ]}
+            return home._do_archive(last_run, "Germany", "Revamp Inac")
+
+        _archive_once("OK", "OK", "1")
+        regressions = _archive_once("KO", "KO", "2")
+
+        combined_regressions = [r for r in regressions if r["mode"] == "combined"]
+        assert combined_regressions
+        assert "regressed_items" not in combined_regressions[0]
+
 
 def _make_combined_excel(tmp_path, filename="combined.xlsx"):
     """Classeur avec un onglet wording (Allemand) ET un onglet UTM (meme
@@ -1084,25 +1275,28 @@ class TestHomeAppSmoke:
         assert not at.exception
         assert len(at.checkbox) == 1
 
-    def test_comparer_button_without_any_upload_shows_an_error(self, tmp_path, monkeypatch):
+    def test_comparer_button_without_any_upload_is_disabled_with_an_explanation(self, tmp_path, monkeypatch):
+        # Regression test : le bouton etait auparavant toujours actif, et
+        # n'affichait l'erreur qu'apres coup (clic -> st.error). Il est
+        # maintenant desactive tant que rien n'est uploade, avec une caption
+        # expliquant pourquoi.
         monkeypatch.chdir(tmp_path)
         at = AppTest.from_file(HOME_PATH)
         at.run()
-        at.button[0].click().run()
         assert not at.exception
-        assert any("uploader le HTML et l'Excel" in e.value for e in at.error)
+        assert at.button[0].disabled is True
+        assert any("Uploadez le fichier HTML et le fichier Excel" in c.value for c in at.caption)
 
-    def test_batch_mode_and_generic_checkboxes_live_in_a_collapsed_expander(self, tmp_path, monkeypatch):
-        # Regression test pour la reduction de la surcharge de widgets
-        # visibles par defaut (voir home.py) : ces deux reglages ne
-        # concernent qu'une minorite de campagnes, ils ne doivent plus etre
-        # deplies par defaut sur la page principale.
+    def test_batch_mode_and_generic_checkboxes_live_in_an_expanded_panel(self, tmp_path, monkeypatch):
+        # Regroupees dans un panneau "Options avancees" deplie par defaut
+        # (voir home.py) : ces reglages restent visibles d'emblee, meme
+        # s'ils ne concernent qu'une minorite de campagnes.
         monkeypatch.chdir(tmp_path)
         at = AppTest.from_file(HOME_PATH)
         at.run()
         assert not at.exception
         advanced = next(e for e in at.expander if e.label == "⚙️ Options avancées")
-        assert advanced.proto.expanded is False
+        assert advanced.proto.expanded is True
         assert len(advanced.checkbox) == 2
 
 
@@ -1207,3 +1401,32 @@ class TestHomeAppRendersLastRun:
         assert not at.exception
         assert any("Récapitulatif par séquence" in h.value for h in at.subheader)
         assert any("séquence(s)" in s.value for s in at.success)
+
+    def test_batch_expanders_auto_expand_only_the_sequences_with_a_ko(self, tmp_path, monkeypatch):
+        # Regression test : sur un run multi-sequences, la sequence en echec
+        # doit s'ouvrir automatiquement (pour la trouver sans cliquer chaque
+        # expander une par une), la sequence propre reste repliee.
+        report_path = tmp_path / "multi.xlsx"
+        make_details_report(str(report_path), [self._row("OK"), self._row("KO")])
+        last_run = {
+            "excel_path": "irrelevant.xlsx", "top_banner": None, "combined_score": None,
+            "recap_rows": [
+                {"Séquence": "SEQ 1", "Total": 1, "OK": 1, "KO": 0, "Score": 100.0},
+                {"Séquence": "SEQ 2", "Total": 1, "OK": 0, "KO": 1, "Score": 0.0},
+            ],
+            "panels": [{
+                "mode": "wording", "consolidated": True,
+                "results_by_sequence": {"SEQ 1": [self._row("OK")], "SEQ 2": [self._row("KO")]},
+                "report_path": str(report_path), "download_filename": "multi.xlsx",
+                "title": "Comparaison terminée pour 2 séquence(s)", "tab_label": None,
+            }],
+            "debug_logs": "",
+        }
+
+        at = self._run_with_last_run(tmp_path, monkeypatch, last_run)
+
+        assert not at.exception
+        clean_expander = next(e for e in at.expander if e.label.startswith("✅ SEQ 1"))
+        failing_expander = next(e for e in at.expander if e.label.startswith("⚠️ SEQ 2"))
+        assert clean_expander.proto.expanded is False
+        assert failing_expander.proto.expanded is True
