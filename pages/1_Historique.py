@@ -474,7 +474,15 @@ with st.expander("📤 Comparer deux rapports Excel (upload manuel)", expanded=F
 # STATISTIQUES D'ERREURS AGREGEES (toutes sequences, toute la periode)
 # =========================
 with st.expander("📊 Statistiques des erreurs (toutes séquences)", expanded=False):
-    error_totals = aggregate_error_types(all_classified_entries)
+    # Un run en mode "Wording + URL" archive 3 entrees pour la meme sequence
+    # (wording, url, ET combined - ce dernier avec error_types = union des
+    # deux premiers, voir home.py _do_archive). Sans ce filtre, les erreurs
+    # d'une sequence testee en Wording + URL seraient comptees deux fois
+    # (une fois via wording+url, une fois de plus via combined) par rapport
+    # a une sequence testee dans un seul mode - faussant silencieusement le
+    # classement des types d'erreur les plus frequents.
+    error_stats_entries = [e for e in all_classified_entries if e.get("mode") != "combined"]
+    error_totals = aggregate_error_types(error_stats_entries)
 
     if error_totals:
         totals_df = pd.DataFrame(
@@ -489,7 +497,7 @@ with st.expander("📊 Statistiques des erreurs (toutes séquences)", expanded=F
         st.plotly_chart(fig_totals, use_container_width=True)
 
         top_types = set(totals_df["Error Type"].head(8))
-        trend_rows = [r for r in error_type_monthly_trend(all_classified_entries) if r["error_type"] in top_types]
+        trend_rows = [r for r in error_type_monthly_trend(error_stats_entries) if r["error_type"] in top_types]
         if trend_rows:
             trend_df = pd.DataFrame(trend_rows)
             fig_trend = px.line(
@@ -667,11 +675,17 @@ else:
         with st.form(f"rename_form_{country}_{trigger}_{sequence}"):
             col1, col2, col3 = st.columns(3)
             with col1:
-                new_country = st.text_input("Pays", value=country, key="rename_country")
+                new_country = st.text_input(
+                    "Pays", value=country, key=f"rename_country_{country}_{trigger}_{sequence}"
+                )
             with col2:
-                new_trigger = st.text_input("Trigger", value=trigger, key="rename_trigger")
+                new_trigger = st.text_input(
+                    "Trigger", value=trigger, key=f"rename_trigger_{country}_{trigger}_{sequence}"
+                )
             with col3:
-                new_sequence = st.text_input("Séquence", value=sequence, key="rename_sequence")
+                new_sequence = st.text_input(
+                    "Séquence", value=sequence, key=f"rename_sequence_{country}_{trigger}_{sequence}"
+                )
 
             renamed = st.form_submit_button("💾 Renommer / fusionner")
 

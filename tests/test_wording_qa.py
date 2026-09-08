@@ -137,6 +137,32 @@ class TestFinalDedupCoversOkRows:
         assert len(results) == 1
 
 
+class TestDedupeKeepsDistinctComponentsWithIdenticalWording:
+    def test_two_different_components_sharing_the_same_text_both_survive(self):
+        # Regression : _dedupe_by_status_and_pair() dedupliquait sur (Status,
+        # Excel Wording, HTML Wording) SANS le composant - un CTA identique
+        # repete dans 2 composants distincts (header et footer), chacun
+        # correctement matche OK independamment, se retrouvait fusionne a
+        # tort en une seule ligne, faisant perdre un composant reellement
+        # teste du rapport (et faussant le compte OK/total).
+        excel_wordings = [
+            excel_row("Discover more", technical="audit-component-header",
+                      component="Header CTA", element="CTA"),
+            excel_row("Discover more", technical="audit-component-footer",
+                      component="Footer CTA", element="CTA"),
+        ]
+        html_texts = [
+            html_item("Discover more", component_class="audit-component-header"),
+            html_item("Discover more", component_class="audit-component-footer"),
+        ]
+
+        results = run_wording_qa(html_texts, excel_wordings)
+
+        assert len(results) == 2
+        assert {r["Component Name"] for r in results} == {"Header CTA", "Footer CTA"}
+        assert all(r["Status"] == "OK" for r in results)
+
+
 class TestLowQualityBestEffortIsHonestlyUnexpectedWording:
     """
     Regression : le "meilleur effort" de compare() (Direct/Agrege) n'a

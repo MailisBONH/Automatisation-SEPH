@@ -187,17 +187,28 @@ def _parse_wording_rows(df: pd.DataFrame, wording_column: str, sheet_label: str 
     onglet generique) - voir qa.matching.make_row et qa.wording_qa.
     """
     wordings = []
-    TECHNICAL_COLUMN = "TECHNICAL NAME"
+    # Resolution insensible a la casse (meme principe que find_column() pour
+    # wording_column) : sans elle, un classeur reel dont l'entete est ex.
+    # "Component Name" plutot que le litteral "COMPONENT NAME" ferait
+    # silencieusement echouer row.get() pour CHAQUE ligne de l'onglet (comp/
+    # elem/technical restent None/vide partout), degradant sans aucune
+    # erreur les exclusions et le rattachement par classe technique. Absente
+    # du classeur (aucune casse ne correspond), la colonne reste None comme
+    # avant - seule la sensibilite a la casse est corrigee ici.
+    columns_by_upper = {str(c).strip().upper(): c for c in df.columns}
+    component_column = columns_by_upper.get("COMPONENT NAME")
+    element_column = columns_by_upper.get("ELEMENT")
+    technical_column = columns_by_upper.get("TECHNICAL NAME")
     last_comp = None
 
     for _, row in df.iterrows():
-        comp = row.get("COMPONENT NAME")
+        comp = row.get(component_column) if component_column else None
         if pd.notna(comp):
             last_comp = str(comp).strip()
         else:
             comp = last_comp
 
-        elem = str(row.get("ELEMENT", "")).strip()
+        elem = str(row.get(element_column, "")).strip() if element_column else ""
 
         comp_norm = str(comp).strip().lower() if comp else ""
         elem_norm = elem.lower()
@@ -221,7 +232,7 @@ def _parse_wording_rows(df: pd.DataFrame, wording_column: str, sheet_label: str 
         if len(wording) < MIN_TEXT_LENGTH:
             continue
 
-        technical = row.get(TECHNICAL_COLUMN)
+        technical = row.get(technical_column) if technical_column else None
         if pd.notna(technical):
             technical = str(technical).strip()
 
@@ -514,13 +525,25 @@ def _parse_url_sections(raw: pd.DataFrame, header_row_idx: int, section_col_idx,
 
     for r in range(header_row_idx + 1, len(raw)):
         row = raw.iloc[r]
-        non_null = row.notna()
-        count = int(non_null.sum())
+        # "Meaningfully" non-vide : NaN exclu comme avant, mais aussi toute
+        # cellule dont la valeur, une fois convertie en texte et strippee,
+        # est vide (ex. une formule qui evalue a "", ou un espace residuel
+        # laisse dans une colonne sans rapport). Sans ce strip, une telle
+        # cellule comptait quand meme comme "non vide" pour pandas, faisant
+        # depasser le compte de 1 sur une VRAIE ligne separateur - elle
+        # n'etait alors plus reconnue comme telle, et les URL suivantes
+        # restaient a tort rattachees a la section precedente. Le comptage
+        # reste sinon strict (pas juste "section+tracked vides") : une ligne
+        # gabarit/exemple qui remplit plusieurs autres colonnes (ex. les
+        # colonnes SOURCE/MEDIUM/... du modele UTM) ne doit toujours pas
+        # etre prise pour un separateur.
+        non_empty = row.apply(lambda v: pd.notna(v) and str(v).strip() != "")
+        count = int(non_empty.sum())
 
         if count == 0:
             continue
 
-        if section_col_idx is not None and count == 1 and non_null.iloc[section_col_idx]:
+        if section_col_idx is not None and count == 1 and non_empty.iloc[section_col_idx]:
             current = str(row.iloc[section_col_idx]).strip()
             sections.setdefault(current, [])
             last_label = ""

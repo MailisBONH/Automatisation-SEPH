@@ -22,9 +22,18 @@ import glob
 import os
 import re
 import shutil
+import threading
 from datetime import datetime
 
 from qa.config import KEEP_REPORTS, OUTPUT_DIR, UNCLASSIFIED_LABEL
+
+# Streamlit sert chaque session utilisateur dans un thread du meme process
+# (voir qa.history._LOCK, meme raisonnement) : sans verrou, deux sessions qui
+# archivent la meme (country, trigger, sequence, mode) dans la meme seconde
+# pourraient toutes les deux passer la boucle de collision ci-dessous avant
+# que l'une des deux n'ait ecrit son fichier, et la seconde ecraserait alors
+# silencieusement le rapport de la premiere.
+_LOCK = threading.RLock()
 
 
 def safe_folder_name(name: str) -> str:
@@ -105,21 +114,22 @@ def archive_report(report_path: str, country: str, trigger: str, sequence: str, 
     # suffixe "_N" trie apres le "." de l'extension du fichier non suffixe
     # (donc apres lui dans le tri alphabetique inverse de list_reports), ce
     # qui le classe correctement comme "plus recent". Verification puis copie
-    # se font l'une apres l'autre sans attente entre les deux : suffisant
-    # pour une boucle rapide au sein d'un seul processus (cette appli tourne
-    # en un seul processus Streamlit), pas concu pour une vraie concurrence
-    # inter-processus.
-    counter = 2
-    while os.path.exists(dest_path):
-        dest_path = os.path.join(dest_dir, f"{base_name}_{counter}.xlsx")
-        counter += 1
-    shutil.copy2(report_path, dest_path)
+    # se font sous _LOCK : sans lui, deux sessions Streamlit (deux threads du
+    # meme process) pourraient toutes les deux passer la boucle de collision
+    # avant que l'une n'ait ecrit son fichier, et la seconde ecraserait alors
+    # silencieusement le rapport de la premiere.
+    with _LOCK:
+        counter = 2
+        while os.path.exists(dest_path):
+            dest_path = os.path.join(dest_dir, f"{base_name}_{counter}.xlsx")
+            counter += 1
+        shutil.copy2(report_path, dest_path)
 
-    for old_file in list_reports(country, trigger, sequence, mode=mode)[KEEP_REPORTS:]:
-        try:
-            os.remove(old_file)
-        except OSError:
-            pass
+        for old_file in list_reports(country, trigger, sequence, mode=mode)[KEEP_REPORTS:]:
+            try:
+                os.remove(old_file)
+            except OSError:
+                pass
 
     return dest_path
 

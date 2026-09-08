@@ -1,5 +1,6 @@
 from qa.matching import (
     compare,
+    find_aggregated_match,
     find_best_match,
     find_closest_match,
     find_split_match,
@@ -179,6 +180,54 @@ class TestIndexWordingsByTechnicalClass:
     def test_wordings_without_a_technical_class_are_not_indexed(self):
         wordings = [excel_row("A", technical=None), excel_row("B", technical="")]
         assert index_wordings_by_technical_class(wordings) == {}
+
+
+class TestFindAggregatedMatch:
+    def test_tries_a_larger_window_when_the_smaller_one_only_finds_a_ko(self):
+        # Regression: find_aggregated_match used to return as soon as ANY
+        # window produced a non-None result, even a bad KO best-effort one -
+        # never trying a larger window that would have found the real OK
+        # match. Here, blocks 0+1 alone ("Discover our brand new looks")
+        # only resemble the Excel cell weakly (KO, ~71% similarity), but
+        # blocks 0+1+2 together equal it exactly (OK) - the fix must try
+        # window=3 instead of settling for window=2's KO.
+        html_items = [
+            html_item("Discover our", component_class="audit-component-hero"),
+            html_item("brand new looks", component_class="audit-component-hero"),
+            html_item("arriving today for you", component_class="audit-component-hero"),
+        ]
+        excel_wordings = [
+            excel_row(
+                "Discover our brand new looks arriving today for you",
+                technical="audit-component-hero",
+            )
+        ]
+
+        result = find_aggregated_match(html_items, 0, excel_wordings)
+
+        assert result is not None
+        window, idx, status, error, sim = result
+        assert window == 3
+        assert status == "OK"
+
+    def test_falls_back_to_the_best_ko_across_all_windows_when_none_is_ok(self):
+        html_items = [
+            html_item("Discover our", component_class="audit-component-hero"),
+            html_item("brand new looks", component_class="audit-component-hero"),
+            html_item("in a galaxy far away", component_class="audit-component-hero"),
+        ]
+        excel_wordings = [
+            excel_row(
+                "Discover our brand new looks arriving today for you",
+                technical="audit-component-hero",
+            )
+        ]
+
+        result = find_aggregated_match(html_items, 0, excel_wordings)
+
+        assert result is not None
+        window, idx, status, error, sim = result
+        assert status == "KO"
 
 
 class TestFindSplitMatch:

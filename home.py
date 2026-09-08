@@ -1127,6 +1127,17 @@ def _do_archive(last_run, country, trigger):
                 f"- **{escape_teams_markdown(sequence)}** (combined) : {combined_stats['score']}% "
                 f"({combined_stats['ok']}/{combined_stats['total']} OK)"
             )
+            # Meme garde-fou "done_items" que la boucle par item ci-dessus :
+            # sans lui, une relance apres un echec survenu APRES cette boucle
+            # (ex. lors de l'enrichissement des regressions plus bas) mais
+            # APRES que tous les items individuels aient deja ete archives
+            # (donc tous dans done_items, la boucle par item ne re-fait rien)
+            # re-executerait cette boucle combined en entier, dupliquant
+            # l'entree d'historique "combined" pour chaque sequence deja
+            # enregistree avec succes.
+            combined_done_marker = f"combined::{sequence}"
+            if combined_done_marker in done_items:
+                continue
             record_run(
                 sequence, "combined",
                 combined_stats["total"], combined_stats["ok"], combined_stats["ko"], combined_stats["score"],
@@ -1134,6 +1145,8 @@ def _do_archive(last_run, country, trigger):
                 error_types=dict(combined_error_types.get(sequence, {})),
                 tested_by=tested_by,
             )
+            done_items.add(combined_done_marker)
+            st.session_state[done_items_key] = set(done_items)
 
     # Enrichit chaque regression avec le detail des composants/wordings qui
     # ont concretement bascule de OK a KO (voir qa.report_diff), au-dela du
@@ -1262,14 +1275,16 @@ def _uploaded_file_identity(f):
     return (f.name, hashlib.sha1(f.getvalue()).hexdigest())
 
 
-def _current_inputs_signature(mode, batch_mode, excel_file, html_file, html_files, assignments_signature=()):
+def _current_inputs_signature(mode, batch_mode, excel_file, html_file, html_files, assignments_signature=(),
+                               include_generic=False):
     """Signature des entrees qui definissent CE que produirait un clic sur
     "Comparer" (type de test + fichier(s) uploade(s) + association(s)
-    fichier -> sequence) - comparee au rerun precedent plus bas dans le
-    script pour effacer last_run des qu'elle change, plutot que de laisser
-    un ancien resultat affiche a tort alors qu'il ne correspond plus a la
-    selection courante (fichier remplace, mode Wording/URL/Wording + URL
-    change, sequence/onglet ou association de fichier reassignee...).
+    fichier -> sequence + case composants generiques) - comparee au rerun
+    precedent plus bas dans le script pour effacer last_run des qu'elle
+    change, plutot que de laisser un ancien resultat affiche a tort alors
+    qu'il ne correspond plus a la selection courante (fichier remplace,
+    mode Wording/URL/Wording + URL change, sequence/onglet ou association
+    de fichier reassignee, case "composants generiques" basculee...).
     assignments_signature : tuple hashable dependant du mode (wording_keyword/
     url_keyword en mode simple, association fichier -> sequence(s) en mode
     multi-sequences) - voir l'appelant."""
@@ -1280,6 +1295,7 @@ def _current_inputs_signature(mode, batch_mode, excel_file, html_file, html_file
         _uploaded_file_identity(html_file),
         tuple(_uploaded_file_identity(f) for f in (html_files or [])),
         assignments_signature,
+        include_generic,
     )
 
 
@@ -2086,7 +2102,8 @@ else:
     assignments_signature = (wording_keyword, url_keyword)
 
 current_inputs_signature = _current_inputs_signature(
-    mode, batch_mode, excel_file, html_file, html_files, assignments_signature
+    mode, batch_mode, excel_file, html_file, html_files, assignments_signature,
+    include_generic=include_generic,
 )
 previous_inputs_signature = st.session_state.get("_inputs_signature")
 if previous_inputs_signature is not None and previous_inputs_signature != current_inputs_signature:

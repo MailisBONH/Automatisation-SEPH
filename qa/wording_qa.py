@@ -266,17 +266,29 @@ def _unmatched_excel_rows(excel_wordings, html_texts, matched_excel_counts, resu
 def _dedupe_by_status_and_pair(results: list) -> list:
     """
     Deduplique les lignes identiques (meme statut, meme paire HTML/Excel
-    affichee) : peut arriver par ex. quand un fragment deja valide via
-    Split ou Direct (qui ne "consomme" pas forcement la cellule Excel, voir
-    find_split_match) est aussi retrouve comme wording "non couvert" par
-    _unmatched_excel_rows et repromu separement - meme constat pour un HTML
-    et un Excel non matches qui pointent l'un vers l'autre. Garde la 1ere
-    occurrence rencontree, peu importe le Match Type exact.
+    affichee, MEME COMPOSANT) : peut arriver par ex. quand un fragment deja
+    valide via Split ou Direct (qui ne "consomme" pas forcement la cellule
+    Excel, voir find_split_match) est aussi retrouve comme wording "non
+    couvert" par _unmatched_excel_rows et repromu separement - meme constat
+    pour un HTML et un Excel non matches qui pointent l'un vers l'autre.
+    Garde la 1ere occurrence rencontree, peu importe le Match Type exact.
+
+    Le composant (Component Name + Element) fait partie de la cle : deux
+    composants distincts (ex. un CTA repete dans le header ET le footer)
+    peuvent legitimement partager exactement le meme wording des deux cotes
+    et etre chacun un match OK independant - sans le composant dans la cle,
+    le second serait a tort traite comme un doublon du premier et perdu.
     """
     seen_pairs = set()
     deduped = []
     for r in results:
-        key = (r["Status"], str(r.get("Excel Wording", "")), str(r.get("HTML Wording", "")))
+        key = (
+            r["Status"],
+            str(r.get("Component Name", "")),
+            str(r.get("Element", "")),
+            str(r.get("Excel Wording", "")),
+            str(r.get("HTML Wording", "")),
+        )
         if key in seen_pairs:
             continue
         seen_pairs.add(key)

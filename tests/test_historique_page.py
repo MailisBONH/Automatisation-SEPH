@@ -149,9 +149,9 @@ class TestPopulatedHistory:
         # le pays. Cibles par clé (pas par position) : la page a par ailleurs
         # un champ de recherche (barre "Vue d'ensemble") qui n'a pas de
         # relation d'ordre garantie avec ce formulaire.
-        at.text_input(key="rename_country").set_value("Germany")
-        at.text_input(key="rename_trigger").set_value("revamp_inac")
-        at.text_input(key="rename_sequence").set_value("SEQ 1")
+        at.text_input(key="rename_country_France_revamp_inac_SEQ 1").set_value("Germany")
+        at.text_input(key="rename_trigger_France_revamp_inac_SEQ 1").set_value("revamp_inac")
+        at.text_input(key="rename_sequence_France_revamp_inac_SEQ 1").set_value("SEQ 1")
         # Le bouton "Supprimer" (index suivant) est desactive tant que la
         # case de confirmation n'est pas cochee, mais AppTest ne fait pas
         # respecter cet etat cote client - on cible explicitement le bouton
@@ -342,7 +342,7 @@ class TestRenameFormValidation:
 
         at = _run_page()
         submit_button = self._navigate_to_sequence(at)
-        at.text_input(key="rename_sequence").set_value("")  # Séquence vidée
+        at.text_input(key="rename_sequence_France_revamp_inac_SEQ 1").set_value("")  # Séquence vidée
         submit_button.click().run()
 
         assert not at.exception
@@ -620,9 +620,9 @@ class TestRecentSequencesPruning:
         recent_button = next(b for b in at.button if b.label == "📄 France / revamp_inac / SEQ 1")
         recent_button.click().run()
 
-        at.text_input(key="rename_country").set_value("Germany")
-        at.text_input(key="rename_trigger").set_value("revamp_inac")
-        at.text_input(key="rename_sequence").set_value("SEQ 1")
+        at.text_input(key="rename_country_France_revamp_inac_SEQ 1").set_value("Germany")
+        at.text_input(key="rename_trigger_France_revamp_inac_SEQ 1").set_value("revamp_inac")
+        at.text_input(key="rename_sequence_France_revamp_inac_SEQ 1").set_value("SEQ 1")
         submit_button = next(b for b in at.button if b.key and b.key.startswith("FormSubmitter"))
         submit_button.click().run()
 
@@ -701,9 +701,9 @@ class TestHistoryOverviewCaching:
         at.button(key="nav_trigger_revamp_inac").click().run()
         at.button(key="nav_sequence_SEQ 1").click().run()
 
-        at.text_input(key="rename_country").set_value("Germany")
-        at.text_input(key="rename_trigger").set_value("revamp_inac")
-        at.text_input(key="rename_sequence").set_value("SEQ 1")
+        at.text_input(key="rename_country_France_revamp_inac_SEQ 1").set_value("Germany")
+        at.text_input(key="rename_trigger_France_revamp_inac_SEQ 1").set_value("revamp_inac")
+        at.text_input(key="rename_sequence_France_revamp_inac_SEQ 1").set_value("SEQ 1")
         submit_button = next(b for b in at.button if b.key and b.key.startswith("FormSubmitter"))
         submit_button.click().run()
 

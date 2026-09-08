@@ -214,10 +214,22 @@ def find_best_match(html_item: dict, excel_wordings: list, class_index: dict = N
 
 
 def find_aggregated_match(html_items, start_idx, excel_wordings, max_window=3, class_index=None):
+    """
+    Essaie les fenetres d'agregation 2..max_window et retourne la premiere
+    combinaison OK trouvee (fenetre la plus petite en priorite). Si aucune
+    fenetre ne produit de OK, retourne le meilleur effort KO (plus haute
+    similarite) parmi toutes les fenetres essayees, plutot que de s'arreter
+    a la toute premiere fenetre qui produit un resultat non-None : une
+    fenetre de 2 blocs peut ressembler faiblement a un wording sans rapport
+    (KO) alors qu'une fenetre de 3 blocs est le vrai match (OK) - s'arreter
+    prematurement empecherait de jamais tenter cette fenetre plus large.
+    """
     first_item = html_items[start_idx]
     first_norm = normalize(first_item["text"])
     if first_item["tag"] == "a" and len(first_norm) < 20:
         return None
+
+    best_result = None
 
     for window in range(2, max_window + 1):
         end = start_idx + window
@@ -238,15 +250,22 @@ def find_aggregated_match(html_items, start_idx, excel_wordings, max_window=3, c
         # ────────────────────────────────────────────────────────────────────────────────
 
         best = find_best_match(chunk_item, excel_wordings, class_index)
-        if best is not None:
-            idx, status, error, sim = best
-            target_len = len(normalize(excel_wordings[idx]["Wording"]))
-            chunk_len = len(normalize(chunk_text))
-            if target_len > 0 and chunk_len > target_len * 2.0:
-                continue
+        if best is None:
+            continue
+
+        idx, status, error, sim = best
+        target_len = len(normalize(excel_wordings[idx]["Wording"]))
+        chunk_len = len(normalize(chunk_text))
+        if target_len > 0 and chunk_len > target_len * 2.0:
+            continue
+
+        if status == "OK":
             return (window,) + best
 
-    return None
+        if best_result is None or sim > best_result[4]:
+            best_result = (window,) + best
+
+    return best_result
 
 
 def find_split_match(html_item: dict, excel_wordings: list, matched_excel_idx: set, min_ratio: float = 0.40):

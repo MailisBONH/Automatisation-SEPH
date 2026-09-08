@@ -34,6 +34,27 @@ def normalize_url(url: str) -> str:
     netloc = parsed.netloc.lower()
     path = parsed.path or "/"
 
+    # URL sans schema ET sans "//" (ex. une faute de frappe dans le
+    # referentiel Excel comme "www.sephora.com/page?utm=a", ou un lien
+    # protocol-relatif ecrit sans les "//") : urlparse() met alors tout le
+    # domaine+chemin dans .path avec un netloc vide, ce qui produirait plus
+    # bas une chaine invalide "://www.sephora.com/page" ne correspondant
+    # jamais a la meme URL correctement schemee comparee de l'autre cote -
+    # un faux "URL mismatch". On ne touche PAS un chemin commencant par "/"
+    # (root-relatif, sans domaine - cas legitimement different, hors
+    # portee ici) : seul le cas domaine+chemin colle sans schema est vise.
+    if not scheme and not netloc and path and not path.startswith("/"):
+        reparsed = urllib.parse.urlparse("//" + path)
+        netloc = reparsed.netloc.lower()
+        path = reparsed.path or "/"
+
+    # Un netloc connu (cas ci-dessus, ou un lien protocol-relatif "//host/..."
+    # dont urlparse() extrait deja correctement netloc/path sans schema) mais
+    # sans schema produirait sinon "://host/..." plus bas - jamais egal a la
+    # meme URL correctement schemee comparee de l'autre cote.
+    if netloc and not scheme:
+        scheme = "https"
+
     params = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
     sorted_params = sorted(params)
 
