@@ -1674,11 +1674,13 @@ def _run_excel_diagnostics_batch_mode_cached(excel_path, include_generic, test_w
 
 st.set_page_config(page_title="QA Email Tool", layout="wide")
 
-header_col1, header_col2 = st.columns([5, 1])
+header_col1, header_col2, header_col3 = st.columns([4, 1, 1])
 with header_col1:
     st.title("📧 Email QA Tool")
 with header_col2:
     st.page_link("pages/1_Historique.py", label="📈 Historique", use_container_width=True)
+with header_col3:
+    st.page_link("pages/2_Braze_Loader.py", label="🧪 Braze", use_container_width=True)
 
 # Un identifiant unique par session de navigateur, pour que les fichiers
 # temporaires de deux utilisateurs (ou deux onglets) ne s'ecrasent pas.

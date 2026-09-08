@@ -342,24 +342,30 @@ def load_raw_html(html_path: str) -> str:
     return raw
 
 
-def load_and_extract_html_texts(html_path: str) -> list:
-    # Pas de nettoyage AEM avant le parsing : BeautifulSoup traite les blocs
-    # <% if %>/<%= %> comme du texte litteral (ce ne sont pas des tags HTML
-    # valides), donc les stripper ici detruirait la structure if/else avant
-    # meme que le DOM existe - avant expand_conditional_variants ait sa
-    # chance de la voir a la comparaison (voir qa/matching.py).
-    #
-    # Parser "lxml" (pas "html.parser") : implemente les regles de fermeture
-    # implicite du HTML5 (ex: un <p> imbrique dans un autre <p> referme
-    # automatiquement le premier, comme le ferait un vrai navigateur/AEM).
-    # "html.parser" garde la structure litteralement telle qu'ecrite dans le
-    # HTML source, meme invalide - un <p>A<p>B</p></p> y devient un <p>
-    # contenant un autre <p>, dont le get_text() combine A et B en un seul
-    # texte fantome qui ne correspond a rien de reellement rendu.
-    raw = load_raw_html(html_path)
+def extract_texts_from_html(raw: str) -> list:
+    """
+    Parse le HTML deja en memoire (soup + extraction) et retourne les textes
+    prets pour la comparaison. Factorisee hors de load_and_extract_html_texts
+    pour etre appelable avec du HTML qui ne vient pas d'un fichier sur disque
+    (ex. qa.braze_loader.extract_texts_from_template, template recupere via
+    l'API Braze plutot qu'un upload) - load_and_extract_html_texts reste le
+    point d'entree pour le cas fichier (AEM), celui-ci pour le HTML brut.
 
+    Pas de nettoyage AEM avant le parsing : BeautifulSoup traite les blocs
+    <% if %>/<%= %> comme du texte litteral (ce ne sont pas des tags HTML
+    valides), donc les stripper ici detruirait la structure if/else avant
+    meme que le DOM existe - avant expand_conditional_variants ait sa
+    chance de la voir a la comparaison (voir qa/matching.py).
+
+    Parser "lxml" (pas "html.parser") : implemente les regles de fermeture
+    implicite du HTML5 (ex: un <p> imbrique dans un autre <p> referme
+    automatiquement le premier, comme le ferait un vrai navigateur/AEM).
+    "html.parser" garde la structure litteralement telle qu'ecrite dans le
+    HTML source, meme invalide - un <p>A<p>B</p></p> y devient un <p>
+    contenant un autre <p>, dont le get_text() combine A et B en un seul
+    texte fantome qui ne correspond a rien de reellement rendu.
+    """
     soup = BeautifulSoup(raw, "lxml")
-
 
     for tag in soup(["script", "style", "meta", "link", "head"]):
         tag.decompose()
@@ -367,6 +373,11 @@ def load_and_extract_html_texts(html_path: str) -> list:
     title_to_component = build_title_to_component_map(soup)
 
     return extract_texts_from_textcontribution(soup, title_to_component)
+
+
+def load_and_extract_html_texts(html_path: str) -> list:
+    raw = load_raw_html(html_path)
+    return extract_texts_from_html(raw)
 
 
 def find_component_class(tag):

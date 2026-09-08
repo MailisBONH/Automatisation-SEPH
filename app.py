@@ -23,6 +23,7 @@ except (AttributeError, ValueError):
 
 home_page = st.Page("home.py", title="QA Email Tool", icon="📧", default=True)
 historique_page = st.Page("pages/1_Historique.py", title="Historique", icon="📈")
+braze_loader_page = st.Page("pages/2_Braze_Loader.py", title="Braze (exploration)", icon="🧪")
 
-pg = st.navigation([home_page, historique_page], position="hidden")
+pg = st.navigation([home_page, historique_page, braze_loader_page], position="hidden")
 pg.run()
