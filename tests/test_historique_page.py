@@ -31,6 +31,16 @@ def _run_page():
     return at
 
 
+def _confirm_delete_run_checkbox(at):
+    """La case de confirmation du panneau "Supprimer une comparaison de
+    l'historique" (voir TestDeleteRun) : sa cle inclut un "nonce" qui change
+    apres chaque suppression reussie, pour forcer la case a redevenir
+    decochee au rerun suivant (voir pages/1_Historique.py) - un lookup par
+    cle exacte casserait donc apres une suppression. Lookup par label a la
+    place, stable quel que soit le nonce courant."""
+    return next(c for c in at.checkbox if c.label == "Je confirme vouloir supprimer cette comparaison définitivement")
+
+
 class TestEmptyHistory:
     def test_shows_empty_state_message_and_no_exception(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
@@ -325,6 +335,55 @@ class TestReportDownloads:
             os.path.basename(download_buttons[0].label.replace("⬇️ ", ""))
         )
 
+    def test_shows_only_the_2_most_recent_and_recomposes_from_backup_after_a_deletion(
+        self, tmp_path, monkeypatch
+    ):
+        # KEEP_REPORTS (4) garde plus de rapports sur le disque que ce qui
+        # doit etre AFFICHE (2, voir DISPLAYED_REPORTS dans
+        # pages/1_Historique.py) - les rapports au-dela des 2 les plus
+        # recents sont un "backup" silencieux : jamais montres tant qu'ils
+        # ne sont pas eux-memes parmi les 2 plus recents.
+        monkeypatch.chdir(tmp_path)
+        fake_incrementing_datetime(monkeypatch)
+        report_paths = []
+        for i in range(3):
+            report = tmp_path / f"report_{i}.xlsx"
+            make_details_report(str(report), [{"Status": "OK"}] * (8 + i) + [{"Status": "KO"}] * (2 - i))
+            dest = archive_report(str(report), "France", "revamp_inac", "SEQ 1", mode="wording")
+            record_run(
+                "SEQ 1", "wording", total=10, ok=8 + i, ko=2 - i, score=(80.0 + i * 10),
+                country="France", trigger="revamp_inac", sequence="SEQ 1", report_path=dest,
+            )
+            report_paths.append(dest)
+
+        at = _run_page()
+        at.button(key="nav_country_France").click().run()
+        at.button(key="nav_trigger_revamp_inac").click().run()
+        at.button(key="nav_sequence_SEQ 1").click().run()
+
+        def _shown_report_names():
+            return {
+                b.label.replace("⬇️ ", "")
+                for b in at.get("download_button") if b.label.startswith("⬇️ QA_")
+            }
+
+        # Les 3 fichiers sont bien conserves sur le disque (KEEP_REPORTS=4)...
+        assert len(list_reports("France", "revamp_inac", "SEQ 1", mode="wording")) == 3
+        # ...mais seuls les 2 plus recents (report_2, report_1) sont affiches.
+        assert _shown_report_names() == {os.path.basename(report_paths[2]), os.path.basename(report_paths[1])}
+
+        # Supprime le run le plus recent (report_2) via le panneau dedie.
+        run_to_delete = next(e for e in load_sequence_history("France", "revamp_inac", "SEQ 1") if e["score"] == 100.0)
+        at.selectbox(key="delete_run_choice_France_revamp_inac_SEQ 1").select(run_to_delete).run()
+        _confirm_delete_run_checkbox(at).set_value(True).run()
+        next(b for b in at.button if b.label == "🗑️ Supprimer cette comparaison").click().run()
+
+        assert not at.exception
+        # report_2 disparait, mais l'affichage se recompose a 2 rapports en
+        # piochant le backup jusque-la cache (report_0) plutot que de
+        # retomber a un seul rapport affiche.
+        assert _shown_report_names() == {os.path.basename(report_paths[1]), os.path.basename(report_paths[0])}
+
 
 class TestRenameFormValidation:
     def _navigate_to_sequence(self, at):
@@ -391,6 +450,156 @@ class TestDeleteSequence:
         # Plus aucune sequence classee du tout (c'etait la seule) : l'arbre
         # est vide, la page retombe sur l'etat "Aucun rapport archive".
         assert any("Aucun rapport archivé" in i.value for i in at.info)
+
+
+class TestDeleteRun:
+    """Suppression d'UNE SEULE comparaison de l'historique d'une sequence
+    (voir qa.history.delete_run) - contrairement a TestDeleteSequence
+    ci-dessus, qui supprime la sequence entiere. Utile quand un run precis a
+    ete archive par erreur (ex: composants generiques oublies) et fausserait
+    sinon le score de reference des prochaines alertes de regression, les
+    stats d'erreurs agregees et le graphique d'evolution."""
+
+    def test_deleting_a_run_removes_it_and_its_report_but_keeps_the_rest(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        old_report = tmp_path / "old.xlsx"
+        make_details_report(str(old_report), [{"Status": "OK"}] * 5 + [{"Status": "KO"}] * 5)
+        old_dest = archive_report(str(old_report), "France", "revamp_inac", "SEQ 1", mode="wording")
+        record_run(
+            "SEQ 1", "wording", total=10, ok=5, ko=5, score=50.0,
+            country="France", trigger="revamp_inac", sequence="SEQ 1", report_path=old_dest,
+        )
+        new_report = tmp_path / "new.xlsx"
+        make_details_report(str(new_report), [{"Status": "OK"}] * 9 + [{"Status": "KO"}])
+        new_dest = archive_report(str(new_report), "France", "revamp_inac", "SEQ 1", mode="wording")
+        record_run(
+            "SEQ 1", "wording", total=10, ok=9, ko=1, score=90.0,
+            country="France", trigger="revamp_inac", sequence="SEQ 1", report_path=new_dest,
+        )
+
+        at = _run_page()
+        at.button(key="nav_country_France").click().run()
+        at.button(key="nav_trigger_revamp_inac").click().run()
+        at.button(key="nav_sequence_SEQ 1").click().run()
+
+        # Le plus recent (score 90.0) est propose en premier (comme le
+        # tableau au-dessus) - on cible explicitement le run le PLUS ANCIEN
+        # (score 50.0) pour verifier que la selection est bien respectee, pas
+        # juste "le premier de la liste" supprime a chaque fois. select_index
+        # ne fonctionne pas ici (AppTest re-applique format_func a la valeur
+        # deja formatee qu'il stocke en interne) : on selectionne par valeur,
+        # avec une entree portant les memes champs que celle du widget
+        # (format_func ne compare que ces champs, pas l'identite de l'objet).
+        old_entry = next(e for e in load_sequence_history("France", "revamp_inac", "SEQ 1") if e["score"] == 50.0)
+        at.selectbox(key="delete_run_choice_France_revamp_inac_SEQ 1").select(old_entry).run()
+        _confirm_delete_run_checkbox(at).set_value(True).run()
+        delete_button = next(b for b in at.button if b.label == "🗑️ Supprimer cette comparaison")
+        delete_button.click().run()
+
+        assert not at.exception
+        remaining = load_sequence_history("France", "revamp_inac", "SEQ 1")
+        assert len(remaining) == 1
+        assert remaining[0]["score"] == 90.0
+        assert not os.path.exists(old_dest)
+        assert os.path.exists(new_dest)
+        # st.toast (contrairement a st.success) reste visible apres le
+        # st.rerun() qui suit immediatement la suppression - necessaire pour
+        # que l'utilisateur voie reellement la confirmation.
+        assert any("supprimée" in t.value for t in at.toast)
+        # La case de confirmation se redecoche (nouvelle cle avec un nonce
+        # incremente, voir pages/1_Historique.py - plus fiable en usage reel
+        # qu'un del st.session_state[cle] sur le widget deja instancie cette
+        # meme execution) et le bouton se redesactive : un second clic (ex.
+        # double-clic accidentel) sur "Supprimer cette comparaison" ne doit
+        # jamais supprimer une autre comparaison sans nouvelle confirmation
+        # explicite de l'utilisateur.
+        assert _confirm_delete_run_checkbox(at).value is False
+        delete_button_after = next(b for b in at.button if b.label == "🗑️ Supprimer cette comparaison")
+        assert delete_button_after.disabled
+
+    def test_delete_button_is_disabled_until_confirmed(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        record_run(
+            "SEQ 1", "wording", total=10, ok=8, ko=2, score=80.0,
+            country="France", trigger="revamp_inac", sequence="SEQ 1",
+        )
+
+        at = _run_page()
+        at.button(key="nav_country_France").click().run()
+        at.button(key="nav_trigger_revamp_inac").click().run()
+        at.button(key="nav_sequence_SEQ 1").click().run()
+
+        delete_button = next(b for b in at.button if b.label == "🗑️ Supprimer cette comparaison")
+        assert delete_button.disabled
+
+    def test_deleting_a_run_without_a_stored_report_path_and_without_a_file_does_not_crash(
+        self, tmp_path, monkeypatch
+    ):
+        # Run archive avant l'ajout de report_path (voir qa.history.record_run)
+        # ET dont le fichier a deja ete purge (rotation KEEP_REPORTS, ou jamais
+        # archive) : doit rester supprimable de l'historique, sans rien a
+        # nettoyer sur le disque (aucun fichier ne correspond, voir
+        # qa.archive.find_report_file_by_timestamp).
+        monkeypatch.chdir(tmp_path)
+        record_run(
+            "SEQ 1", "wording", total=10, ok=8, ko=2, score=80.0,
+            country="France", trigger="revamp_inac", sequence="SEQ 1",
+        )
+
+        at = _run_page()
+        at.button(key="nav_country_France").click().run()
+        at.button(key="nav_trigger_revamp_inac").click().run()
+        at.button(key="nav_sequence_SEQ 1").click().run()
+
+        # Lookup par label plutot que par cle exacte : la cle de ce widget
+        # inclut un "nonce" qui change apres chaque suppression reussie
+        # (voir pages/1_Historique.py), pour forcer la case a redevenir
+        # decochee - un test qui viserait une cle figee casserait des que ce
+        # nonce avance.
+        _confirm_delete_run_checkbox(at).set_value(True).run()
+        delete_button = next(b for b in at.button if b.label == "🗑️ Supprimer cette comparaison")
+        delete_button.click().run()
+
+        assert not at.exception
+        # Plus aucune comparaison classee du tout (c'etait la seule) : l'arbre
+        # est vide, la page retombe sur l'etat "Aucun rapport archive".
+        assert any("Aucun rapport archivé" in i.value for i in at.info)
+
+    def test_deleting_a_legacy_run_still_removes_its_file_found_by_timestamp(self, tmp_path, monkeypatch):
+        # Regression : la quasi-totalite de l'historique reel d'avant cette
+        # fonctionnalite n'a PAS de report_path (colonne ajoutee apres coup) -
+        # sans repli par correspondance de date (qa.archive.
+        # find_report_file_by_timestamp), supprimer un de ces runs plus
+        # anciens ne retirait que sa ligne d'historique : son rapport Excel
+        # restait visible dans "Rapports disponibles" comme si de rien
+        # n'etait, ce qui a ete signale comme un bug.
+        monkeypatch.chdir(tmp_path)
+        report = tmp_path / "report.xlsx"
+        make_details_report(str(report), [{"Status": "OK"}] * 8 + [{"Status": "KO"}] * 2)
+        dest_path = archive_report(str(report), "France", "revamp_inac", "SEQ 1", mode="wording")
+        # record_run SANS report_path : reproduit exactement une entree
+        # archivee avant l'ajout de cette colonne.
+        record_run(
+            "SEQ 1", "wording", total=10, ok=8, ko=2, score=80.0,
+            country="France", trigger="revamp_inac", sequence="SEQ 1",
+        )
+
+        at = _run_page()
+        at.button(key="nav_country_France").click().run()
+        at.button(key="nav_trigger_revamp_inac").click().run()
+        at.button(key="nav_sequence_SEQ 1").click().run()
+
+        # Lookup par label plutot que par cle exacte : la cle de ce widget
+        # inclut un "nonce" qui change apres chaque suppression reussie
+        # (voir pages/1_Historique.py), pour forcer la case a redevenir
+        # decochee - un test qui viserait une cle figee casserait des que ce
+        # nonce avance.
+        _confirm_delete_run_checkbox(at).set_value(True).run()
+        delete_button = next(b for b in at.button if b.label == "🗑️ Supprimer cette comparaison")
+        delete_button.click().run()
+
+        assert not at.exception
+        assert not os.path.exists(dest_path)
 
 
 class TestReportDiffPanel:

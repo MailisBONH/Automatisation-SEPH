@@ -176,6 +176,57 @@ def delete_sequence_dir(country: str, trigger: str, sequence: str) -> None:
         shutil.rmtree(dest_dir, ignore_errors=True)
 
 
+def delete_report_file(path: str) -> None:
+    """Supprime un unique rapport archive par son chemin exact (voir
+    qa.history.delete_run, qui retourne le report_path enregistre pour le
+    run supprime) - a appeler avec lui pour supprimer un run precis de
+    l'historique ET son fichier, sans toucher au reste des rapports de la
+    sequence (contrairement a delete_sequence_dir). Best-effort comme le
+    reste des suppressions de fichiers de ce module : un chemin vide, deja
+    absent (rapport deja tourne par KEEP_REPORTS, ou run anterieur a l'ajout
+    de report_path) n'est pas une erreur."""
+    if not path:
+        return
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def find_report_file_by_timestamp(country: str, trigger: str, sequence: str, mode: str, timestamp: str) -> str:
+    """
+    Retrouve, parmi les rapports encore sur disque pour (pays, trigger,
+    sequence, mode), celui dont le nom de fichier correspond a `timestamp`
+    (format "YYYY-MM-DD HH:MM:SS" d'une entree d'historique, voir
+    qa.history.record_run) - repli utilise par la page Historique quand un
+    run n'a PAS de report_path enregistre (archive avant l'ajout de cette
+    colonne, voir qa.history._ensure_report_path_column) : sans ce repli,
+    supprimer un de ces runs plus anciens ne supprimerait que sa ligne
+    d'historique, laissant son rapport Excel visible dans "Rapports
+    disponibles" comme si la suppression n'avait rien fait.
+
+    archive_report() horodate son nom de fichier via un datetime.now()
+    distinct de celui de record_run(), mais les deux sont appeles a
+    quelques millisecondes d'intervalle dans le meme appel synchrone (voir
+    home._do_archive) : la resolution seconde commune aux deux coincide
+    donc dans l'immense majorite des cas - seul un run pile a cheval sur un
+    changement de seconde entre les deux appels y echapperait.
+
+    Retourne le chemin trouve, ou None si aucun rapport de ce mode n'est
+    plus sur disque pour cette sequence (deja tourne par KEEP_REPORTS) ou si
+    aucun ne correspond au timestamp (coincidence manquee, ou timestamp
+    illisible)."""
+    try:
+        file_timestamp = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S").strftime("%Y%m%d_%H%M%S")
+    except (ValueError, TypeError):
+        return None
+
+    for path in list_reports(country, trigger, sequence, mode=mode):
+        if file_timestamp in os.path.basename(path):
+            return path
+    return None
+
+
 def move_sequence_dir(old_country: str, old_trigger: str, old_sequence: str,
                        new_country: str, new_trigger: str, new_sequence: str) -> None:
     """Deplace le dossier de rapports d'une sequence vers un nouveau

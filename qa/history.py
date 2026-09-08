@@ -73,7 +73,8 @@ CREATE TABLE IF NOT EXISTS runs (
     trigger_name TEXT,
     sequence TEXT,
     error_types TEXT,
-    tested_by TEXT
+    tested_by TEXT,
+    report_path TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_runs_sheet ON runs(sheet);
 CREATE INDEX IF NOT EXISTS idx_runs_classification ON runs(country, trigger_name, sequence);
@@ -81,15 +82,30 @@ CREATE INDEX IF NOT EXISTS idx_runs_classification ON runs(country, trigger_name
 
 # Colonnes/placeholders de l'INSERT dans `runs`, partages entre record_run
 # (une ligne, conn.execute) et migrate_legacy_jsonl_history (plusieurs
-# lignes, conn.executemany) pour ne pas dupliquer cette liste de 12 colonnes
+# lignes, conn.executemany) pour ne pas dupliquer cette liste de 13 colonnes
 # a deux endroits - seule la construction du/des tuple(s) de valeurs reste
 # propre a chaque appelant (kwargs normalises pour l'un, entry.get(...) pour
 # l'autre), execute() et executemany() acceptant tous deux ce meme SQL.
 _INSERT_RUN_SQL = (
     "INSERT INTO runs (timestamp, sheet, mode, total, ok, ko, score, "
-    "country, trigger_name, sequence, error_types, tested_by) "
-    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    "country, trigger_name, sequence, error_types, tested_by, report_path) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 )
+
+
+def _ensure_report_path_column(conn: sqlite3.Connection) -> None:
+    """Ajoute la colonne report_path a une base existante creee avant son
+    introduction (voir record_run/delete_run) - `CREATE TABLE IF NOT EXISTS`
+    dans _SCHEMA ne modifie pas une table qui existe deja. Idempotent (ne
+    fait rien si la colonne est deja presente) et bon marche (une seule
+    requete PRAGMA en plus, pas de scan de la table), appelable sans
+    condition a chaque connexion (voir _with_connection) - meme principe que
+    l'ajout, en son temps, des colonnes error_types/tested_by, faite alors
+    directement dans _SCHEMA parce que la base ne contenait encore aucune
+    donnee reelle a cette epoque du projet."""
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(runs)").fetchall()}
+    if "report_path" not in columns:
+        conn.execute("ALTER TABLE runs ADD COLUMN report_path TEXT")
 
 
 def _connect(path: str) -> sqlite3.Connection:
@@ -176,6 +192,7 @@ def _with_connection(path: str, fn, default=None, mutates: bool = False):
         try:
             with contextlib.closing(_connect(path)) as conn:
                 conn.executescript(_SCHEMA)
+                _ensure_report_path_column(conn)
                 result = fn(conn)
         except (sqlite3.Error, OSError):
             return default
@@ -195,6 +212,7 @@ def _row_to_entry(row: sqlite3.Row) -> dict:
     presentes que si elles ont une valeur, comme le faisait record_run en
     ne les ecrivant dans le JSON qu'a cette condition."""
     entry = {
+        "id": row["id"],
         "timestamp": row["timestamp"],
         "sheet": row["sheet"],
         "mode": row["mode"],
@@ -213,6 +231,8 @@ def _row_to_entry(row: sqlite3.Row) -> dict:
         entry["error_types"] = json.loads(row["error_types"])
     if row["tested_by"]:
         entry["tested_by"] = row["tested_by"]
+    if row["report_path"]:
+        entry["report_path"] = row["report_path"]
     return entry
 
 
@@ -280,7 +300,7 @@ def migrate_legacy_jsonl_history(legacy_path: str = LEGACY_HISTORY_PATH, path: s
                         entry.get("total"), entry.get("ok"), entry.get("ko"), entry.get("score"),
                         entry.get("country"), entry.get("trigger"), entry.get("sequence"),
                         json.dumps(entry["error_types"], ensure_ascii=False) if entry.get("error_types") else None,
-                        entry.get("tested_by"),
+                        entry.get("tested_by"), entry.get("report_path"),
                     )
                     for entry in entries
                 ),
@@ -298,7 +318,8 @@ def migrate_legacy_jsonl_history(legacy_path: str = LEGACY_HISTORY_PATH, path: s
 
 def record_run(sheet: str, mode: str, total: int, ok: int, ko: int, score: float,
                 country: str = None, trigger: str = None, sequence: str = None,
-                error_types: dict = None, tested_by: str = None, path: str = HISTORY_PATH) -> None:
+                error_types: dict = None, tested_by: str = None, report_path: str = None,
+                path: str = HISTORY_PATH) -> None:
     """Ajoute une ligne d'historique pour ce run. N'echoue jamais bruyamment :
     l'historique est une fonctionnalite de confort, pas critique pour la QA.
 
@@ -314,7 +335,13 @@ def record_run(sheet: str, mode: str, total: int, ok: int, ko: int, score: float
     (optionnel, nom de l'utilisateur qui a lance/archive ce run, voir
     home._do_archive) : comme country/trigger/sequence/error_types, stocke
     seulement si fourni - les entrees anterieures a ces fonctionnalites n'ont
-    pas ces colonnes renseignees."""
+    pas ces colonnes renseignees. report_path (optionnel, chemin du rapport
+    Excel archive pour CE run precis, voir qa.archive.archive_report /
+    qa.combined_report.build_combined_report) : permet a delete_run() de
+    supprimer aussi le fichier correspondant quand un run precis est retire
+    de l'historique (voir pages/1_Historique.py) - absent sur les entrees
+    anterieures a cette fonctionnalite, qui restent supprimables de
+    l'historique mais sans nettoyage de fichier associe."""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     error_types_json = json.dumps(dict(error_types), ensure_ascii=False) if error_types else None
 
@@ -324,7 +351,7 @@ def record_run(sheet: str, mode: str, total: int, ok: int, ko: int, score: float
             (
                 timestamp, sheet, mode, total, ok, ko, score,
                 country or None, trigger or None, sequence or None,
-                error_types_json, tested_by or None,
+                error_types_json, tested_by or None, report_path or None,
             ),
         )
         conn.commit()
@@ -639,3 +666,33 @@ def delete_classification(country: str, trigger: str, sequence: str, path: str =
         conn.commit()
 
     _with_connection(path, _delete, mutates=True)
+
+
+def delete_run(run_id: int, path: str = HISTORY_PATH) -> str:
+    """Supprime UNE SEULE entree d'historique par son id (voir _row_to_entry,
+    qui expose desormais `id`) - contrairement a delete_classification qui
+    supprime toute une sequence, cible un run precis (ex: une comparaison
+    archivee par erreur - composants generiques oublies, mauvais fichier
+    upload... - qui fausserait sinon le score "precedent" compare a chaque
+    nouvel archivage, les stats d'erreurs agregees et le graphique
+    d'evolution de cette sequence) sans toucher au reste de son historique.
+
+    Retourne le `report_path` enregistre pour ce run (voir record_run), ou
+    None si l'id est introuvable ou si ce run est anterieur a l'ajout de
+    report_path - a l'appelant de supprimer ce fichier du disque si
+    non-None (voir qa.archive.delete_report_file) : ce module ne touche
+    jamais au systeme de fichiers, seulement a la base (meme separation que
+    delete_classification/qa.archive.delete_sequence_dir). No-op (retourne
+    None) si la base n'existe pas encore."""
+    if not os.path.exists(path):
+        return None
+
+    def _delete(conn):
+        row = conn.execute("SELECT report_path FROM runs WHERE id = ?", (run_id,)).fetchone()
+        if row is None:
+            return None
+        conn.execute("DELETE FROM runs WHERE id = ?", (run_id,))
+        conn.commit()
+        return row["report_path"]
+
+    return _with_connection(path, _delete, mutates=True)

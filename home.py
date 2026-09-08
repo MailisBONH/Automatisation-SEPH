@@ -1108,11 +1108,11 @@ def _do_archive(last_run, country, trigger):
             continue
 
         report_path = item["report_path"] or save_report(rows, item["sequence"], mode=item["mode"])
-        archive_report(report_path, country, trigger, sequence, mode=item["mode"])
+        archived_path = archive_report(report_path, country, trigger, sequence, mode=item["mode"])
         record_run(
             item["sequence"], item["mode"], total, ok, total - ok, score,
             country=country, trigger=trigger, sequence=sequence, error_types=dict(error_types),
-            tested_by=tested_by,
+            tested_by=tested_by, report_path=archived_path,
         )
         done_items.add(i)
         st.session_state[done_items_key] = set(done_items)
@@ -1143,7 +1143,7 @@ def _do_archive(last_run, country, trigger):
                 combined_stats["total"], combined_stats["ok"], combined_stats["ko"], combined_stats["score"],
                 country=country, trigger=trigger, sequence=sequence,
                 error_types=dict(combined_error_types.get(sequence, {})),
-                tested_by=tested_by,
+                tested_by=tested_by, report_path=combined_path,
             )
             done_items.add(combined_done_marker)
             st.session_state[done_items_key] = set(done_items)

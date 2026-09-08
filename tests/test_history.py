@@ -13,6 +13,7 @@ from qa.history import (
     aggregate_error_types,
     build_history_tree,
     delete_classification,
+    delete_run,
     error_type_monthly_trend,
     export_history_csv,
     export_history_excel,
@@ -213,6 +214,23 @@ class TestRecordAndLoadHistory:
         assert "error_types" not in entries[0]
         assert entries[1]["error_types"] == {"Minor typo": 1, "Content mismatch": 1}
         assert "error_types" not in entries[2]
+
+    def test_report_path_stored_only_when_provided_and_id_always_present(self, tmp_path):
+        path = str(tmp_path / "history.db")
+
+        record_run("SEQ 1", "wording", total=10, ok=8, ko=2, score=80.0, path=path)
+        record_run(
+            "SEQ 1", "wording", total=10, ok=8, ko=2, score=80.0, path=path,
+            report_path="output/France/Trigger/SEQ 1/QA_wording_SEQ_1_20260101_000000.xlsx",
+        )
+
+        entries = load_history(path=path)
+        assert "report_path" not in entries[0]
+        assert entries[1]["report_path"] == "output/France/Trigger/SEQ 1/QA_wording_SEQ_1_20260101_000000.xlsx"
+        # id (necessaire a delete_run) est toujours present, y compris sur
+        # une entree sans report_path.
+        assert isinstance(entries[0]["id"], int)
+        assert entries[1]["id"] == entries[0]["id"] + 1
 
 
 class TestAggregateErrorTypes:
@@ -463,6 +481,103 @@ class TestRewriteAndDeleteClassification:
     def test_delete_on_missing_file_is_a_no_op(self, tmp_path):
         path = str(tmp_path / "does_not_exist.jsonl")
         delete_classification("Germany", "T", "SEQ 1", path=path)  # ne doit pas lever
+
+
+class TestDeleteRun:
+    def test_deletes_only_the_targeted_run_and_returns_its_report_path(self, tmp_path):
+        path = str(tmp_path / "history.db")
+        record_run(
+            "SEQ 1", "wording", total=10, ok=5, ko=5, score=50.0, path=path,
+            country="Germany", trigger="T", sequence="SEQ 1", report_path="r1.xlsx",
+        )
+        record_run(
+            "SEQ 1", "wording", total=10, ok=8, ko=2, score=80.0, path=path,
+            country="Germany", trigger="T", sequence="SEQ 1", report_path="r2.xlsx",
+        )
+
+        entries = load_sequence_history("Germany", "T", "SEQ 1", path=path)
+        assert len(entries) == 2
+        first_run_id = entries[0]["id"]
+
+        returned_path = delete_run(first_run_id, path=path)
+
+        assert returned_path == "r1.xlsx"
+        remaining = load_sequence_history("Germany", "T", "SEQ 1", path=path)
+        assert len(remaining) == 1
+        assert remaining[0]["report_path"] == "r2.xlsx"
+
+    def test_deleting_a_run_without_a_stored_report_path_returns_none(self, tmp_path):
+        # Run archive avant l'ajout de report_path (colonne absente/NULL) -
+        # le run doit rester supprimable, juste sans fichier a nettoyer.
+        path = str(tmp_path / "history.db")
+        record_run(
+            "SEQ 1", "wording", total=10, ok=5, ko=5, score=50.0, path=path,
+            country="Germany", trigger="T", sequence="SEQ 1",
+        )
+        run_id = load_sequence_history("Germany", "T", "SEQ 1", path=path)[0]["id"]
+
+        assert delete_run(run_id, path=path) is None
+        assert load_sequence_history("Germany", "T", "SEQ 1", path=path) == []
+
+    def test_unknown_id_is_a_no_op(self, tmp_path):
+        path = str(tmp_path / "history.db")
+        record_run(
+            "SEQ 1", "wording", total=10, ok=5, ko=5, score=50.0, path=path,
+            country="Germany", trigger="T", sequence="SEQ 1",
+        )
+
+        assert delete_run(999999, path=path) is None
+        assert len(load_sequence_history("Germany", "T", "SEQ 1", path=path)) == 1
+
+    def test_on_missing_file_is_a_no_op(self, tmp_path):
+        path = str(tmp_path / "does_not_exist.db")
+        assert delete_run(1, path=path) is None
+
+    def test_existing_database_created_before_report_path_is_transparently_upgraded(self, tmp_path):
+        # Simule une base creee avant l'ajout de la colonne report_path
+        # (schema sans elle) : toute fonction du module doit continuer a
+        # fonctionner (voir _ensure_report_path_column), pas seulement
+        # delete_run, sur une base d'installation existante.
+        path = str(tmp_path / "history.db")
+        with contextlib.closing(history._connect(path)) as conn:
+            conn.executescript("""
+                CREATE TABLE runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    sheet TEXT NOT NULL,
+                    mode TEXT NOT NULL,
+                    total INTEGER NOT NULL,
+                    ok INTEGER NOT NULL,
+                    ko INTEGER NOT NULL,
+                    score REAL NOT NULL,
+                    country TEXT,
+                    trigger_name TEXT,
+                    sequence TEXT,
+                    error_types TEXT,
+                    tested_by TEXT
+                );
+            """)
+            conn.execute(
+                "INSERT INTO runs (timestamp, sheet, mode, total, ok, ko, score, "
+                "country, trigger_name, sequence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ("2026-01-01 10:00:00", "SEQ 1", "wording", 10, 5, 5, 50.0, "Germany", "T", "SEQ 1"),
+            )
+            conn.commit()
+
+        entries = load_sequence_history("Germany", "T", "SEQ 1", path=path)
+        assert len(entries) == 1
+        assert "report_path" not in entries[0]
+        run_id = entries[0]["id"]
+
+        record_run(
+            "SEQ 1", "wording", total=10, ok=8, ko=2, score=80.0, path=path,
+            country="Germany", trigger="T", sequence="SEQ 1", report_path="new.xlsx",
+        )
+        assert delete_run(run_id, path=path) is None  # colonne presente mais NULL pour cette ligne
+
+        remaining = load_sequence_history("Germany", "T", "SEQ 1", path=path)
+        assert len(remaining) == 1
+        assert remaining[0]["report_path"] == "new.xlsx"
 
 
 class TestPruneHistory:

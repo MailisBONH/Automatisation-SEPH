@@ -9,7 +9,14 @@ TEMP_DIR = "temp"          # Fichiers uploades le temps d'une session (voir qa.c
 
 # Nombre de rapports Excel les plus recents conserves par type (wording/url/
 # combined) dans un meme dossier de sequence - voir qa.archive.archive_report.
-KEEP_REPORTS = 2
+# Volontairement > 2 (le panneau "Comparer les 2 derniers rapports"/le diff
+# n'utilise jamais que les 2 plus recents, voir qa.report_diff) : si l'un des
+# 2 plus recents est retire via "Supprimer une comparaison de l'historique"
+# (page Historique - ex. run archive par erreur), il reste encore 2 rapports
+# valides pour former une nouvelle paire "derniers rapports" comparable,
+# plutot que de se retrouver avec un seul rapport orphelin sans rien a lui
+# comparer.
+KEEP_REPORTS = 4
 
 # Purge automatique de temp/ (voir qa.cleanup) : age au-dela duquel un
 # fichier uploade est supprime, et frequence maximale du scan reel (un

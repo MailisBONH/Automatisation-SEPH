@@ -1038,6 +1038,31 @@ class TestDoArchive:
         entries = load_sequence_history("Germany", "Revamp Inac", "SEQ 1", path=self.history_path)
         assert any(e["mode"] == "wording" and e["score"] == 50.0 for e in entries)
 
+    def test_records_the_archived_report_path_for_later_single_run_deletion(self, tmp_path):
+        # qa.history.delete_run (page Historique, suppression d'une seule
+        # comparaison) a besoin du chemin EXACT du rapport archive pour ce
+        # run precis - _do_archive doit le transmettre a record_run plutot
+        # que de le laisser vide.
+        import os
+
+        from qa.history import load_sequence_history
+
+        report_path = tmp_path / "report.xlsx"
+        make_details_report(str(report_path), [{"Status": "OK"}, {"Status": "KO"}])
+        last_run = {"panels": [
+            _single_panel("wording", "SEQ 1 NON LOYAL", [{"Status": "OK"}, {"Status": "KO"}], report_path=str(report_path))
+        ]}
+
+        home._do_archive(last_run, "Germany", "Revamp Inac")
+
+        entries = load_sequence_history("Germany", "Revamp Inac", "SEQ 1", path=self.history_path)
+        entry = next(e for e in entries if e["mode"] == "wording")
+        assert "report_path" in entry
+        # Le chemin enregistre est bien celui du rapport ARCHIVE (dans
+        # output/<Pays>/<Trigger>/<Sequence>/), pas le rapport source.
+        assert entry["report_path"] != str(report_path)
+        assert os.path.exists(entry["report_path"])
+
     def test_retrying_after_a_partial_failure_does_not_duplicate_already_archived_items(self, tmp_path, monkeypatch):
         # Regression : si archive_report/record_run levait une exception au
         # milieu de la boucle (ex. erreur I/O transitoire), archive_key
@@ -1163,7 +1188,14 @@ class TestDoArchive:
         home._do_archive(last_run, "Germany", "Revamp Inac")
 
         entries = load_sequence_history("Germany", "Revamp Inac", "SEQ 1", path=self.history_path)
-        assert any(e["mode"] == "combined" and e["score"] == 100.0 for e in entries)
+        combined_entry = next(e for e in entries if e["mode"] == "combined")
+        assert combined_entry["score"] == 100.0
+        # Meme garantie que pour un item wording/url individuel (voir
+        # test_records_the_archived_report_path_for_later_single_run_deletion) :
+        # necessaire a qa.history.delete_run pour nettoyer le fichier associe.
+        import os
+        assert "report_path" in combined_entry
+        assert os.path.exists(combined_entry["report_path"])
 
     def test_records_error_type_breakdown(self, tmp_path):
         from qa.history import load_sequence_history

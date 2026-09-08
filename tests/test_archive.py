@@ -106,29 +106,33 @@ class TestArchiveReportAndListReports:
     def test_list_reports_empty_for_unknown_sequence(self, isolated_output):
         assert archive.list_reports("Germany", "Revamp Inac", "SEQ 1") == []
 
-    def test_rotation_keeps_only_last_two_per_type(self, tmp_path, isolated_output, monkeypatch):
+    def test_rotation_keeps_only_the_n_most_recent_per_type(self, tmp_path, isolated_output, monkeypatch):
         fake_incrementing_datetime(monkeypatch)
         report = _make_report(tmp_path)
 
         # archive_report() trie par mtime reel du fichier (pas par le
         # timestamp du nom de fichier) pour decider quoi purger : sur un
-        # fichier factice minuscule, 4 appels consecutifs peuvent finir avec
-        # des mtimes indiscernables. On force un ordre deterministe en
+        # fichier factice minuscule, des appels consecutifs peuvent finir
+        # avec des mtimes indiscernables. On force un ordre deterministe en
         # antidatant chaque fichier juste apres sa creation (l'appel suivant
         # le voit alors comme "plus ancien" que le sien, cree a l'instant).
+        # Deux archivages de plus que KEEP_REPORTS pour exercer reellement la
+        # rotation, quelle que soit sa valeur configuree.
         backdate_base = time.time() - 60
         paths = []
-        for i in range(4):
+        for i in range(archive.KEEP_REPORTS + 2):
             p = archive.archive_report(report, "Germany", "Revamp Inac", "SEQ 1", mode="wording")
             os.utime(p, (backdate_base + i, backdate_base + i))
             paths.append(p)
 
         reports = archive.list_reports("Germany", "Revamp Inac", "SEQ 1", mode="wording")
         assert len(reports) == archive.KEEP_REPORTS
+        # Les 2 plus anciens sont purges, tous les autres (les KEEP_REPORTS
+        # plus recents) restent.
         assert not os.path.exists(paths[0])
         assert not os.path.exists(paths[1])
-        assert os.path.exists(paths[2])
-        assert os.path.exists(paths[3])
+        for p in paths[2:]:
+            assert os.path.exists(p)
 
     def test_same_second_archiving_does_not_overwrite_previous_report(self, tmp_path, isolated_output, monkeypatch):
         # Regression: deux archive_report() pour le meme
@@ -172,11 +176,11 @@ class TestArchiveReportAndListReports:
         fake_incrementing_datetime(monkeypatch)
         report = _make_report(tmp_path)
 
-        for _ in range(3):
+        for _ in range(archive.KEEP_REPORTS + 1):
             archive.archive_report(report, "Germany", "Revamp Inac", "SEQ 1", mode="wording")
         archive.archive_report(report, "Germany", "Revamp Inac", "SEQ 1", mode="url")
 
-        assert len(archive.list_reports("Germany", "Revamp Inac", "SEQ 1", mode="wording")) == 2
+        assert len(archive.list_reports("Germany", "Revamp Inac", "SEQ 1", mode="wording")) == archive.KEEP_REPORTS
         assert len(archive.list_reports("Germany", "Revamp Inac", "SEQ 1", mode="url")) == 1
 
 
@@ -193,6 +197,95 @@ class TestDeleteSequenceDir:
 
     def test_missing_sequence_is_a_no_op(self, isolated_output):
         archive.delete_sequence_dir("Germany", "Revamp Inac", "Does Not Exist")  # ne doit pas lever
+
+
+class TestDeleteReportFile:
+    def test_removes_only_the_targeted_file(self, tmp_path, isolated_output):
+        report = _make_report(tmp_path)
+        dest_path = archive.archive_report(report, "Germany", "Revamp Inac", "SEQ 1", mode="wording")
+        other_report = _make_report(tmp_path, name="other.xlsx")
+        other_dest_path = archive.archive_report(other_report, "Germany", "Revamp Inac", "SEQ 2", mode="wording")
+
+        archive.delete_report_file(dest_path)
+
+        assert not os.path.exists(dest_path)
+        assert os.path.exists(other_dest_path)  # aucun autre fichier touche
+
+    def test_missing_file_is_a_no_op(self, tmp_path, isolated_output):
+        archive.delete_report_file(str(tmp_path / "does_not_exist.xlsx"))  # ne doit pas lever
+
+    def test_empty_or_none_path_is_a_no_op(self, isolated_output):
+        archive.delete_report_file("")
+        archive.delete_report_file(None)
+
+
+def _db_timestamp_of(report_path):
+    """Convertit le suffixe horodatage d'un nom de fichier archive
+    ("..._YYYYMMDD_HHMMSS.xlsx", voir archive_report) au format stocke en
+    base par qa.history.record_run ("YYYY-MM-DD HH:MM:SS") - les deux sont
+    generes a partir du meme instant reel (voir home._do_archive), donc
+    cette conversion reproduit exactement ce qu'un run reel aurait en base."""
+    file_timestamp = os.path.basename(report_path).rsplit(".", 1)[0].rsplit("_", 2)
+    date_part, time_part = file_timestamp[-2], file_timestamp[-1]
+    return (
+        f"{date_part[0:4]}-{date_part[4:6]}-{date_part[6:8]} "
+        f"{time_part[0:2]}:{time_part[2:4]}:{time_part[4:6]}"
+    )
+
+
+class TestFindReportFileByTimestamp:
+    def test_finds_the_file_matching_the_given_timestamp(self, tmp_path, isolated_output):
+        report = _make_report(tmp_path)
+        dest_path = archive.archive_report(report, "Germany", "Revamp Inac", "SEQ 1", mode="wording")
+
+        found = archive.find_report_file_by_timestamp(
+            "Germany", "Revamp Inac", "SEQ 1", "wording", _db_timestamp_of(dest_path)
+        )
+
+        assert found == dest_path
+
+    def test_returns_none_when_no_file_matches_the_timestamp(self, tmp_path, isolated_output):
+        report = _make_report(tmp_path)
+        archive.archive_report(report, "Germany", "Revamp Inac", "SEQ 1", mode="wording")
+
+        found = archive.find_report_file_by_timestamp(
+            "Germany", "Revamp Inac", "SEQ 1", "wording", "2000-01-01 00:00:00"
+        )
+
+        assert found is None
+
+    def test_only_matches_the_requested_mode(self, tmp_path, isolated_output):
+        # Pas de collision de nom de fichier possible entre modes differents
+        # (prefixe QA_wording_/QA_url_, voir archive_report) - pas besoin de
+        # fake_incrementing_datetime ici, meme si les deux archivages
+        # tombent dans la meme seconde.
+        wording_report = _make_report(tmp_path, name="wording.xlsx")
+        wording_dest = archive.archive_report(wording_report, "Germany", "Revamp Inac", "SEQ 1", mode="wording")
+        url_report = _make_report(tmp_path, name="url.xlsx")
+        archive.archive_report(url_report, "Germany", "Revamp Inac", "SEQ 1", mode="url")
+
+        found = archive.find_report_file_by_timestamp(
+            "Germany", "Revamp Inac", "SEQ 1", "wording", _db_timestamp_of(wording_dest)
+        )
+
+        assert found == wording_dest
+
+    def test_returns_none_when_no_reports_exist(self, isolated_output):
+        found = archive.find_report_file_by_timestamp(
+            "Germany", "Revamp Inac", "Does Not Exist", "wording", "2026-03-04 09:30:15"
+        )
+        assert found is None
+
+    def test_returns_none_for_an_unparseable_timestamp(self, tmp_path, isolated_output):
+        report = _make_report(tmp_path)
+        archive.archive_report(report, "Germany", "Revamp Inac", "SEQ 1", mode="wording")
+
+        assert archive.find_report_file_by_timestamp(
+            "Germany", "Revamp Inac", "SEQ 1", "wording", "not-a-timestamp"
+        ) is None
+        assert archive.find_report_file_by_timestamp(
+            "Germany", "Revamp Inac", "SEQ 1", "wording", None
+        ) is None
 
 
 class TestMoveSequenceDir:

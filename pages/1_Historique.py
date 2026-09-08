@@ -14,13 +14,21 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from qa.archive import delete_sequence_dir, list_reports, move_sequence_dir
+from qa.archive import (
+    delete_report_file,
+    delete_sequence_dir,
+    find_report_file_by_timestamp,
+    list_reports,
+    move_sequence_dir,
+)
 from qa.classification import migrate_legacy_loyalty_sequences
+from qa.config import KEEP_REPORTS
 from qa.history import (
     HISTORY_PATH,
     aggregate_error_types,
     build_history_tree,
     delete_classification,
+    delete_run,
     error_type_monthly_trend,
     export_history_csv,
     export_history_excel,
@@ -36,7 +44,38 @@ st.set_page_config(page_title="Historique QA", layout="wide")
 st.title("📈 Historique QA")
 st.page_link("home.py", label="⬅️ Retour à l'outil QA")
 
+# Affiche puis efface un toast de confirmation laisse en attente par le run
+# PRECEDENT (voir _queue_toast plus bas) - st.toast() appele juste avant un
+# st.rerun() (meme run) ne s'affiche jamais dans cette version de Streamlit :
+# verifie manuellement, le conteneur du toast est cree mais reste vide, le
+# rerun l'evacue avant qu'il n'ait eu la moindre chance de s'afficher. En le
+# posant plutot en attente puis en l'affichant ici, au tout debut du run
+# SUIVANT (donc apres que le rerun ait deja eu lieu), le toast a le temps
+# d'etre reellement vu.
+if st.session_state.get("_pending_toast"):
+    st.toast(st.session_state.pop("_pending_toast"))
+
+
+def _queue_toast(message: str) -> None:
+    """Programme un toast de confirmation pour le tout prochain rerun (voir
+    ci-dessus) - a utiliser a la place de st.toast() direct partout ou un
+    st.rerun() suit dans le meme bloc, sinon le message ne s'affiche
+    jamais."""
+    st.session_state["_pending_toast"] = message
+
+
 MODE_LABELS = {"wording": "📝 Wording", "url": "🔗 URL", "combined": "🧩 Combiné"}
+
+# Nombre de rapports affiches (boutons de telechargement) par type dans
+# "Rapports disponibles" - volontairement plus petit que KEEP_REPORTS (qui,
+# lui, gouverne combien sont reellement GARDES SUR LE DISQUE, voir
+# qa/config.py) : les rapports au-dela de ce nombre restent conserves en
+# "backup" silencieux, jamais montres tant qu'ils ne sont pas les 2 plus
+# recents - si l'un des 2 affiches est retire (rotation normale, ou
+# "Supprimer une comparaison de l'historique" plus bas), l'affichage se
+# recompose automatiquement avec le suivant encore en reserve plutot que de
+# retomber a un seul rapport affiche.
+DISPLAYED_REPORTS = 2
 
 if "history_nav" not in st.session_state:
     st.session_state["history_nav"] = {"country": None, "trigger": None, "sequence": None}
@@ -593,10 +632,18 @@ else:
         "dès que les deux sont disponibles, un rapport combiné."
     )
 
-    st.markdown("**Rapports disponibles (les 2 plus récents par type, les précédents sont supprimés automatiquement) :**")
+    st.markdown("**Rapports disponibles (les 2 plus récents par type) :**")
     any_report = False
     for mode, label in MODE_LABELS.items():
-        reports = list_reports(country, trigger, sequence, mode=mode)
+        # Seuls les 2 plus recents sont AFFICHES (meme paire que le diff
+        # ci-dessous, voir DISPLAYED_REPORTS) - qa.archive.list_reports en
+        # garde en realite jusqu'a KEEP_REPORTS (4) sur le disque, en
+        # "backup" silencieux : si l'un des 2 affiches est retire (rotation,
+        # ou "Supprimer une comparaison" ci-dessous), la paire affichee se
+        # recompose automatiquement au rerun suivant en piochant dans ce qui
+        # reste - sans jamais exposer plus de 2 boutons de telechargement a
+        # la fois.
+        reports = list_reports(country, trigger, sequence, mode=mode)[:DISPLAYED_REPORTS]
         if not reports:
             continue
         any_report = True
@@ -648,6 +695,82 @@ else:
             use_container_width=True,
             hide_index=True
         )
+
+        with st.expander("🗑️ Supprimer une comparaison de l'historique"):
+            st.caption(
+                "Retire un run précis de l'historique de cette séquence (ex: comparaison lancée "
+                "par erreur, composants génériques oubliés...) sans toucher au reste — pour qu'il "
+                "ne fausse plus le score de référence des prochaines alertes de régression, les "
+                "statistiques d'erreurs agrégées, ni le graphique d'évolution ci-dessus. Le rapport "
+                "Excel correspondant est supprimé avec s'il est encore sur le disque (jusqu'à "
+                f"{KEEP_REPORTS} par type y sont conservés, même au-delà des 2 affichés ci-dessus) — "
+                "si l'un des 2 rapports affichés est retiré, l'affichage se recompose automatiquement "
+                "avec le suivant encore en réserve."
+            )
+
+            # Le plus recent en tete, comme le tableau ci-dessus (.iloc[::-1]) -
+            # c'est generalement celui qu'on vient de se tromper a archiver.
+            run_choices = list(reversed(entries))
+
+            def _format_run_choice(entry):
+                type_label = MODE_LABELS.get(entry["mode"], entry["mode"])
+                return f"{entry['timestamp']} — {type_label} — {entry['score']}% ({entry['ok']}/{entry['total']} OK)"
+
+            run_to_delete = st.selectbox(
+                "Comparaison à supprimer",
+                options=run_choices,
+                format_func=_format_run_choice,
+                key=f"delete_run_choice_{country}_{trigger}_{sequence}",
+            )
+            # La cle de la case a cocher inclut un "nonce" incremente juste
+            # apres chaque suppression reussie (voir plus bas) : un simple
+            # del st.session_state[cle] (ou une reassignation a False) sur la
+            # cle du widget deja instancie plus haut CETTE MEME execution
+            # s'est avere peu fiable cote navigateur reel (la case restait
+            # visuellement cochee malgre une valeur Python bien retombee a
+            # False) - repartir sur une cle DIFFERENTE force Streamlit a
+            # traiter la case comme un widget entierement neuf au prochain
+            # rerun, sans aucune ambiguite possible sur son etat.
+            confirm_reset_key = f"confirm_delete_run_reset_{country}_{trigger}_{sequence}"
+            confirm_reset_nonce = st.session_state.get(confirm_reset_key, 0)
+            confirm_delete_run_key = f"confirm_delete_run_{country}_{trigger}_{sequence}_{confirm_reset_nonce}"
+            confirm_delete_run = st.checkbox(
+                "Je confirme vouloir supprimer cette comparaison définitivement",
+                key=confirm_delete_run_key,
+            )
+            if st.button(
+                "🗑️ Supprimer cette comparaison",
+                disabled=not confirm_delete_run,
+                key=f"delete_run_btn_{country}_{trigger}_{sequence}",
+            ):
+                deleted_report_path = delete_run(run_to_delete["id"])
+                if not deleted_report_path:
+                    # Run archive avant l'ajout de report_path (voir
+                    # qa.history._ensure_report_path_column) : repli par
+                    # correspondance de date sur les rapports encore sur
+                    # disque, sinon son fichier resterait affiche dans
+                    # "Rapports disponibles" ci-dessus malgre la suppression.
+                    deleted_report_path = find_report_file_by_timestamp(
+                        country, trigger, sequence, run_to_delete["mode"], run_to_delete["timestamp"]
+                    )
+                delete_report_file(deleted_report_path)
+                # Ce que _load_history_overview retournerait vient de changer
+                # (delete_run) - meme raison que dans les formulaires de
+                # renommage/suppression de sequence plus bas.
+                _bump_history_version()
+                # Fait pointer la case de confirmation vers une cle NEUVE au
+                # prochain rerun (voir plus haut) : decochee par construction,
+                # pour qu'un second clic sur le bouton (desormais reactive
+                # par le nouveau st.selectbox par defaut sur le run suivant)
+                # ne supprime jamais une autre comparaison par erreur sans
+                # nouvelle confirmation explicite.
+                st.session_state[confirm_reset_key] = confirm_reset_nonce + 1
+                # _queue_toast (pas st.toast direct, voir sa docstring) :
+                # necessaire pour que la confirmation soit reellement vue,
+                # pas juste posee puis effacee instantanement par le
+                # st.rerun() juste en-dessous avant d'avoir pu s'afficher.
+                _queue_toast("🗑️ Comparaison supprimée de l'historique.")
+                st.rerun()
     else:
         st.caption("Aucun historique de score pour cette séquence.")
 
