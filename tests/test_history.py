@@ -21,10 +21,12 @@ from qa.history import (
     load_classified_history,
     load_history,
     load_sequence_history,
+    latest_scores_with_delta,
     migrate_legacy_jsonl_history,
     prune_history,
     record_run,
     rewrite_classification,
+    set_run_excluded,
 )
 
 
@@ -312,6 +314,172 @@ class TestFindRegression:
         assert find_regression("Germany", "T", "SEQ 1", "wording", 89.0, threshold=5, path=path) is None
         result = find_regression("Germany", "T", "SEQ 1", "wording", 80.0, threshold=5, path=path)
         assert result["previous_score"] == 90.0
+
+    def test_excluded_runs_are_never_used_as_the_reference(self, tmp_path):
+        path = str(tmp_path / "history.jsonl")
+        record_run("SEQ 1", "wording", 10, 3, 7, 30.0, path=path, country="Germany", trigger="T", sequence="SEQ 1")
+        record_run("SEQ 1", "wording", 10, 9, 1, 90.0, path=path, country="Germany", trigger="T", sequence="SEQ 1")
+        latest_id = load_sequence_history("Germany", "T", "SEQ 1", path=path)[-1]["id"]
+        set_run_excluded(latest_id, True, path=path)
+
+        # Le run a 90.0 est exclu : la reference retombe sur celui a 30.0,
+        # pas sur le run exclu (qui ne doit ni servir de reference, ni etre
+        # lui-meme signale comme regression).
+        result = find_regression("Germany", "T", "SEQ 1", "wording", 25.0, threshold=5, path=path)
+        assert result["previous_score"] == 30.0
+
+
+class TestLatestScoresWithDelta:
+    def test_computes_delta_against_the_second_to_last_run(self, tmp_path):
+        path = str(tmp_path / "history.db")
+        record_run("SEQ 1", "wording", 10, 3, 7, 30.0, path=path, country="Germany", trigger="T", sequence="SEQ 1")
+        record_run("SEQ 1", "wording", 10, 9, 1, 90.0, path=path, country="Germany", trigger="T", sequence="SEQ 1")
+
+        rows = latest_scores_with_delta(load_classified_history(path=path))
+
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["country"] == "Germany" and row["trigger"] == "T" and row["sequence"] == "SEQ 1"
+        assert row["mode"] == "wording"
+        assert row["latest_score"] == 90.0
+        assert row["previous_score"] == 30.0
+        assert row["delta"] == 60.0
+
+    def test_a_single_run_has_no_delta_and_sorts_last(self, tmp_path):
+        path = str(tmp_path / "history.db")
+        record_run(
+            "SEQ 1", "wording", 10, 1, 9, 10.0, path=path, country="Germany", trigger="T", sequence="SEQ 1"
+        )  # un seul run -> pas de delta
+        record_run("SEQ 2", "wording", 10, 9, 1, 90.0, path=path, country="Germany", trigger="T", sequence="SEQ 2")
+        record_run(
+            "SEQ 2", "wording", 10, 3, 7, 30.0, path=path, country="Germany", trigger="T", sequence="SEQ 2"
+        )  # regression -60
+
+        rows = latest_scores_with_delta(load_classified_history(path=path))
+
+        assert len(rows) == 2
+        assert rows[0]["sequence"] == "SEQ 2" and rows[0]["delta"] == -60.0
+        assert rows[1]["sequence"] == "SEQ 1" and rows[1]["delta"] is None and rows[1]["previous_score"] is None
+
+    def test_sorted_worst_regression_first(self, tmp_path):
+        path = str(tmp_path / "history.db")
+        record_run("SEQ 1", "wording", 10, 9, 1, 90.0, path=path, country="Germany", trigger="T", sequence="SEQ 1")
+        record_run("SEQ 1", "wording", 10, 8, 2, 80.0, path=path, country="Germany", trigger="T", sequence="SEQ 1")  # -10
+        record_run("SEQ 2", "wording", 10, 9, 1, 90.0, path=path, country="Germany", trigger="T", sequence="SEQ 2")
+        record_run("SEQ 2", "wording", 10, 4, 6, 40.0, path=path, country="Germany", trigger="T", sequence="SEQ 2")  # -50
+        record_run("SEQ 3", "wording", 10, 5, 5, 50.0, path=path, country="Germany", trigger="T", sequence="SEQ 3")
+        record_run("SEQ 3", "wording", 10, 6, 4, 60.0, path=path, country="Germany", trigger="T", sequence="SEQ 3")  # +10
+
+        rows = latest_scores_with_delta(load_classified_history(path=path))
+
+        assert [r["sequence"] for r in rows] == ["SEQ 2", "SEQ 1", "SEQ 3"]
+
+    def test_different_modes_of_the_same_sequence_are_separate_groups(self, tmp_path):
+        path = str(tmp_path / "history.db")
+        record_run("SEQ 1", "wording", 10, 9, 1, 90.0, path=path, country="Germany", trigger="T", sequence="SEQ 1")
+        record_run("SEQ 1", "url", 20, 20, 0, 100.0, path=path, country="Germany", trigger="T", sequence="SEQ 1")
+
+        rows = latest_scores_with_delta(load_classified_history(path=path))
+
+        assert {r["mode"] for r in rows} == {"wording", "url"}
+        assert len(rows) == 2
+
+    def test_excluded_runs_are_ignored_entirely(self, tmp_path):
+        path = str(tmp_path / "history.db")
+        record_run("SEQ 1", "wording", 10, 3, 7, 30.0, path=path, country="Germany", trigger="T", sequence="SEQ 1")
+        record_run("SEQ 1", "wording", 10, 9, 1, 90.0, path=path, country="Germany", trigger="T", sequence="SEQ 1")
+        latest_id = load_sequence_history("Germany", "T", "SEQ 1", path=path)[-1]["id"]
+        set_run_excluded(latest_id, True, path=path)
+
+        rows = latest_scores_with_delta(load_classified_history(path=path))
+
+        # Le run exclu (90.0) n'est ni le "dernier" ni la reference : seul
+        # le run non exclu (30.0) reste, sans deuxieme run -> pas de delta.
+        assert len(rows) == 1
+        assert rows[0]["latest_score"] == 30.0
+        assert rows[0]["delta"] is None
+
+    def test_empty_entries_returns_empty_list(self):
+        assert latest_scores_with_delta([]) == []
+
+
+class TestSetRunExcluded:
+    def test_toggles_the_flag_and_is_reversible(self, tmp_path):
+        path = str(tmp_path / "history.db")
+        record_run(
+            "SEQ 1", "wording", total=10, ok=8, ko=2, score=80.0, path=path,
+            country="Germany", trigger="T", sequence="SEQ 1",
+        )
+        run_id = load_sequence_history("Germany", "T", "SEQ 1", path=path)[0]["id"]
+        assert load_sequence_history("Germany", "T", "SEQ 1", path=path)[0]["excluded"] is False
+
+        assert set_run_excluded(run_id, True, path=path) is True
+        assert load_sequence_history("Germany", "T", "SEQ 1", path=path)[0]["excluded"] is True
+
+        assert set_run_excluded(run_id, False, path=path) is True
+        assert load_sequence_history("Germany", "T", "SEQ 1", path=path)[0]["excluded"] is False
+
+    def test_does_not_touch_other_runs(self, tmp_path):
+        path = str(tmp_path / "history.db")
+        record_run(
+            "SEQ 1", "wording", total=10, ok=8, ko=2, score=80.0, path=path,
+            country="Germany", trigger="T", sequence="SEQ 1",
+        )
+        record_run(
+            "SEQ 1", "wording", total=10, ok=9, ko=1, score=90.0, path=path,
+            country="Germany", trigger="T", sequence="SEQ 1",
+        )
+        entries = load_sequence_history("Germany", "T", "SEQ 1", path=path)
+        set_run_excluded(entries[0]["id"], True, path=path)
+
+        entries_after = load_sequence_history("Germany", "T", "SEQ 1", path=path)
+        assert entries_after[0]["excluded"] is True
+        assert entries_after[1]["excluded"] is False
+
+    def test_unknown_id_returns_false(self, tmp_path):
+        path = str(tmp_path / "history.db")
+        record_run("SEQ 1", "wording", total=10, ok=8, ko=2, score=80.0, path=path)
+        assert set_run_excluded(999999, True, path=path) is False
+
+    def test_on_missing_file_returns_false(self, tmp_path):
+        path = str(tmp_path / "does_not_exist.db")
+        assert set_run_excluded(1, True, path=path) is False
+
+    def test_existing_database_created_before_excluded_is_transparently_upgraded(self, tmp_path):
+        # Meme garde-fou que pour report_path (voir TestDeleteRun) : une base
+        # creee avant l'ajout de la colonne excluded doit continuer a
+        # fonctionner via _ensure_schema_upgrades, pas seulement pour les
+        # bases neuves.
+        path = str(tmp_path / "history.db")
+        with contextlib.closing(history._connect(path)) as conn:
+            conn.executescript("""
+                CREATE TABLE runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    sheet TEXT NOT NULL,
+                    mode TEXT NOT NULL,
+                    total INTEGER NOT NULL,
+                    ok INTEGER NOT NULL,
+                    ko INTEGER NOT NULL,
+                    score REAL NOT NULL,
+                    country TEXT,
+                    trigger_name TEXT,
+                    sequence TEXT,
+                    error_types TEXT,
+                    tested_by TEXT,
+                    report_path TEXT
+                );
+            """)
+            conn.execute(
+                "INSERT INTO runs (timestamp, sheet, mode, total, ok, ko, score, "
+                "country, trigger_name, sequence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ("2026-01-01 10:00:00", "SEQ 1", "wording", 10, 8, 2, 80.0, "Germany", "T", "SEQ 1"),
+            )
+            conn.commit()
+
+        run_id = load_sequence_history("Germany", "T", "SEQ 1", path=path)[0]["id"]
+        assert set_run_excluded(run_id, True, path=path) is True
+        assert load_sequence_history("Germany", "T", "SEQ 1", path=path)[0]["excluded"] is True
 
 
 class TestClassifiedHistory:

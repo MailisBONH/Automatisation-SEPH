@@ -22,7 +22,8 @@ from qa.archive import (
     move_sequence_dir,
 )
 from qa.classification import migrate_legacy_loyalty_sequences
-from qa.config import KEEP_REPORTS
+from qa.config import KEEP_REPORTS, TEAMS_WEBHOOK_URL
+from qa.digest import send_digest
 from qa.history import (
     HISTORY_PATH,
     aggregate_error_types,
@@ -32,10 +33,12 @@ from qa.history import (
     error_type_monthly_trend,
     export_history_csv,
     export_history_excel,
+    latest_scores_with_delta,
     load_classified_history,
     load_sequence_history,
     migrate_legacy_jsonl_history,
     rewrite_classification,
+    set_run_excluded,
 )
 from qa.report_diff import diff_uploaded_reports, load_last_two_reports_diff
 
@@ -257,9 +260,14 @@ elif nav["sequence"] not in tree[nav["country"]][nav["trigger"]]:
 def _latest_relevant_entry(entries):
     """Prefere la derniere entree 'combined' (vue la plus complete d'une
     sequence) si elle existe, sinon la derniere entree disponible quel que
-    soit son type."""
-    combined = [e for e in entries if e.get("mode") == "combined"]
-    return combined[-1] if combined else entries[-1]
+    soit son type. Ignore les entrees exclues des stats (voir
+    qa.history.set_run_excluded) tant qu'il en reste au moins une non
+    exclue - une sequence dont TOUS les runs sont exclus reste malgre tout
+    representee (repli sur la liste complete) plutot que de disparaitre
+    silencieusement de la vue d'ensemble."""
+    non_excluded = [e for e in entries if not e.get("excluded")] or entries
+    combined = [e for e in non_excluded if e.get("mode") == "combined"]
+    return combined[-1] if combined else non_excluded[-1]
 
 
 def _overview_rows(tree):
@@ -519,8 +527,12 @@ with st.expander("📊 Statistiques des erreurs (toutes séquences)", expanded=F
     # d'une sequence testee en Wording + URL seraient comptees deux fois
     # (une fois via wording+url, une fois de plus via combined) par rapport
     # a une sequence testee dans un seul mode - faussant silencieusement le
-    # classement des types d'erreur les plus frequents.
-    error_stats_entries = [e for e in all_classified_entries if e.get("mode") != "combined"]
+    # classement des types d'erreur les plus frequents. Les runs exclus
+    # (voir qa.history.set_run_excluded, panneau "Gerer les comparaisons"
+    # plus bas) sont egalement ecartes : c'est exactement leur raison d'etre.
+    error_stats_entries = [
+        e for e in all_classified_entries if e.get("mode") != "combined" and not e.get("excluded")
+    ]
     error_totals = aggregate_error_types(error_stats_entries)
 
     if error_totals:
@@ -550,6 +562,57 @@ with st.expander("📊 Statistiques des erreurs (toutes séquences)", expanded=F
             "Aucune statistique d'erreur disponible pour l'instant — ce panneau se remplit à partir des "
             "prochains runs archivés (les runs déjà archivés avant cette fonctionnalité n'ont pas de détail "
             "par type d'erreur)."
+        )
+
+# =========================
+# VUE TRANSVERSE : SCORES ET REGRESSIONS (toutes sequences)
+# =========================
+with st.expander("📉 Régressions et scores par séquence (toutes séquences)", expanded=False):
+    st.caption(
+        "Classe chaque séquence/mode par évolution de score entre ses 2 derniers runs — la plus "
+        "grosse régression en tête — pour repérer un problème sans ouvrir chaque dossier un par un. "
+        "Équivalent transverse de l'alerte de régression déclenchée à chaque archivage "
+        "(`qa/history.find_regression`), mais visible à tout moment pour l'ensemble de l'historique. "
+        "Les runs exclus des stats (voir « 🗑️ Gérer les comparaisons » dans une séquence) n'y "
+        "participent pas."
+    )
+    delta_rows = latest_scores_with_delta(all_classified_entries)
+    if delta_rows:
+        delta_df = pd.DataFrame([
+            {
+                "Pays": r["country"],
+                "Trigger": r["trigger"],
+                "Séquence": r["sequence"],
+                "Type": MODE_LABELS.get(r["mode"], r["mode"]),
+                "Dernier test": r["latest_timestamp"],
+                "% OK actuel": r["latest_score"],
+                "% OK précédent": r["previous_score"],
+                "Δ (pts)": r["delta"],
+            }
+            for r in delta_rows
+        ])
+        st.dataframe(delta_df, use_container_width=True, hide_index=True)
+    else:
+        st.caption("Aucune séquence classée pour l'instant.")
+
+    st.markdown("---")
+    if TEAMS_WEBHOOK_URL:
+        st.caption(
+            "Un digest identique (régressions détectées + compte de séquences suivies) peut être "
+            "envoyé automatiquement sur ce même canal Teams via une tâche planifiée externe "
+            "(`python -m qa.digest`, voir le README) — ce bouton envoie le même contenu "
+            "immédiatement, sans attendre la prochaine exécution planifiée."
+        )
+        if st.button("📤 Envoyer le digest maintenant sur Teams", disabled=not delta_rows):
+            if send_digest():
+                _queue_toast("📤 Digest envoyé sur Teams.")
+            else:
+                _queue_toast("⚠️ Échec de l'envoi du digest (Teams indisponible ou requête refusée).")
+            st.rerun()
+    else:
+        st.caption(
+            "📤 Digest Teams non configuré (variable d'environnement `QA_TEAMS_WEBHOOK_URL` absente) — "
+            "voir [Notification Teams](#notification-teams-optionnelle-non-activée-par-défaut) dans le README."
         )
 
 st.divider()
@@ -663,10 +726,16 @@ else:
         st.caption("Aucun rapport disponible sur le disque pour cette séquence.")
 
     entries = load_sequence_history(country, trigger, sequence)
+    # Le graphique/tableau d'evolution ne doit refleter que les runs
+    # "reels" : un run exclu (voir qa.history.set_run_excluded, panneau
+    # "Gerer les comparaisons" plus bas) reste dans `entries` (le menu de
+    # gestion doit pouvoir le retrouver pour le reinclure) mais est ecarte
+    # ici, comme des stats d'erreurs et de l'alerte de regression.
+    chart_entries = [e for e in entries if not e.get("excluded")]
 
     st.markdown("**Évolution du pourcentage de OK depuis le premier test :**")
-    if entries:
-        history_df = pd.DataFrame(entries)
+    if chart_entries:
+        history_df = pd.DataFrame(chart_entries)
         history_df["Type"] = history_df["mode"].map(MODE_LABELS).fillna(history_df["mode"])
         # tested_by n'existe comme colonne que si au moins une entree l'a
         # (voir qa.history.record_run, colonne absente pour les runs
@@ -695,14 +764,26 @@ else:
             use_container_width=True,
             hide_index=True
         )
+    elif entries:
+        # Tous les runs existent (entries non vide) mais sont tous exclus
+        # des stats (voir plus bas) - cas rare, mais ne doit pas etre
+        # confondu avec "aucun historique du tout".
+        st.caption(
+            "Tous les runs de cette séquence sont actuellement exclus des statistiques "
+            "(voir « 🗑️ Gérer les comparaisons de l'historique » ci-dessous pour les réinclure)."
+        )
+    else:
+        st.caption("Aucun historique de score pour cette séquence.")
 
-        with st.expander("🗑️ Supprimer une comparaison de l'historique"):
+    if entries:
+        with st.expander("🗑️ Gérer les comparaisons de l'historique"):
             st.caption(
-                "Retire un run précis de l'historique de cette séquence (ex: comparaison lancée "
-                "par erreur, composants génériques oubliés...) sans toucher au reste — pour qu'il "
-                "ne fausse plus le score de référence des prochaines alertes de régression, les "
-                "statistiques d'erreurs agrégées, ni le graphique d'évolution ci-dessus. Le rapport "
-                "Excel correspondant est supprimé avec s'il est encore sur le disque (jusqu'à "
+                "Agit sur un run précis de l'historique de cette séquence (ex: comparaison lancée "
+                "par erreur, composants génériques oubliés...), sans toucher au reste. « Exclure des "
+                "stats » retire son poids du score de référence des prochaines alertes de régression, "
+                "des statistiques d'erreurs agrégées et du graphique d'évolution ci-dessus tout en "
+                "gardant une trace (réversible) ; « Supprimer » l'efface définitivement, lui et son "
+                "rapport Excel archivé s'il est encore sur le disque (jusqu'à "
                 f"{KEEP_REPORTS} par type y sont conservés, même au-delà des 2 affichés ci-dessus) — "
                 "si l'un des 2 rapports affichés est retiré, l'affichage se recompose automatiquement "
                 "avec le suivant encore en réserve."
@@ -710,69 +791,103 @@ else:
 
             # Le plus recent en tete, comme le tableau ci-dessus (.iloc[::-1]) -
             # c'est generalement celui qu'on vient de se tromper a archiver.
+            # Liste TOUS les runs (y compris deja exclus, marques ci-dessous) :
+            # c'est le seul endroit d'ou un run exclu peut etre retrouve pour
+            # etre reinclus.
             run_choices = list(reversed(entries))
 
             def _format_run_choice(entry):
                 type_label = MODE_LABELS.get(entry["mode"], entry["mode"])
-                return f"{entry['timestamp']} — {type_label} — {entry['score']}% ({entry['ok']}/{entry['total']} OK)"
+                excluded_suffix = " — 🚫 exclu des stats" if entry.get("excluded") else ""
+                return (
+                    f"{entry['timestamp']} — {type_label} — {entry['score']}% "
+                    f"({entry['ok']}/{entry['total']} OK){excluded_suffix}"
+                )
 
-            run_to_delete = st.selectbox(
-                "Comparaison à supprimer",
+            run_selected = st.selectbox(
+                "Comparaison",
                 options=run_choices,
                 format_func=_format_run_choice,
-                key=f"delete_run_choice_{country}_{trigger}_{sequence}",
+                key=f"manage_run_choice_{country}_{trigger}_{sequence}",
             )
-            # La cle de la case a cocher inclut un "nonce" incremente juste
-            # apres chaque suppression reussie (voir plus bas) : un simple
-            # del st.session_state[cle] (ou une reassignation a False) sur la
-            # cle du widget deja instancie plus haut CETTE MEME execution
-            # s'est avere peu fiable cote navigateur reel (la case restait
-            # visuellement cochee malgre une valeur Python bien retombee a
-            # False) - repartir sur une cle DIFFERENTE force Streamlit a
-            # traiter la case comme un widget entierement neuf au prochain
-            # rerun, sans aucune ambiguite possible sur son etat.
-            confirm_reset_key = f"confirm_delete_run_reset_{country}_{trigger}_{sequence}"
-            confirm_reset_nonce = st.session_state.get(confirm_reset_key, 0)
-            confirm_delete_run_key = f"confirm_delete_run_{country}_{trigger}_{sequence}_{confirm_reset_nonce}"
-            confirm_delete_run = st.checkbox(
-                "Je confirme vouloir supprimer cette comparaison définitivement",
-                key=confirm_delete_run_key,
-            )
-            if st.button(
-                "🗑️ Supprimer cette comparaison",
-                disabled=not confirm_delete_run,
-                key=f"delete_run_btn_{country}_{trigger}_{sequence}",
-            ):
-                deleted_report_path = delete_run(run_to_delete["id"])
-                if not deleted_report_path:
-                    # Run archive avant l'ajout de report_path (voir
-                    # qa.history._ensure_report_path_column) : repli par
-                    # correspondance de date sur les rapports encore sur
-                    # disque, sinon son fichier resterait affiche dans
-                    # "Rapports disponibles" ci-dessus malgre la suppression.
-                    deleted_report_path = find_report_file_by_timestamp(
-                        country, trigger, sequence, run_to_delete["mode"], run_to_delete["timestamp"]
-                    )
-                delete_report_file(deleted_report_path)
-                # Ce que _load_history_overview retournerait vient de changer
-                # (delete_run) - meme raison que dans les formulaires de
-                # renommage/suppression de sequence plus bas.
-                _bump_history_version()
-                # Fait pointer la case de confirmation vers une cle NEUVE au
-                # prochain rerun (voir plus haut) : decochee par construction,
-                # pour qu'un second clic sur le bouton (desormais reactive
-                # par le nouveau st.selectbox par defaut sur le run suivant)
-                # ne supprime jamais une autre comparaison par erreur sans
-                # nouvelle confirmation explicite.
-                st.session_state[confirm_reset_key] = confirm_reset_nonce + 1
-                # _queue_toast (pas st.toast direct, voir sa docstring) :
-                # necessaire pour que la confirmation soit reellement vue,
-                # pas juste posee puis effacee instantanement par le
-                # st.rerun() juste en-dessous avant d'avoir pu s'afficher.
-                _queue_toast("🗑️ Comparaison supprimée de l'historique.")
-                st.rerun()
-    else:
-        st.caption("Aucun historique de score pour cette séquence.")
+
+            st.markdown("---")
+            exclude_col, delete_col = st.columns(2)
+
+            with exclude_col:
+                if run_selected.get("excluded"):
+                    st.caption("🚫 Actuellement exclue des stats de référence.")
+                    if st.button(
+                        "↩️ Réinclure dans les stats",
+                        key=f"reinclude_run_btn_{country}_{trigger}_{sequence}",
+                    ):
+                        set_run_excluded(run_selected["id"], False)
+                        _bump_history_version()
+                        _queue_toast("↩️ Comparaison réincluse dans les statistiques.")
+                        st.rerun()
+                else:
+                    st.caption("Compte actuellement dans le score de référence et les stats.")
+                    if st.button(
+                        "🚫 Exclure des stats",
+                        key=f"exclude_run_btn_{country}_{trigger}_{sequence}",
+                    ):
+                        set_run_excluded(run_selected["id"], True)
+                        _bump_history_version()
+                        _queue_toast("🚫 Comparaison exclue des statistiques.")
+                        st.rerun()
+
+            with delete_col:
+                # La cle de la case a cocher inclut un "nonce" incremente juste
+                # apres chaque suppression reussie (voir plus bas) : un simple
+                # del st.session_state[cle] (ou une reassignation a False) sur la
+                # cle du widget deja instancie plus haut CETTE MEME execution
+                # s'est avere peu fiable cote navigateur reel (la case restait
+                # visuellement cochee malgre une valeur Python bien retombee a
+                # False) - repartir sur une cle DIFFERENTE force Streamlit a
+                # traiter la case comme un widget entierement neuf au prochain
+                # rerun, sans aucune ambiguite possible sur son etat.
+                confirm_reset_key = f"confirm_delete_run_reset_{country}_{trigger}_{sequence}"
+                confirm_reset_nonce = st.session_state.get(confirm_reset_key, 0)
+                confirm_delete_run_key = (
+                    f"confirm_delete_run_{country}_{trigger}_{sequence}_{confirm_reset_nonce}"
+                )
+                confirm_delete_run = st.checkbox(
+                    "Je confirme vouloir supprimer définitivement",
+                    key=confirm_delete_run_key,
+                )
+                if st.button(
+                    "🗑️ Supprimer cette comparaison",
+                    disabled=not confirm_delete_run,
+                    key=f"delete_run_btn_{country}_{trigger}_{sequence}",
+                ):
+                    deleted_report_path = delete_run(run_selected["id"])
+                    if not deleted_report_path:
+                        # Run archive avant l'ajout de report_path (voir
+                        # qa.history._ensure_report_path_column) : repli par
+                        # correspondance de date sur les rapports encore sur
+                        # disque, sinon son fichier resterait affiche dans
+                        # "Rapports disponibles" ci-dessus malgre la suppression.
+                        deleted_report_path = find_report_file_by_timestamp(
+                            country, trigger, sequence, run_selected["mode"], run_selected["timestamp"]
+                        )
+                    delete_report_file(deleted_report_path)
+                    # Ce que _load_history_overview retournerait vient de changer
+                    # (delete_run) - meme raison que dans les formulaires de
+                    # renommage/suppression de sequence plus bas.
+                    _bump_history_version()
+                    # Fait pointer la case de confirmation vers une cle NEUVE au
+                    # prochain rerun (voir plus haut) : decochee par construction,
+                    # pour qu'un second clic sur le bouton (desormais reactive
+                    # par le nouveau st.selectbox par defaut sur le run suivant)
+                    # ne supprime jamais une autre comparaison par erreur sans
+                    # nouvelle confirmation explicite.
+                    st.session_state[confirm_reset_key] = confirm_reset_nonce + 1
+                    # _queue_toast (pas st.toast direct, voir sa docstring) :
+                    # necessaire pour que la confirmation soit reellement vue,
+                    # pas juste posee puis effacee instantanement par le
+                    # st.rerun() juste en-dessous avant d'avoir pu s'afficher.
+                    _queue_toast("🗑️ Comparaison supprimée de l'historique.")
+                    st.rerun()
 
     # =========================
     # DIFF ENTRE LES 2 DERNIERS RAPPORTS

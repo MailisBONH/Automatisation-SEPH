@@ -74,11 +74,22 @@ CREATE TABLE IF NOT EXISTS runs (
     sequence TEXT,
     error_types TEXT,
     tested_by TEXT,
-    report_path TEXT
+    report_path TEXT,
+    excluded INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_runs_sheet ON runs(sheet);
 CREATE INDEX IF NOT EXISTS idx_runs_classification ON runs(country, trigger_name, sequence);
 """
+
+# Colonnes ajoutees apres la creation initiale de la table (voir
+# _ensure_schema_upgrades) : (nom, declaration SQL utilisee par ALTER TABLE).
+# _SCHEMA ci-dessus les inclut deja pour une base NEUVE (CREATE TABLE IF NOT
+# EXISTS ne touche pas une table existante) - cette liste ne sert qu'a mettre
+# a niveau une base creee avant l'ajout de chaque colonne.
+_SCHEMA_UPGRADES = [
+    ("report_path", "TEXT"),
+    ("excluded", "INTEGER NOT NULL DEFAULT 0"),
+]
 
 # Colonnes/placeholders de l'INSERT dans `runs`, partages entre record_run
 # (une ligne, conn.execute) et migrate_legacy_jsonl_history (plusieurs
@@ -93,19 +104,20 @@ _INSERT_RUN_SQL = (
 )
 
 
-def _ensure_report_path_column(conn: sqlite3.Connection) -> None:
-    """Ajoute la colonne report_path a une base existante creee avant son
-    introduction (voir record_run/delete_run) - `CREATE TABLE IF NOT EXISTS`
-    dans _SCHEMA ne modifie pas une table qui existe deja. Idempotent (ne
-    fait rien si la colonne est deja presente) et bon marche (une seule
-    requete PRAGMA en plus, pas de scan de la table), appelable sans
-    condition a chaque connexion (voir _with_connection) - meme principe que
-    l'ajout, en son temps, des colonnes error_types/tested_by, faite alors
-    directement dans _SCHEMA parce que la base ne contenait encore aucune
-    donnee reelle a cette epoque du projet."""
+def _ensure_schema_upgrades(conn: sqlite3.Connection) -> None:
+    """Ajoute a une base existante les colonnes introduites apres sa creation
+    initiale (voir _SCHEMA_UPGRADES) - `CREATE TABLE IF NOT EXISTS` dans
+    _SCHEMA ne modifie pas une table qui existe deja. Idempotent (ne fait
+    rien pour une colonne deja presente) et bon marche (une seule requete
+    PRAGMA en plus, pas de scan de la table), appelable sans condition a
+    chaque connexion (voir _with_connection) - meme principe que l'ajout, en
+    son temps, des colonnes error_types/tested_by, faite alors directement
+    dans _SCHEMA parce que la base ne contenait encore aucune donnee reelle a
+    cette epoque du projet."""
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(runs)").fetchall()}
-    if "report_path" not in columns:
-        conn.execute("ALTER TABLE runs ADD COLUMN report_path TEXT")
+    for name, decl in _SCHEMA_UPGRADES:
+        if name not in columns:
+            conn.execute(f"ALTER TABLE runs ADD COLUMN {name} {decl}")
 
 
 def _connect(path: str) -> sqlite3.Connection:
@@ -192,7 +204,7 @@ def _with_connection(path: str, fn, default=None, mutates: bool = False):
         try:
             with contextlib.closing(_connect(path)) as conn:
                 conn.executescript(_SCHEMA)
-                _ensure_report_path_column(conn)
+                _ensure_schema_upgrades(conn)
                 result = fn(conn)
         except (sqlite3.Error, OSError):
             return default
@@ -220,6 +232,7 @@ def _row_to_entry(row: sqlite3.Row) -> dict:
         "ok": row["ok"],
         "ko": row["ko"],
         "score": row["score"],
+        "excluded": bool(row["excluded"]),
     }
     if row["country"]:
         entry["country"] = row["country"]
@@ -556,8 +569,15 @@ def find_regression(country: str, trigger: str, sequence: str, mode: str, curren
 
     Retourne {"previous_score", "current_score", "delta"} si le score a
     baisse d'au moins `threshold` points de pourcentage, sinon None (pas
-    d'historique prealable pour ce mode, ou pas de regression)."""
-    entries = [e for e in load_sequence_history(country, trigger, sequence, path=path) if e.get("mode") == mode]
+    d'historique prealable pour ce mode, ou pas de regression). Les runs
+    exclus des stats (voir set_run_excluded) sont ignores : un run exclu
+    (ex. test manuel, erreur ponctuelle deja identifiee) ne doit ni servir
+    de reference "precedente" pour la comparaison, ni etre lui-meme detecte
+    comme regression."""
+    entries = [
+        e for e in load_sequence_history(country, trigger, sequence, path=path)
+        if e.get("mode") == mode and not e.get("excluded")
+    ]
     if not entries:
         return None
 
@@ -566,6 +586,57 @@ def find_regression(country: str, trigger: str, sequence: str, mode: str, curren
     if delta <= -threshold:
         return {"previous_score": previous_score, "current_score": current_score, "delta": delta}
     return None
+
+
+def latest_scores_with_delta(entries: list) -> list:
+    """
+    Vue transverse equivalente a find_regression, mais sur TOUT l'historique
+    classe (`entries`, voir load_classified_history) d'un coup plutot qu'une
+    seule (pays, trigger, sequence, mode) a la fois - pour que la page
+    Historique puisse reperer en un coup d'oeil les sequences qui regressent
+    ou qui restent chroniquement mauvaises, sans avoir a ouvrir chaque
+    dossier une par une pour le decouvrir.
+
+    Pour chaque (pays, trigger, sequence, mode) present dans `entries`,
+    calcule le score du dernier run et son delta par rapport a l'avant-
+    dernier run du meme groupe (si un deuxieme existe). Les runs exclus des
+    stats (voir set_run_excluded) sont ignores, comme find_regression : ni
+    reference, ni candidat au "dernier run" d'un groupe.
+
+    `entries` doit deja etre trie chronologiquement par groupe (l'ordre
+    naturel de load_classified_history/load_history, par id croissant) -
+    cette fonction ne re-trie jamais, seulement ne groupe puis ne prend les
+    2 derniers de chaque groupe dans l'ordre recu.
+
+    Retourne une liste de dicts {country, trigger, sequence, mode,
+    latest_score, latest_timestamp, previous_score, delta}, triee par delta
+    croissant (la plus grosse regression en tete ; les groupes sans
+    deuxieme run, delta=None, sont relegues en fin de liste) puis par
+    latest_score croissant a delta egal."""
+    groups = defaultdict(list)
+    for e in entries:
+        if e.get("excluded"):
+            continue
+        key = (e.get("country"), e.get("trigger"), e.get("sequence"), e.get("mode"))
+        groups[key].append(e)
+
+    rows = []
+    for (country, trigger, sequence, mode), group_entries in groups.items():
+        latest = group_entries[-1]
+        previous = group_entries[-2] if len(group_entries) >= 2 else None
+        rows.append({
+            "country": country,
+            "trigger": trigger,
+            "sequence": sequence,
+            "mode": mode,
+            "latest_score": latest["score"],
+            "latest_timestamp": latest["timestamp"],
+            "previous_score": previous["score"] if previous else None,
+            "delta": (latest["score"] - previous["score"]) if previous else None,
+        })
+
+    rows.sort(key=lambda r: (r["delta"] if r["delta"] is not None else float("inf"), r["latest_score"]))
+    return rows
 
 
 def rewrite_classification(old_country: str, old_trigger: str, old_sequence: str,
@@ -696,3 +767,27 @@ def delete_run(run_id: int, path: str = HISTORY_PATH) -> str:
         return row["report_path"]
 
     return _with_connection(path, _delete, mutates=True)
+
+
+def set_run_excluded(run_id: int, excluded: bool, path: str = HISTORY_PATH) -> bool:
+    """Marque (ou demarque) un run comme exclu des stats agregees - alerte de
+    regression (voir find_regression), stats d'erreurs et graphique
+    d'evolution de la page Historique (filtrage fait par chaque appelant,
+    ce module ne filtre que find_regression lui-meme). Alternative moins
+    destructive a delete_run() pour un run dont on veut garder la trace (ex.
+    test manuel, composants generiques oublies deja repere) sans qu'il ne
+    fausse le suivi normal de la sequence - reversible, contrairement a une
+    suppression : rappeler avec excluded=False pour reinclure. Ne touche ni
+    au fichier Excel archive ni au reste de l'historique de la sequence.
+
+    Retourne True si le run a ete trouve et mis a jour, False si l'id est
+    introuvable ou si la base n'existe pas encore."""
+    if not os.path.exists(path):
+        return False
+
+    def _update(conn):
+        cur = conn.execute("UPDATE runs SET excluded = ? WHERE id = ?", (1 if excluded else 0, run_id))
+        conn.commit()
+        return cur.rowcount > 0
+
+    return bool(_with_connection(path, _update, default=False, mutates=True))

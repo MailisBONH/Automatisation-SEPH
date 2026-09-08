@@ -15,6 +15,8 @@ import streamlit as st
 from streamlit.testing.v1 import AppTest
 
 import qa.classification
+import qa.config
+import qa.digest
 import qa.history
 import qa.report_diff
 from conftest import fake_incrementing_datetime, make_details_report
@@ -32,13 +34,13 @@ def _run_page():
 
 
 def _confirm_delete_run_checkbox(at):
-    """La case de confirmation du panneau "Supprimer une comparaison de
+    """La case de confirmation du panneau "Gérer les comparaisons de
     l'historique" (voir TestDeleteRun) : sa cle inclut un "nonce" qui change
     apres chaque suppression reussie, pour forcer la case a redevenir
     decochee au rerun suivant (voir pages/1_Historique.py) - un lookup par
     cle exacte casserait donc apres une suppression. Lookup par label a la
     place, stable quel que soit le nonce courant."""
-    return next(c for c in at.checkbox if c.label == "Je confirme vouloir supprimer cette comparaison définitivement")
+    return next(c for c in at.checkbox if c.label == "Je confirme vouloir supprimer définitivement")
 
 
 class TestEmptyHistory:
@@ -104,6 +106,31 @@ class TestPopulatedHistory:
         assert rows[0]["Pays"] == "France"
         assert rows[0]["Trigger"] == "revamp_inac"
         assert rows[0]["Séquence"] == "SEQ 1"
+        assert rows[0]["% OK"] == 80.0
+
+    def test_overview_table_skips_an_excluded_latest_run(self, tmp_path, monkeypatch):
+        # Regression : si le run le PLUS RECENT d'une sequence est exclu des
+        # stats (voir qa.history.set_run_excluded), la "Vue d'ensemble" ne
+        # doit pas afficher son score/sa date comme "dernier test" - ce
+        # serait exactement le genre de chiffre trompeur que l'exclusion
+        # est censee eviter.
+        monkeypatch.chdir(tmp_path)
+        record_run(
+            "SEQ 1", "wording", total=10, ok=8, ko=2, score=80.0,
+            country="France", trigger="revamp_inac", sequence="SEQ 1",
+        )
+        record_run(
+            "SEQ 1", "wording", total=10, ok=1, ko=9, score=10.0,
+            country="France", trigger="revamp_inac", sequence="SEQ 1",
+        )
+        latest_id = load_sequence_history("France", "revamp_inac", "SEQ 1")[-1]["id"]
+        qa.history.set_run_excluded(latest_id, True)
+
+        at = _run_page()
+
+        assert not at.exception
+        rows = at.dataframe[0].value.to_dict("records")
+        assert len(rows) == 1
         assert rows[0]["% OK"] == 80.0
 
     def test_navigating_country_trigger_sequence_reaches_the_detail_view(self, tmp_path, monkeypatch):
@@ -254,6 +281,105 @@ class TestOverviewSearchBox:
         assert rows[0]["Séquence"] == "SEQ 1"
 
 
+class TestRegressionsTransverseView:
+    """Panneau "📉 Régressions et scores par séquence (toutes séquences)" -
+    voir qa.history.latest_scores_with_delta. Equivalent transverse de
+    l'alerte de regression par sequence (qa.history.find_regression)."""
+
+    def _delta_table(self, at):
+        return next(df for df in at.dataframe if "Δ (pts)" in df.value.columns)
+
+    def test_lists_sequences_sorted_worst_regression_first(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        record_run("SEQ 1", "wording", 10, 9, 1, 90.0, country="France", trigger="T", sequence="SEQ 1")
+        record_run("SEQ 1", "wording", 10, 8, 2, 80.0, country="France", trigger="T", sequence="SEQ 1")  # -10
+        record_run("SEQ 2", "wording", 10, 9, 1, 90.0, country="France", trigger="T", sequence="SEQ 2")
+        record_run("SEQ 2", "wording", 10, 4, 6, 40.0, country="France", trigger="T", sequence="SEQ 2")  # -50
+
+        at = _run_page()
+
+        assert not at.exception
+        rows = self._delta_table(at).value.to_dict("records")
+        assert [r["Séquence"] for r in rows] == ["SEQ 2", "SEQ 1"]
+        assert rows[0]["Δ (pts)"] == -50.0
+
+    def test_excluded_run_does_not_appear_as_the_latest_score(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        record_run("SEQ 1", "wording", 10, 3, 7, 30.0, country="France", trigger="T", sequence="SEQ 1")
+        record_run("SEQ 1", "wording", 10, 9, 1, 90.0, country="France", trigger="T", sequence="SEQ 1")
+        latest_id = load_sequence_history("France", "T", "SEQ 1")[-1]["id"]
+        qa.history.set_run_excluded(latest_id, True)
+
+        at = _run_page()
+
+        rows = self._delta_table(at).value.to_dict("records")
+        assert len(rows) == 1
+        assert rows[0]["% OK actuel"] == 30.0
+
+    def test_empty_history_shows_a_caption_not_a_crash(self, tmp_path, monkeypatch):
+        # Regression tenue a distance : la page s'arrete avant ce panneau
+        # (st.stop()) tant qu'aucune sequence n'est classee (voir
+        # TestEmptyHistory) - mais une fois une premiere sequence classee, le
+        # panneau doit au moins s'afficher sans erreur.
+        monkeypatch.chdir(tmp_path)
+        record_run("SEQ 1", "wording", 10, 8, 2, 80.0, country="France", trigger="T", sequence="SEQ 1")
+
+        at = _run_page()
+
+        assert not at.exception
+        assert any("Régressions et scores par séquence" in e.label for e in at.expander)
+
+
+class TestDigestButton:
+    """Bouton "📤 Envoyer le digest maintenant sur Teams" (voir qa.digest) -
+    envoi ponctuel du meme contenu qu'enverrait une tache planifiee externe
+    (`python -m qa.digest`), sans attendre sa prochaine execution."""
+
+    DIGEST_BUTTON_LABEL = "📤 Envoyer le digest maintenant sur Teams"
+
+    def test_hidden_with_an_explanatory_caption_when_teams_is_not_configured(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(qa.config, "TEAMS_WEBHOOK_URL", "")
+        record_run("SEQ 1", "wording", 10, 8, 2, 80.0, country="France", trigger="T", sequence="SEQ 1")
+
+        at = _run_page()
+
+        assert not at.exception
+        assert not any(b.label == self.DIGEST_BUTTON_LABEL for b in at.button)
+        assert any("non configuré" in c.value for c in at.caption)
+
+    def test_sends_and_confirms_via_toast_when_teams_is_configured(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(qa.config, "TEAMS_WEBHOOK_URL", "https://outlook.office.com/webhook/fake")
+        record_run("SEQ 1", "wording", 10, 8, 2, 80.0, country="France", trigger="T", sequence="SEQ 1")
+
+        sent = {}
+        monkeypatch.setattr(
+            qa.digest, "send_teams_notification",
+            lambda title, text: sent.update(title=title, text=text) or True,
+        )
+
+        at = _run_page()
+        assert any(b.label == self.DIGEST_BUTTON_LABEL for b in at.button)
+        next(b for b in at.button if b.label == self.DIGEST_BUTTON_LABEL).click().run()
+
+        assert not at.exception
+        assert sent.get("title")  # le digest a bien ete construit et "envoye"
+        assert any("envoyé" in t.value for t in at.toast)
+
+    def test_a_failed_send_is_reported_via_toast_too(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(qa.config, "TEAMS_WEBHOOK_URL", "https://outlook.office.com/webhook/fake")
+        record_run("SEQ 1", "wording", 10, 8, 2, 80.0, country="France", trigger="T", sequence="SEQ 1")
+        monkeypatch.setattr(qa.digest, "send_teams_notification", lambda title, text: False)
+
+        at = _run_page()
+        next(b for b in at.button if b.label == self.DIGEST_BUTTON_LABEL).click().run()
+
+        assert not at.exception
+        assert any("Échec" in t.value for t in at.toast)
+
+
 class TestRecentSequences:
     """Boutons "🕘 Récemment consultées" au-dessus du fil d'Ariane (voir
     _record_recent_sequence) : permettent de revenir directement a une
@@ -374,7 +500,7 @@ class TestReportDownloads:
 
         # Supprime le run le plus recent (report_2) via le panneau dedie.
         run_to_delete = next(e for e in load_sequence_history("France", "revamp_inac", "SEQ 1") if e["score"] == 100.0)
-        at.selectbox(key="delete_run_choice_France_revamp_inac_SEQ 1").select(run_to_delete).run()
+        at.selectbox(key="manage_run_choice_France_revamp_inac_SEQ 1").select(run_to_delete).run()
         _confirm_delete_run_checkbox(at).set_value(True).run()
         next(b for b in at.button if b.label == "🗑️ Supprimer cette comparaison").click().run()
 
@@ -491,7 +617,7 @@ class TestDeleteRun:
         # avec une entree portant les memes champs que celle du widget
         # (format_func ne compare que ces champs, pas l'identite de l'objet).
         old_entry = next(e for e in load_sequence_history("France", "revamp_inac", "SEQ 1") if e["score"] == 50.0)
-        at.selectbox(key="delete_run_choice_France_revamp_inac_SEQ 1").select(old_entry).run()
+        at.selectbox(key="manage_run_choice_France_revamp_inac_SEQ 1").select(old_entry).run()
         _confirm_delete_run_checkbox(at).set_value(True).run()
         delete_button = next(b for b in at.button if b.label == "🗑️ Supprimer cette comparaison")
         delete_button.click().run()
@@ -600,6 +726,107 @@ class TestDeleteRun:
 
         assert not at.exception
         assert not os.path.exists(dest_path)
+
+
+class TestExcludeRun:
+    """Exclusion d'une comparaison des statistiques agregees (score de
+    reference/alerte de regression, stats d'erreurs, graphique d'evolution)
+    sans la supprimer - voir qa.history.set_run_excluded. Alternative
+    reversible a TestDeleteRun pour un run dont on veut garder la trace (ex.
+    test manuel) sans qu'il ne fausse le suivi normal de la sequence."""
+
+    def _evolution_table(self, at):
+        # Distingue le tableau d'evolution PAR SEQUENCE (colonnes ok/ko) du
+        # tableau "Vue d'ensemble" (toujours present en haut de page, meme
+        # navigue dans une sequence) qui partage la colonne "% OK" mais pas
+        # ok/ko.
+        return next(df for df in at.dataframe if "ok" in df.value.columns and "ko" in df.value.columns)
+
+    def test_excluding_removes_it_from_the_evolution_table_but_keeps_it_in_history(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.chdir(tmp_path)
+        record_run(
+            "SEQ 1", "wording", total=10, ok=5, ko=5, score=50.0,
+            country="France", trigger="revamp_inac", sequence="SEQ 1",
+        )
+        record_run(
+            "SEQ 1", "wording", total=10, ok=9, ko=1, score=90.0,
+            country="France", trigger="revamp_inac", sequence="SEQ 1",
+        )
+
+        at = _run_page()
+        at.button(key="nav_country_France").click().run()
+        at.button(key="nav_trigger_revamp_inac").click().run()
+        at.button(key="nav_sequence_SEQ 1").click().run()
+
+        assert len(self._evolution_table(at).value) == 2
+
+        run_to_exclude = next(e for e in load_sequence_history("France", "revamp_inac", "SEQ 1") if e["score"] == 90.0)
+        at.selectbox(key="manage_run_choice_France_revamp_inac_SEQ 1").select(run_to_exclude).run()
+        next(b for b in at.button if b.label == "🚫 Exclure des stats").click().run()
+
+        assert not at.exception
+        # Toujours dans l'historique (pas supprime)...
+        remaining = load_sequence_history("France", "revamp_inac", "SEQ 1")
+        assert len(remaining) == 2
+        excluded_entry = next(e for e in remaining if e["score"] == 90.0)
+        assert excluded_entry["excluded"] is True
+        # ...mais absent du tableau d'evolution, qui ne montre plus que le
+        # run non exclu.
+        table = self._evolution_table(at).value
+        assert len(table) == 1
+        assert table.iloc[0]["% OK"] == 50.0
+        assert any("exclue" in t.value for t in at.toast)
+
+    def test_reincluding_restores_it_in_the_evolution_table(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        record_run(
+            "SEQ 1", "wording", total=10, ok=8, ko=2, score=80.0,
+            country="France", trigger="revamp_inac", sequence="SEQ 1",
+        )
+        run_id = load_sequence_history("France", "revamp_inac", "SEQ 1")[0]["id"]
+        qa.history.set_run_excluded(run_id, True)
+
+        at = _run_page()
+        at.button(key="nav_country_France").click().run()
+        at.button(key="nav_trigger_revamp_inac").click().run()
+        at.button(key="nav_sequence_SEQ 1").click().run()
+
+        # Seul run de la sequence, deja exclu : le tableau/graphique cede la
+        # place a un message dedie plutot que le message generique "aucun
+        # historique", et le panneau de gestion reste accessible pour le
+        # reinclure.
+        assert any("exclus des statistiques" in c.value for c in at.caption)
+
+        # Le menu de gestion marque explicitement le run deja exclu, seul
+        # endroit d'ou il reste retrouvable pour etre reinclus.
+        run_choices = at.selectbox(key="manage_run_choice_France_revamp_inac_SEQ 1").options
+        assert "exclu des stats" in run_choices[0]
+        next(b for b in at.button if b.label == "↩️ Réinclure dans les stats").click().run()
+
+        assert not at.exception
+        assert load_sequence_history("France", "revamp_inac", "SEQ 1")[0]["excluded"] is False
+        assert len(self._evolution_table(at).value) == 1
+        assert any("réincluse" in t.value for t in at.toast)
+
+    def test_excluded_run_is_omitted_from_aggregated_error_stats(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        record_run(
+            "SEQ 1", "wording", total=10, ok=8, ko=2, score=80.0,
+            country="France", trigger="revamp_inac", sequence="SEQ 1",
+            error_types={"Minor typo": 2},
+        )
+        run_id = load_sequence_history("France", "revamp_inac", "SEQ 1")[0]["id"]
+        qa.history.set_run_excluded(run_id, True)
+
+        at = _run_page()
+
+        # Le seul run archive est exclu : aucune statistique d'erreur
+        # agregee ne doit ressortir (panneau "Statistiques des erreurs",
+        # deja present dans l'arbre de test qu'il soit deplie ou non).
+        assert not at.exception
+        assert any("Aucune statistique d'erreur disponible" in c.value for c in at.caption)
 
 
 class TestReportDiffPanel:
