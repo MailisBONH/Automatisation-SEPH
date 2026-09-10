@@ -13,6 +13,7 @@ rien a comparer - cette page ne fait que prouver que la recuperation
 import pandas as pd
 import streamlit as st
 
+from qa.branding import inject_theme, render_banner
 from qa.braze_loader import (
     BRAZE_MOCK_MODE,
     BRAZE_REST_ENDPOINT,
@@ -37,10 +38,10 @@ def _cached_list_email_templates(tag: str, mock_mode: bool, endpoint: str):
     return list_email_templates(tag=tag or None)
 
 st.set_page_config(page_title="Braze (exploration)", layout="wide")
+inject_theme()
+render_banner("🧪 Braze (exploration)")
 
 header_col1, header_col2 = st.columns([5, 1])
-with header_col1:
-    st.title("🧪 Braze (exploration)")
 with header_col2:
     st.page_link("home.py", label="📧 QA Email Tool", use_container_width=True)
 

@@ -1,0 +1,20 @@
+[server]
+# Les fichiers reellement uploades (un email HTML, un classeur Excel
+# referentiel) font quelques Ko a quelques Mo - la limite par defaut de
+# Streamlit (200 Mo) est tres largement au-dessus de tout usage legitime.
+# La reduire evite qu'un upload accidentel massif ne bloque l'app un moment
+# (temps de transfert + ecriture disque) sans aucun benefice reel.
+maxUploadSize = 25
+
+# Volontairement PAS de section [theme] ici (ex. primaryColor) : des que
+# Streamlit voit une seule cle de theme personnalisee, meme une seule
+# couleur, il fige le theme resultant sur sa base claire par defaut et
+# desactive l'adaptation automatique au reglage clair/sombre du systeme
+# ou du navigateur de la personne - verifie empiriquement sur cette
+# version (une regression constatee apres un premier essai avec
+# primaryColor seul). L'accent dore "Sephora friendly" est donc applique
+# uniquement via le CSS de qa/branding.py (bandeau, boutons, liens, et
+# l'accent des radios/cases a cocher via :has()), qui lit toujours bien
+# sur un fond clair COMME sur un fond sombre - l'app suit alors nativement
+# le theme clair/sombre de la personne qui l'utilise, sans rien a gerer
+# cote code.

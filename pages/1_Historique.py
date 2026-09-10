@@ -21,6 +21,7 @@ from qa.archive import (
     list_reports,
     move_sequence_dir,
 )
+from qa.branding import inject_theme, render_banner
 from qa.classification import migrate_legacy_loyalty_sequences
 from qa.config import KEEP_REPORTS, TEAMS_WEBHOOK_URL
 from qa.digest import send_digest
@@ -43,8 +44,9 @@ from qa.history import (
 from qa.report_diff import diff_uploaded_reports, load_last_two_reports_diff
 
 st.set_page_config(page_title="Historique QA", layout="wide")
+inject_theme()
+render_banner("📈 Historique QA")
 
-st.title("📈 Historique QA")
 st.page_link("home.py", label="⬅️ Retour à l'outil QA")
 
 # Affiche puis efface un toast de confirmation laisse en attente par le run

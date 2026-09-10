@@ -25,6 +25,7 @@ Interface Streamlit + moteur de comparaison Python, avec export du résultat en 
 - [Notification Teams (optionnelle, non activée par défaut)](#notification-teams-optionnelle-non-activée-par-défaut)
 - [Digest périodique Teams](#digest-périodique-teams)
 - [Nettoyage automatique des fichiers temporaires](#nettoyage-automatique-des-fichiers-temporaires)
+- [Habillage visuel (Sephora friendly)](#habillage-visuel-sephora-friendly)
 - [Page Braze (exploration, branche `braze`)](#page-braze-exploration-branche-braze)
 - [Intégration continue (CI)](#intégration-continue-ci)
 - [Configuration](#configuration)
@@ -76,6 +77,7 @@ Interface Streamlit + moteur de comparaison Python, avec export du résultat en 
 - **Séquences récemment consultées** : la page Historique garde en mémoire (pour la session) les 5 dernières séquences consultées et affiche un lien rapide vers chacune au-dessus du fil d'Ariane, pour revenir directement à l'une d'elles sans re-cliquer les 3 niveaux de dossiers.
 - **Historique stocké en SQLite** (`output/history.db`) plutôt qu'en JSON Lines : un renommage/fusion/suppression de séquence n'a plus besoin de relire et réécrire tout le fichier. Migration automatique, unique et non destructive d'une installation existante (`qa/history.migrate_legacy_jsonl_history`, déclenchée au démarrage de `home.py` et de la page Historique) : l'ancien `output/history.jsonl` est réimporté puis renommé en `.migrated` (jamais supprimé). Une sauvegarde (`output/history.db.bak`) est rafraîchie après chaque écriture réussie : si `history.db` devient illisible (ex. synchronisation OneDrive interrompue en plein écriture), l'historique est relu depuis cette sauvegarde plutôt que traité comme vide.
 - **Traçabilité "testé par"** : chaque run archivé enregistre le nom d'utilisateur du système d'exploitation qui a lancé la comparaison (`getpass.getuser()`, aucune saisie requise) — visible dans la vue d'ensemble et l'historique détaillé d'une séquence sur la page Historique. Absent sur les runs archivés avant cette fonctionnalité (affiché `—`).
+- **Habillage visuel "Sephora friendly"** : bandeau, boutons et liens de navigation aux couleurs de la marque (noir/doré), avec un thème adaptatif clair/sombre qui suit automatiquement le réglage système/navigateur de la personne qui utilise l'outil — voir [section dédiée](#habillage-visuel-sephora-friendly).
 
 ## Architecture du projet
 
@@ -88,6 +90,7 @@ pages/
 qa/
 ├── engine.py               Orchestrateur : run_qa_for_sequence() (1 sequence) et run_qa() (+ rapport)
 ├── config.py                Constantes de configuration (colonnes Excel, regex, seuils, tables pays, config Braze)
+├── branding.py               Habillage visuel partagé par les 3 pages (bandeau, boutons, police) — voir section dédiée
 ├── braze_loader.py           Chargement de templates email via l'API REST Braze (mock ou réelle) — exploration branche `braze`, voir section dédiée
 ├── text_utils.py             Nettoyage/normalisation de texte (clean_text, normalize, normalize_currency, expand_conditional_variants, clean_display_text)
 ├── html_extraction.py         Extraction du wording depuis le HTML (parser lxml)
@@ -523,6 +526,14 @@ La notification Teams ci-dessus est envoyée **à chaque archivage**, un message
 ## Nettoyage automatique des fichiers temporaires
 
 Les fichiers Excel/HTML uploadés (`temp/`) sont supprimés automatiquement dès qu'ils ont plus de 24h (`TEMP_MAX_AGE_HOURS`, voir `qa/cleanup.py` et [Configuration](#configuration)), sans action requise. Pour éviter de rescanner le dossier à chaque interaction (Streamlit réexécute tout le script à chaque clic), le nettoyage réel est limité à une fois par heure au maximum (`TEMP_CLEANUP_THROTTLE_SECONDS`) via un fichier marqueur (`temp/.last_cleanup`).
+
+## Habillage visuel (Sephora friendly)
+
+Les 3 pages de l'app (`home.py`, `pages/1_Historique.py`, `pages/2_Braze_Loader.py`) partagent un habillage visuel léger inspiré de l'identité Sephora (noir/doré, typographie élégante) via [`qa/branding.py`](qa/branding.py) : un bandeau noir "SEPHORA" en tête de page (remplace `st.title()`), des boutons noirs à bordure dorée, des liens de navigation encadrés en doré. Aucun logo officiel n'est intégré (aucun asset de marque fourni) — uniquement le nom stylisé en CSS.
+
+**Thème adaptatif clair/sombre** : l'app suit nativement le réglage clair/sombre du système/navigateur de la personne qui l'utilise, sans rien à configurer. Ce n'était pas le cas d'un premier essai : fixer une seule couleur de thème dans `.streamlit/config.toml` (même juste `primaryColor`) fige Streamlit sur sa base claire et désactive complètement son adaptation automatique — `.streamlit/config.toml` ne définit donc volontairement **aucune** section `[theme]`. Les éléments de marque (bandeau, boutons, liens) utilisent uniquement des couleurs qui restent lisibles sur fond clair **et** sur fond sombre (noir + doré, jamais de fond clair figé), donc pas besoin de dupliquer la logique clair/sombre pour eux. L'accent doré des radios/cases à cocher (habituellement piloté par `primaryColor`, indisponible ici pour la raison ci-dessus) est recréé en CSS pur (`:has()`) plutôt que via le thème Streamlit.
+
+Les couleurs sémantiques propres à Streamlit (vert OK / rouge KO sur les tableaux et messages, orange avertissement) ne sont jamais modifiées par cet habillage — elles portent un sens fonctionnel indépendant du design.
 
 ## Page Braze (exploration, branche `braze`)
 
