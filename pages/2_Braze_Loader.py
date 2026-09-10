@@ -17,10 +17,24 @@ from qa.braze_loader import (
     BRAZE_MOCK_MODE,
     BRAZE_REST_ENDPOINT,
     BrazeAPIError,
-    extract_texts_from_template,
     get_email_template_html,
     list_email_templates,
 )
+from qa.html_extraction import extract_texts_from_html
+
+
+@st.cache_data(show_spinner=False)
+def _cached_list_email_templates(tag: str, mock_mode: bool, endpoint: str):
+    """Evite de rappeler l'API Braze (ou de re-filtrer la liste mock) a
+    CHAQUE rerun Streamlit (tout widget de la page en declenche un) alors
+    que la liste ne change en realite qu'entre deux sessions - meme
+    raisonnement que le cache des lectures d'historique sur la page
+    Historique (voir pages/1_Historique.py::_load_history_overview).
+    `mock_mode`/`endpoint` dans la cle (en plus de `tag`) : sans eux, un
+    premier appel en mode mock resterait servi depuis le cache apres avoir
+    bascule BRAZE_MOCK_MODE/BRAZE_REST_ENDPOINT (redemarrage de l'app,
+    rarissime en usage reel mais gratuit a couvrir)."""
+    return list_email_templates(tag=tag or None)
 
 st.set_page_config(page_title="Braze (exploration)", layout="wide")
 
@@ -63,7 +77,7 @@ st.caption(
 )
 
 try:
-    templates = list_email_templates()
+    templates = _cached_list_email_templates(tag="", mock_mode=BRAZE_MOCK_MODE, endpoint=BRAZE_REST_ENDPOINT)
 except BrazeAPIError as e:
     st.error(f"❌ Impossible de lister les templates Braze : {e}")
     templates = []
@@ -105,7 +119,14 @@ if st.button("🔍 Charger et extraire"):
         "note en haut de page."
     )
     try:
-        extracted = extract_texts_from_template(selected_id)
+        # extract_texts_from_html(raw_html) directement - PAS
+        # qa.braze_loader.extract_texts_from_template(selected_id), qui
+        # rappellerait get_email_template_html() une seconde fois pour le
+        # meme template deja recupere ci-dessus (ligne 101) : en mode API
+        # reelle, ca doublerait latence/appels reseau par clic pour rien,
+        # et desynchroniserait potentiellement le HTML affiche de celui
+        # reellement extrait si le template changeait entre les deux appels.
+        extracted = extract_texts_from_html(raw_html)
     except Exception as e:  # noqa: BLE001 - page d'exploration, on veut voir n'importe quelle erreur d'extraction
         st.error(f"❌ Erreur pendant l'extraction : {e}")
         st.stop()
@@ -118,7 +139,8 @@ if st.button("🔍 Charger et extraire"):
             "marqueurs AEM (`class=\"text-contribution\"`, "
             "`audit-component-*`) que le moteur d'extraction actuel "
             "recherche - voir la docstring de "
-            "`qa.braze_loader.extract_texts_from_template`. Pas une erreur "
+            "`qa.braze_loader.extract_texts_from_template` (equivalent a "
+            "l'appel ci-dessus, en une seule etape). Pas une erreur "
             "de branchement : la preuve que l'extraction devra evoluer "
             "avant de QA un vrai template Braze."
         )

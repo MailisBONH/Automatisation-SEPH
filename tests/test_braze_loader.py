@@ -111,12 +111,37 @@ class TestRealApiCallsMocked:
 
         monkeypatch.setattr(requests, "get", _get)
 
-        templates = list_email_templates(tag="hugplan")
+        templates = list_email_templates()
 
         assert templates == [{"email_template_id": "real-1"}]
         assert captured["url"] == "https://rest.fake-01.braze.com/templates/email/list"
         assert captured["headers"]["Authorization"] == "Bearer fake-api-key"
-        assert captured["params"] == {"tags": "hugplan"}
+        # Aucun filtre par tag envoye cote serveur (voir docstring de
+        # list_email_templates - l'API Braze ne documente pas ce parametre
+        # pour cet endpoint) : seuls limit/offset/modified_after/
+        # modified_before le sont, donc aucun n'est envoye ici sans etre
+        # demande explicitement.
+        assert captured["params"] == {}
+
+    def test_list_email_templates_filters_the_real_response_client_side(self, monkeypatch):
+        # Regression : un premier essai envoyait {"tags": tag} au serveur et
+        # faisait confiance a un filtrage cote Braze non documente/non
+        # confirme - la reponse etait alors utilisee telle quelle, sans
+        # jamais verifier qu'elle etait effectivement filtree. Le filtrage
+        # doit avoir lieu cote client, comme deja fait en mode mock.
+        self._configure(monkeypatch)
+        monkeypatch.setattr(
+            requests, "get",
+            lambda url, headers, params, timeout: _FakeResponse(200, {"templates": [
+                {"email_template_id": "match", "tags": ["hugplan"]},
+                {"email_template_id": "no-match", "tags": ["other"]},
+                {"email_template_id": "no-tags-at-all"},
+            ]}),
+        )
+
+        templates = list_email_templates(tag="hugplan")
+
+        assert [t["email_template_id"] for t in templates] == ["match"]
 
     def test_list_email_templates_http_error_raises(self, monkeypatch):
         self._configure(monkeypatch)
@@ -154,6 +179,66 @@ class TestRealApiCallsMocked:
             assert False, "BrazeAPIError attendue"
         except BrazeAPIError as exc:
             assert "500" in str(exc)
+
+
+class TestNetworkAndParsingErrorsAreWrappedInBrazeAPIError:
+    """Regression : requests.get() n'etait auparavant protege que sur le
+    statut HTTP (200 <= code < 300) - une erreur reseau (timeout, connexion
+    refusee...) ou une reponse 2xx au corps non-JSON levait une exception
+    requests/json brute, jamais interceptee par les `except BrazeAPIError`
+    des appelants (voir pages/2_Braze_Loader.py), qui plantait alors toute
+    la page au lieu d'afficher une erreur propre."""
+
+    def _configure(self, monkeypatch):
+        monkeypatch.setattr(braze_loader, "BRAZE_MOCK_MODE", False)
+        monkeypatch.setattr(braze_loader, "BRAZE_API_KEY", "fake-api-key")
+        monkeypatch.setattr(braze_loader, "BRAZE_REST_ENDPOINT", "https://rest.fake-01.braze.com")
+
+    def test_connection_error_is_wrapped_for_list_email_templates(self, monkeypatch):
+        self._configure(monkeypatch)
+
+        def _raise(*a, **k):
+            raise requests.ConnectionError("boom")
+
+        monkeypatch.setattr(requests, "get", _raise)
+
+        try:
+            list_email_templates()
+            assert False, "BrazeAPIError attendue"
+        except BrazeAPIError:
+            pass
+
+    def test_timeout_is_wrapped_for_get_email_template_html(self, monkeypatch):
+        self._configure(monkeypatch)
+
+        def _raise(*a, **k):
+            raise requests.Timeout("boom")
+
+        monkeypatch.setattr(requests, "get", _raise)
+
+        try:
+            get_email_template_html("real-template-id")
+            assert False, "BrazeAPIError attendue"
+        except BrazeAPIError:
+            pass
+
+    def test_non_json_2xx_response_is_wrapped(self, monkeypatch):
+        self._configure(monkeypatch)
+
+        class _BadJsonResponse:
+            status_code = 200
+            text = "<html>not json, some proxy error page</html>"
+
+            def json(self):
+                raise ValueError("Expecting value: line 1 column 1 (char 0)")
+
+        monkeypatch.setattr(requests, "get", lambda *a, **k: _BadJsonResponse())
+
+        try:
+            list_email_templates()
+            assert False, "BrazeAPIError attendue"
+        except BrazeAPIError as exc:
+            assert "JSON" in str(exc) or "json" in str(exc).lower() or "illisible" in str(exc)
 
 
 class TestExtractTextsFromTemplate:

@@ -25,6 +25,8 @@ Interface Streamlit + moteur de comparaison Python, avec export du résultat en 
 - [Notification Teams (optionnelle, non activée par défaut)](#notification-teams-optionnelle-non-activée-par-défaut)
 - [Digest périodique Teams](#digest-périodique-teams)
 - [Nettoyage automatique des fichiers temporaires](#nettoyage-automatique-des-fichiers-temporaires)
+- [Page Braze (exploration, branche `braze`)](#page-braze-exploration-branche-braze)
+- [Intégration continue (CI)](#intégration-continue-ci)
 - [Configuration](#configuration)
 - [Documentation Confluence](#documentation-confluence)
 - [Limitations connues / roadmap](#limitations-connues--roadmap)
@@ -81,10 +83,12 @@ Interface Streamlit + moteur de comparaison Python, avec export du résultat en 
 app.py                     Point d'entrée : navigation multipage (st.navigation) entre home.py et pages/1_Historique.py
 home.py                     Interface Streamlit principale : upload, lancement de la QA, affichage, export, archivage automatique
 pages/
-└── 1_Historique.py          Page Historique : navigation Pays > Trigger > Séquence, rapports + graphique d'évolution
+├── 1_Historique.py          Page Historique : navigation Pays > Trigger > Séquence, rapports + graphique d'évolution
+└── 2_Braze_Loader.py         Page Braze (exploration, branche `braze`) : voir section dédiée
 qa/
 ├── engine.py               Orchestrateur : run_qa_for_sequence() (1 sequence) et run_qa() (+ rapport)
-├── config.py                Constantes de configuration (colonnes Excel, regex, seuils, tables pays)
+├── config.py                Constantes de configuration (colonnes Excel, regex, seuils, tables pays, config Braze)
+├── braze_loader.py           Chargement de templates email via l'API REST Braze (mock ou réelle) — exploration branche `braze`, voir section dédiée
 ├── text_utils.py             Nettoyage/normalisation de texte (clean_text, normalize, normalize_currency, expand_conditional_variants, clean_display_text)
 ├── html_extraction.py         Extraction du wording depuis le HTML (parser lxml)
 ├── excel_loader.py            Lecture de la feuille Excel référentielle (+ find_sibling_sequence_sheet/load_sibling_sequence_wordings et find_sibling_url_section/load_sibling_url_section pour l'onglet/la section frère LOYAL/NON LOYAL, list_wording_sheet_choices/list_url_sequence_choices pour les menus de sélection filtrés/regroupés) — classeur mis en cache (_open_excel_file) par chemin+date de modification+taille, pour ne pas le reparser à chaque interaction Streamlit
@@ -146,11 +150,15 @@ pytest
 
 `pytest` affiche automatiquement le taux de couverture par fichier (`pytest-cov`, configuré dans `pytest.ini`) à la fin de la suite — pas de seuil bloquant, juste un rapport pour repérer les zones peu testées (ex. les branches de `home.py` qui dépendent d'un upload de fichier, non simulable par `AppTest`).
 
+La suite tourne aussi automatiquement sur GitHub Actions à chaque push/pull request, voir [Intégration continue (CI)](#intégration-continue-ci).
+
 La suite couvre les fonctions de normalisation et le dépliage des blocs conditionnels AEM (`qa/text_utils.py`), l'extraction HTML — parsing `lxml`, dédoublonnage des tags d'emphase imbriqués et du fallback bloc, résolution d'un titre générique vers son composant y compris quand il est nested dans un bloc `text-contribution`, porté directement par le tag de texte sans wrapper, ou situé hors de tout bloc `text-contribution` (traité par un second passage dédié), reconstruction du HTML réel depuis une vue "view-source" AEM (`qa/html_extraction.py`) —, les stratégies de matching (`qa/matching.py`) et le pipeline complet (`qa/wording_qa.py`), y compris l'arbre de décision du closest-match générique (classe introuvable, seuil d'acceptation, sinon `Wording mismatch`) et des tests de non-régression pour les bugs de cascade déjà corrigés (verrouillage prématuré sur un KO, starvation du Split par un faux KO de secours, branches if/else "sœurs" non consommées, promotion OK qui masquerait un vrai écart, classes techniques inconnues des deux côtés traitées à tort comme identiques, "meilleur effort" de mauvaise qualité affiché comme un rapprochement trompeur plutôt qu'un KO honnête, classe HTML introuvable traitée à tort comme un OK plutôt qu'un `Component class not found in HTML`, agrégation qui s'arrêtait sur la première fenêtre de blocs non vide même en KO sans jamais essayer une fenêtre plus large potentiellement OK, déduplication finale qui fusionnait à tort deux composants distincts partageant le même texte des deux côtés). Elle couvre aussi la résolution d'onglet/colonne Excel — y compris les erreurs de mot-clé ambigu/introuvable et l'onglet UTM sans colonne "URL" (impossible à découper en séquences) —, l'onglet/la section frère LOYAL/NON LOYAL (wording **et** URL) et le filtrage/regroupement des menus de sélection Wording/URL (`qa/excel_loader.py`), le câblage de ces deux fusions automatiques et le dédoublonnage par URL normalisée (peu importe le label) dans le pipeline (`qa/engine.py`, `tests/test_engine.py`), la QA URL — y compris la détection inverse des liens HTML absents de l'Excel, les blocs conditionnels AEM dans une URL, l'exclusion des liens `mailto:`, les domaines à query ignorée, la section source (FID/NON FID), le compte d'occurrences dans le HTML, le mismatch de classe technique (`URL in wrong component`), la classe HTML introuvable (`URL component class not found in HTML`) et la similarité caractère par caractère, ainsi que l'extraction des `href` et la normalisation fonctionnelle d'URL elle-même — réordonnancement des paramètres, décodage, tolérance aux URLs malformées (`qa/url_qa.py`, `qa/html_extraction.py`, `qa/url_utils.py`, `tests/test_url_utils.py`) —, la génération des rapports Excel : diff caractère par caractère, tri par ordre d'apparition et par criticité, calcul du score, structure du classeur (Summary/Details/KO Only) pour un rapport simple et un rapport consolidé multi-séquences (`qa/report.py`, `tests/test_report.py`), le cache du classeur Excel (invalidé si le fichier est réuploadé au même chemin, voir `tests/test_excel_loader.py`), la détection pays/trigger (domaine prioritaire sur la langue en cas de conflit) et la réconciliation (fusion, y compris la migration rétroactive) des noms de séquence (`qa/classification.py`), le classement et la rotation des rapports, y compris la purge des rapports non classés à la racine de `output/` et la gestion des collisions de nom de fichier lors d'une fusion de séquences (suffixe `_fusionne`, jamais d'écrasement) (`qa/archive.py`), le rapport combiné (`qa/combined_report.py`), l'historique par pays/trigger/séquence — y compris le renommage/fusion, la suppression d'une séquence entière ou d'un seul run, l'exclusion/réinclusion d'un run des stats agrégées, et la vue transverse des régressions triée par delta (`qa/history.py`) —, le digest Teams périodique — texte construit, tri des régressions, troncature au-delà de `MAX_REGRESSIONS_LISTED`, échappement markdown, comportement CLI (`qa/digest.py`, `tests/test_digest.py`) — et le nettoyage automatique de `temp/` (`qa/cleanup.py`).
 
 L'interface Streamlit (`home.py`, `pages/1_Historique.py`) est couverte par `tests/test_home.py` et `tests/test_historique_page.py` : fonctions pures (diff mot-à-mot/caractère par caractère, préparation du tableau affiché, regroupement des éléments à archiver pour un run, signature des entrées utilisateur utilisée pour effacer un résultat périmé — `_uploaded_file_identity`/`_current_inputs_signature`) testées directement, l'orchestration d'archivage (`_do_archive`, `ensure_archived` — archivage automatique dès que pays/trigger sont détectés, ouverture de la pop-up de complétion sinon, idempotence, déclenchement du rapport combiné), et tests de fumée via `streamlit.testing.v1.AppTest` pour le démarrage de l'app, la réaction des widgets au changement de mode, l'effacement automatique du dernier résultat dès que le type de test ou le mode multi-séquences change (et sa persistance sur un rerun sans changement réel), et — sur la page Historique — la navigation complète (pays → trigger → séquence, y compris le fil d'Ariane à chaque niveau), les boutons de téléchargement des rapports archivés, la validation du formulaire de renommage/fusion (champs obligatoires, cas "rien à changer"), la suppression d'une séquence entière, la suppression d'un run précis (historique et rapport associé retirés, le reste de la séquence preservé, sélection respectée plutôt que toujours le premier de la liste, no-op propre sur un run sans fichier associé), l'exclusion/réinclusion réversible d'un run des stats (disparition/réapparition dans le tableau d'évolution et les stats d'erreurs, tout en restant retrouvable dans le menu de gestion), le panneau de vue transverse des régressions (tri par delta, exclusion prise en compte) et son bouton d'envoi manuel du digest Teams (masqué/expliqué si non configuré, confirmation ou échec via toast), et la bannière de migration automatique des séquences encore archivées sous un ancien nom LOYAL/NON LOYAL/FID/NON FID.
 
 Les générateurs de classeurs Excel de test réutilisés par plusieurs fichiers (`make_wording_workbook`, `make_utm_workbook`) vivent dans `tests/conftest.py`, pour éviter que chacun ne réimplémente sa propre version.
+
+La page Braze d'exploration (branche `braze`, voir [section dédiée](#page-braze-exploration-branche-braze)) est couverte par `tests/test_braze_loader.py` (mode mock, mode API réelle avec `requests.get` monkeypatché, erreurs réseau/JSON/HTTP toutes remontées en `BrazeAPIError`, filtrage par tag toujours côté client) et `tests/test_braze_page.py` (smoke tests `AppTest` : chargement, sélection puis extraction, un seul appel réseau par clic, bannière mock vs API réelle, gestion d'erreur à chaque étape). `tests/test_config.py` couvre `qa.config._env_flag`, le helper partagé qui évite qu'une variable d'environnement booléenne explicitement vide (`NAME=`) soit interprétée à tort comme "désactivée".
 
 ## Utilisation
 
@@ -516,6 +524,30 @@ La notification Teams ci-dessus est envoyée **à chaque archivage**, un message
 
 Les fichiers Excel/HTML uploadés (`temp/`) sont supprimés automatiquement dès qu'ils ont plus de 24h (`TEMP_MAX_AGE_HOURS`, voir `qa/cleanup.py` et [Configuration](#configuration)), sans action requise. Pour éviter de rescanner le dossier à chaque interaction (Streamlit réexécute tout le script à chaque clic), le nettoyage réel est limité à une fois par heure au maximum (`TEMP_CLEANUP_THROTTLE_SECONDS`) via un fichier marqueur (`temp/.last_cleanup`).
 
+## Page Braze (exploration, branche `braze`)
+
+> ⚠️ Prototype d'exploration pour la migration future vers Braze, **séparé** du pipeline de comparaison principal : sans accès réel à un template Braze ni référentiel Excel adapté, cette page ne fait pas encore de QA complète — elle prouve seulement que la récupération (mock ou API réelle) et l'extraction du wording fonctionnent de bout en bout.
+
+Accessible via la page **🧪 Braze (exploration)** (`pages/2_Braze_Loader.py`) :
+
+1. **1️⃣ Entrée** : contrairement à l'outil AEM (upload d'un fichier HTML), Braze stocke les templates côté serveur — l'entrée est un identifiant de template (`email_template_id`), choisi dans une liste déroulante (`qa.braze_loader.list_email_templates`) plutôt que copié-collé à l'avance.
+2. **2️⃣ Récupération** : le HTML du template choisi est récupéré via `qa.braze_loader.get_email_template_html` et affiché brut.
+3. **3️⃣ Sortie** : ce HTML est passé dans le même moteur d'extraction que le pipeline AEM (`qa.html_extraction.extract_texts_from_html`) — un vrai template Braze n'a très probablement pas les marqueurs AEM attendus (`class="text-contribution"`, `audit-component-*`), donc un résultat vide à ce stade n'est pas un bug de branchement, voir les limitations ci-dessous.
+
+**Mode mock par défaut** (`BRAZE_MOCK_MODE`, actif tant que `BRAZE_API_KEY`/`BRAZE_REST_ENDPOINT` ne sont pas configurées) : aucun appel réseau, 2 templates d'exemple statiques portant volontairement les marqueurs AEM pour démontrer le branchement. Pour interroger une vraie instance Braze : définir `BRAZE_API_KEY` et `BRAZE_REST_ENDPOINT` (URL de l'instance, ex. `https://rest.iad-01.braze.com` — varie selon la région/le cluster du compte), puis `BRAZE_MOCK_MODE=0` (mêmes conventions que `QA_TEAMS_WEBHOOK_URL`, voir [Configuration](#configuration)). Le filtrage par tag (`list_email_templates(tag=...)`) se fait toujours **côté client** : l'API Braze (`GET /templates/email/list`) ne documente aucun paramètre de filtre par tag, seulement `limit`/`offset`/`modified_after`/`modified_before`.
+
+Toute erreur API (statut HTTP non-2xx, réseau injoignable, réponse 2xx illisible en JSON) est capturée et affichée proprement (`qa.braze_loader.BrazeAPIError`) plutôt que de faire planter la page.
+
+**Limitations connues, à valider dès qu'un accès réel sera disponible** (voir la docstring de [`qa/braze_loader.py`](qa/braze_loader.py)) :
+
+- **Templating Liquid** : Braze utilise Liquid (`{% if %}`/`{{ variable }}`), pas la syntaxe AEM (`<% if %>`/`<%= %>`) gérée aujourd'hui par `qa.text_utils.expand_conditional_variants` — une variante Liquid sera nécessaire avant de brancher ce loader sur `qa/matching.py`. Plus immédiat : `qa.text_utils.is_valid` rejette déjà tout texte dont les caractères techniques (`<>{}[]`) dépassent 5 % de sa longueur, ce qu'une simple accolade Liquid double (`{{ }}`) peut déclencher sur un texte court.
+- **Composants techniques** : le matching HTML↔Excel actuel s'appuie sur les classes CSS `audit-component-*` (AEM) — aucune convention équivalente n'est connue côté Braze pour l'instant. Sans marqueur équivalent, le matching par composant devra probablement se rabattre sur un mode "texte seul" pour les templates Braze.
+- **Moteur d'extraction non adapté** : `qa.html_extraction.extract_texts_from_html` ne trouve un texte que si le HTML porte les mêmes marqueurs AEM — un vrai template Braze n'aura très probablement pas ces marqueurs, d'où un résultat vide (pas une erreur de branchement).
+
+## Intégration continue (CI)
+
+Un workflow GitHub Actions ([`.github/workflows/tests.yml`](.github/workflows/tests.yml)) exécute automatiquement `pytest` (installation via `requirements-dev.txt`, Python 3.12) à chaque `push` et `pull request`, sur **toutes** les branches — pas seulement `main` — pour détecter une régression avant qu'elle n'atteigne la branche principale, y compris pendant l'exploration sur une branche de travail comme `braze`.
+
 ## Configuration
 
 Les réglages globaux sont centralisés dans [`qa/config.py`](qa/config.py) :
@@ -546,6 +578,10 @@ Les réglages globaux sont centralisés dans [`qa/config.py`](qa/config.py) :
 | `UNCLASSIFIED_LABEL` | Nom de dossier utilisé si pays/trigger/séquence est vide | `"Non classé"` |
 | `REGRESSION_ALERT_THRESHOLD` | Baisse de score (points de %) au-delà de laquelle une régression est signalée (voir `qa.history.find_regression`) | `5` |
 | `TEAMS_WEBHOOK_URL` | URL du webhook entrant Teams pour la notification automatique (`qa.notifications`), configurable via la variable d'environnement `QA_TEAMS_WEBHOOK_URL` — vide = notification désactivée | `""` |
+| `BRAZE_API_KEY` | Clé API REST Braze (page d'exploration, voir [section dédiée](#page-braze-exploration-branche-braze)), via la variable d'environnement `BRAZE_API_KEY` | `""` |
+| `BRAZE_REST_ENDPOINT` | URL de l'instance Braze (varie selon la région/le cluster du compte), via la variable d'environnement `BRAZE_REST_ENDPOINT` | `""` |
+| `BRAZE_MOCK_MODE` | Utilise des templates d'exemple statiques plutôt que d'appeler l'API Braze, via la variable d'environnement `BRAZE_MOCK_MODE` (`0`/`false` pour désactiver) | `True` |
+| `BRAZE_REQUEST_TIMEOUT` | Timeout (secondes) des appels HTTP à l'API Braze | `15` |
 
 ## Documentation Confluence
 

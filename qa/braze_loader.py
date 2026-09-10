@@ -43,7 +43,8 @@ le pipeline AEM actuel, voir qa/html_extraction.py et qa/text_utils.py) :
 
 Config attendue (variables d'environnement, memes conventions que
 qa.config.TEAMS_WEBHOOK_URL - absentes par defaut, jamais d'erreur tant que
-ce loader n'est pas reellement appele hors mode mock) :
+ce loader n'est pas reellement appele hors mode mock ; toutes centralisees
+dans qa/config.py, pas definies ici) :
 - BRAZE_API_KEY : cle API REST (scope `templates_email_info`/
   `templates_email_list` minimum cote Braze).
 - BRAZE_REST_ENDPOINT : URL de l'instance Braze (ex.
@@ -56,21 +57,10 @@ et get_email_template_html() retournent des donnees d'exemple statiques
 plutot que d'appeler l'API - permet de brancher et tester le reste du
 pipeline sans dependre d'un acces Braze reel, en attendant la migration.
 """
-import os
-
 import requests
 
+from qa.config import BRAZE_API_KEY, BRAZE_MOCK_MODE, BRAZE_REQUEST_TIMEOUT, BRAZE_REST_ENDPOINT
 from qa.html_extraction import extract_texts_from_html
-
-BRAZE_API_KEY = os.environ.get("BRAZE_API_KEY", "").strip()
-BRAZE_REST_ENDPOINT = os.environ.get("BRAZE_REST_ENDPOINT", "").strip().rstrip("/")
-
-# Actif par defaut (pas de cle/endpoint configures = pas d'acces reel
-# possible) : peut etre force a "0"/"false" une fois BRAZE_API_KEY et
-# BRAZE_REST_ENDPOINT renseignes, pour reellement appeler l'API.
-BRAZE_MOCK_MODE = os.environ.get("BRAZE_MOCK_MODE", "1").strip().lower() not in ("0", "false", "")
-
-REQUEST_TIMEOUT = 15  # secondes - meme convention que qa.notifications.send_teams_notification
 
 _MOCK_TEMPLATES = [
     {
@@ -140,6 +130,37 @@ def _headers() -> dict:
     }
 
 
+def _get(url: str, params: dict) -> dict:
+    """GET authentifie vers l'API Braze, avec gestion d'erreur centralisee -
+    partagee par list_email_templates/get_email_template_html pour ne pas
+    dupliquer ce bloc a chaque appel (voir aussi
+    qa.notifications.send_teams_notification, qui gere la meme classe
+    d'erreurs reseau pour un POST best-effort : ici on RELEVE l'erreur au
+    lieu de l'avaler, cette page d'exploration veut voir n'importe quel
+    echec plutot que le masquer).
+
+    Retourne le corps JSON deja parse (dict). Leve BrazeAPIError pour toute
+    defaillance - statut HTTP non-2xx (comme avant), erreur reseau (timeout,
+    connexion refusee, DNS...) ou reponse 2xx dont le corps n'est pas du
+    JSON valide (ex. page d'erreur HTML renvoyee par un proxy/passerelle
+    intermediaire) : ces deux derniers cas levaient auparavant une exception
+    requests/json brute, jamais interceptee par les `except BrazeAPIError`
+    des appelants (voir pages/2_Braze_Loader.py), donc jamais affichee
+    proprement a l'utilisateur."""
+    try:
+        resp = requests.get(url, headers=_headers(), params=params, timeout=BRAZE_REQUEST_TIMEOUT)
+    except requests.RequestException as exc:
+        raise BrazeAPIError(f"Impossible de joindre l'API Braze : {exc}") from exc
+
+    if not (200 <= resp.status_code < 300):
+        raise BrazeAPIError(f"Braze API error ({resp.status_code}): {resp.text[:500]}")
+
+    try:
+        return resp.json()
+    except ValueError as exc:
+        raise BrazeAPIError(f"Réponse Braze illisible (pas du JSON valide) : {resp.text[:500]}") from exc
+
+
 def list_email_templates(tag: str = None) -> list:
     """
     Liste les templates email disponibles cote Braze (id, nom, tags, date de
@@ -147,29 +168,29 @@ def list_email_templates(tag: str = None) -> list:
     l'id a l'avance - equivalent Braze du menu deroulant d'onglets Excel
     (voir qa.excel_loader.list_wording_sheet_choices) ou de campagne AEM.
 
-    `tag` filtre optionnellement sur un tag Braze (ex. le nom de campagne).
+    `tag` filtre optionnellement sur un tag Braze (ex. le nom de campagne) -
+    TOUJOURS cote client (apres reception), y compris en mode API reelle :
+    l'API Braze (GET /templates/email/list) ne documente que
+    limit/offset/modified_after/modified_before comme parametres de requete
+    (https://www.braze.com/docs/api/endpoints/templates/email_templates/get_list_email_templates),
+    aucun filtre par tag - un parametre "tags" envoye a cet endpoint serait
+    vraisemblablement ignore silencieusement par Braze, renvoyant la liste
+    complete NON filtree plutot qu'une erreur, ce qui masquerait le
+    probleme. Filtrer cote client, comme deja fait en mode mock, evite de
+    reposer sur cette capacite serveur non confirmee.
 
-    En mode mock (BRAZE_MOCK_MODE, actif par defaut) : retourne
-    `_MOCK_TEMPLATES`, sans appel reseau.
+    En mode mock (BRAZE_MOCK_MODE, actif par defaut) : utilise
+    `_MOCK_TEMPLATES` comme source, sans appel reseau.
     """
     if BRAZE_MOCK_MODE:
-        if tag:
-            return [t for t in _MOCK_TEMPLATES if tag in t.get("tags", [])]
-        return list(_MOCK_TEMPLATES)
+        templates = list(_MOCK_TEMPLATES)
+    else:
+        _require_config()
+        templates = _get(f"{BRAZE_REST_ENDPOINT}/templates/email/list", params={}).get("templates", [])
 
-    _require_config()
-
-    params = {"tags": tag} if tag else {}
-    resp = requests.get(
-        f"{BRAZE_REST_ENDPOINT}/templates/email/list",
-        headers=_headers(),
-        params=params,
-        timeout=REQUEST_TIMEOUT,
-    )
-    if not (200 <= resp.status_code < 300):
-        raise BrazeAPIError(f"Braze API error ({resp.status_code}): {resp.text[:500]}")
-
-    return resp.json().get("templates", [])
+    if tag:
+        return [t for t in templates if tag in t.get("tags", [])]
+    return templates
 
 
 def get_email_template_html(email_template_id: str) -> str:
@@ -189,17 +210,10 @@ def get_email_template_html(email_template_id: str) -> str:
         return _MOCK_HTML
 
     _require_config()
-
-    resp = requests.get(
+    return _get(
         f"{BRAZE_REST_ENDPOINT}/templates/email/info",
-        headers=_headers(),
         params={"email_template_id": email_template_id},
-        timeout=REQUEST_TIMEOUT,
-    )
-    if not (200 <= resp.status_code < 300):
-        raise BrazeAPIError(f"Braze API error ({resp.status_code}): {resp.text[:500]}")
-
-    return resp.json().get("body", "")
+    ).get("body", "")
 
 
 def extract_texts_from_template(email_template_id: str) -> list:

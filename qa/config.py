@@ -74,11 +74,44 @@ HISTORY_RETENTION_DAYS = 365
 # avertissement dans l'UI et dans la notification Teams (si configuree).
 REGRESSION_ALERT_THRESHOLD = 5
 
+def _env_flag(name: str, default_on: bool) -> bool:
+    """Lit une variable d'environnement booleenne (0/false -> desactive,
+    n'importe quelle autre valeur non vide -> active, insensible a la
+    casse). Une valeur ABSENTE et une valeur EXPLICITEMENT VIDE (ex.
+    `NAME=` dans un .env - courant apres un copier-coller de gabarit ou un
+    outil qui ecrit la variable sans valeur) retombent toutes deux sur
+    `default_on`, plutot que de traiter la seconde comme "desactive" par
+    accident : os.environ.get(name, "1") ne retourne son defaut QUE si la
+    cle est absente, jamais si elle vaut "" (la cle existe alors, avec cette
+    valeur) - piege trouve dans une premiere version de
+    qa.braze_loader.BRAZE_MOCK_MODE, corrige ici une fois pour toutes plutot
+    que specifiquement pour ce seul appelant. Partagee par DEBUG_MODE
+    ci-dessous et qa.braze_loader.BRAZE_MOCK_MODE."""
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return default_on
+    return raw not in ("0", "false")
+
+
 # Notification Teams automatique a chaque run archive (voir
 # qa.notifications) : URL d'un webhook entrant Teams, configurable sans
 # toucher au code via la variable d'environnement QA_TEAMS_WEBHOOK_URL. Vide
 # par defaut => notification desactivee (no-op silencieux, jamais d'erreur).
 TEAMS_WEBHOOK_URL = os.environ.get("QA_TEAMS_WEBHOOK_URL", "").strip()
+
+# Chargeur Braze exploratoire (voir qa/braze_loader.py, branche `braze`,
+# prototype pour la future migration AEM -> Braze) : memes conventions que
+# TEAMS_WEBHOOK_URL ci-dessus (vide par defaut, aucune erreur tant que ce
+# loader n'est pas reellement appele hors mode mock). BRAZE_MOCK_MODE actif
+# par defaut (pas de cle/endpoint configures = pas d'acces reel possible) ;
+# BRAZE_REQUEST_TIMEOUT distinct du timeout de qa.notifications (10s, un
+# simple POST de notification best-effort) : l'API Templates Braze renvoie
+# potentiellement un corps HTML plus volumineux, un delai plus genereux
+# evite un timeout premature sur un template lourd.
+BRAZE_API_KEY = os.environ.get("BRAZE_API_KEY", "").strip()
+BRAZE_REST_ENDPOINT = os.environ.get("BRAZE_REST_ENDPOINT", "").strip().rstrip("/")
+BRAZE_MOCK_MODE = _env_flag("BRAZE_MOCK_MODE", default_on=True)
+BRAZE_REQUEST_TIMEOUT = 15
 
 WORDING_COLUMN_NAME = "TRANSLATION"       # Mot-clé (insensible à la casse) de la colonne wording dans l'Excel
 CAMPAIGN_KEYWORD = "HugPlan S1 Bronze"    # Mot-clé pour sélectionner l'onglet dans l'Excel
@@ -93,7 +126,7 @@ MIN_TEXT_LENGTH = 3
 # via la variable d'environnement QA_DEBUG_MODE (ex: "0"/"false" pour
 # desactiver), utile pour couper ces logs en environnement partage sans
 # redeployer.
-DEBUG_MODE = os.environ.get("QA_DEBUG_MODE", "1").strip().lower() not in ("0", "false", "")
+DEBUG_MODE = _env_flag("QA_DEBUG_MODE", default_on=True)
 
 URL_SHEET_KEYWORD = "UTM"                 # Mot-clé pour repérer l'onglet des URLs trackées
 URL_COLUMN_NAME = "<< TRACKED URL >>"     # Colonne des URLs de référence dans cet onglet
