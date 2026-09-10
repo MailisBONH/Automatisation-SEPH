@@ -2,16 +2,9 @@
 Tests de fumee pour pages/1_Historique.py, via streamlit.testing.v1.AppTest
 (voir tests/test_home.py pour le rationnel general) : jusqu'ici sans aucune
 couverture.
-
-st.page_link est stubbe : teste seule (hors de app.py/st.navigation, comme
-c'est le cas ici), la page ne peut pas resoudre "home.py" comme une page
-valide (limitation du harnais de test AppTest sur les apps multipage, pas
-un bug de l'app - en conditions reelles, app.py declare les deux pages via
-st.navigation et la resolution fonctionne).
 """
 import os
 
-import streamlit as st
 from streamlit.testing.v1 import AppTest
 
 import qa.classification
@@ -27,7 +20,6 @@ PAGE_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "pages", "1
 
 
 def _run_page():
-    st.page_link = lambda *a, **k: None
     at = AppTest.from_file(PAGE_PATH)
     at.run()
     return at

@@ -77,20 +77,22 @@ Interface Streamlit + moteur de comparaison Python, avec export du résultat en 
 - **Séquences récemment consultées** : la page Historique garde en mémoire (pour la session) les 5 dernières séquences consultées et affiche un lien rapide vers chacune au-dessus du fil d'Ariane, pour revenir directement à l'une d'elles sans re-cliquer les 3 niveaux de dossiers.
 - **Historique stocké en SQLite** (`output/history.db`) plutôt qu'en JSON Lines : un renommage/fusion/suppression de séquence n'a plus besoin de relire et réécrire tout le fichier. Migration automatique, unique et non destructive d'une installation existante (`qa/history.migrate_legacy_jsonl_history`, déclenchée au démarrage de `home.py` et de la page Historique) : l'ancien `output/history.jsonl` est réimporté puis renommé en `.migrated` (jamais supprimé). Une sauvegarde (`output/history.db.bak`) est rafraîchie après chaque écriture réussie : si `history.db` devient illisible (ex. synchronisation OneDrive interrompue en plein écriture), l'historique est relu depuis cette sauvegarde plutôt que traité comme vide.
 - **Traçabilité "testé par"** : chaque run archivé enregistre le nom d'utilisateur du système d'exploitation qui a lancé la comparaison (`getpass.getuser()`, aucune saisie requise) — visible dans la vue d'ensemble et l'historique détaillé d'une séquence sur la page Historique. Absent sur les runs archivés avant cette fonctionnalité (affiché `—`).
-- **Habillage visuel "Sephora friendly"** : bandeau, boutons et liens de navigation aux couleurs de la marque (noir/doré), avec un thème adaptatif clair/sombre qui suit automatiquement le réglage système/navigateur de la personne qui utilise l'outil — voir [section dédiée](#habillage-visuel-sephora-friendly).
+- **Habillage visuel "Sephora friendly"** : sidebar de navigation, titres et boutons aux couleurs de la marque (noir/doré), avec un thème adaptatif clair/sombre qui suit automatiquement le réglage système/navigateur de la personne qui utilise l'outil — voir [section dédiée](#habillage-visuel-sephora-friendly).
 
 ## Architecture du projet
 
 ```
-app.py                     Point d'entrée : navigation multipage (st.navigation) entre home.py et pages/1_Historique.py
+app.py                     Point d'entrée : navigation multipage (st.navigation, sidebar native) entre home.py, pages/1_Historique.py et pages/2_Braze_Loader.py
 home.py                     Interface Streamlit principale : upload, lancement de la QA, affichage, export, archivage automatique
+assets/
+└── sephora_wordmark.svg     Wordmark "SEPHORA" (SVG maison, sans logo officiel) affiché en tête de la sidebar via st.logo() — voir qa/branding.py
 pages/
 ├── 1_Historique.py          Page Historique : navigation Pays > Trigger > Séquence, rapports + graphique d'évolution
 └── 2_Braze_Loader.py         Page Braze (exploration, branche `braze`) : voir section dédiée
 qa/
 ├── engine.py               Orchestrateur : run_qa_for_sequence() (1 sequence) et run_qa() (+ rapport)
 ├── config.py                Constantes de configuration (colonnes Excel, regex, seuils, tables pays, config Braze)
-├── branding.py               Habillage visuel partagé par les 3 pages (bandeau, boutons, police) — voir section dédiée
+├── branding.py               Habillage visuel partagé par les 3 pages (sidebar, titres, boutons) — voir section dédiée
 ├── braze_loader.py           Chargement de templates email via l'API REST Braze (mock ou réelle) — exploration branche `braze`, voir section dédiée
 ├── text_utils.py             Nettoyage/normalisation de texte (clean_text, normalize, normalize_currency, expand_conditional_variants, clean_display_text)
 ├── html_extraction.py         Extraction du wording depuis le HTML (parser lxml)
@@ -405,7 +407,7 @@ Dès que les rapports Wording **et** URL sont disponibles pour une séquence, un
 
 ### Page Historique
 
-Accessible via le bouton **📈 Historique** en haut à droite de l'outil (page Streamlit séparée, `pages/1_Historique.py`) :
+Accessible via **📈 Historique** dans la sidebar de navigation (page Streamlit séparée, `pages/1_Historique.py`) :
 
 1. **Vue d'ensemble** en haut de page : un tableau récapitulatif de toutes les séquences archivées (Pays, Trigger, Séquence, date du dernier test, type, % OK, nombre de tests), avant même de naviguer par dossiers — utile pour repérer en un coup d'œil une séquence qui régresse sans avoir à la chercher dans l'arborescence. Deux boutons **⬇️ Excel (.xlsx)** / **⬇️ CSV** exportent tout l'historique classé (toutes séquences, tous les runs) — voir [Export de l'historique complet](#export-de-lhistorique-complet).
 2. **Comparer deux rapports Excel (upload manuel)** : compare 2 rapports quelconques uploadés (pas seulement les 2 derniers archivés d'une séquence) — voir [section dédiée](#diff-entre-les-2-derniers-rapports-archivés) ci-dessous.
@@ -529,9 +531,13 @@ Les fichiers Excel/HTML uploadés (`temp/`) sont supprimés automatiquement dès
 
 ## Habillage visuel (Sephora friendly)
 
-Les 3 pages de l'app (`home.py`, `pages/1_Historique.py`, `pages/2_Braze_Loader.py`) partagent un habillage visuel léger inspiré de l'identité Sephora (noir/doré, typographie élégante) via [`qa/branding.py`](qa/branding.py) : un bandeau noir "SEPHORA" en tête de page (remplace `st.title()`), des boutons noirs à bordure dorée, des liens de navigation encadrés en doré. Aucun logo officiel n'est intégré (aucun asset de marque fourni) — uniquement le nom stylisé en CSS.
+Les 3 pages de l'app (`home.py`, `pages/1_Historique.py`, `pages/2_Braze_Loader.py`) partagent un habillage visuel léger inspiré de l'identité Sephora (noir/doré, typographie élégante) via [`qa/branding.py`](qa/branding.py).
 
-**Thème adaptatif clair/sombre** : l'app suit nativement le réglage clair/sombre du système/navigateur de la personne qui l'utilise, sans rien à configurer. Ce n'était pas le cas d'un premier essai : fixer une seule couleur de thème dans `.streamlit/config.toml` (même juste `primaryColor`) fige Streamlit sur sa base claire et désactive complètement son adaptation automatique — `.streamlit/config.toml` ne définit donc volontairement **aucune** section `[theme]`. Les éléments de marque (bandeau, boutons, liens) utilisent uniquement des couleurs qui restent lisibles sur fond clair **et** sur fond sombre (noir + doré, jamais de fond clair figé), donc pas besoin de dupliquer la logique clair/sombre pour eux. L'accent doré des radios/cases à cocher (habituellement piloté par `primaryColor`, indisponible ici pour la raison ci-dessus) est recréé en CSS pur (`:has()`) plutôt que via le thème Streamlit.
+**Navigation** : la barre latérale (sidebar) **native** de Streamlit (`app.py`, `st.navigation(position="sidebar")`) liste les 3 pages, plutôt qu'un menu de liens maison recréé en HTML/CSS par-dessus une navigation masquée — deux essais dans ce sens (boutons encadrés en haut à droite, puis liens fusionnés au bas d'un bandeau) sont restés peu naturels malgré les retouches. Le wordmark "SEPHORA" (SVG maison, [`assets/sephora_wordmark.svg`](assets/sephora_wordmark.svg), aucun logo officiel fourni) est placé via `st.logo()` — l'emplacement dédié de Streamlit en tête de sidebar, au-dessus de la liste des pages. La sidebar garde un fond noir permanent (identité de marque, dans les deux thèmes), la page active y est surlignée en doré.
+
+**Contenu principal** : titre de page en police de marque avec une fine ligne dorée (`render_page_title`, remplace `st.title()`), boutons d'action noirs à bordure dorée.
+
+**Thème adaptatif clair/sombre** : le contenu principal suit nativement le réglage clair/sombre du système/navigateur de la personne qui l'utilise, sans rien à configurer. Ce n'était pas le cas d'un premier essai : fixer une seule couleur de thème dans `.streamlit/config.toml` (même juste `primaryColor`) fige Streamlit sur sa base claire et désactive complètement son adaptation automatique — `.streamlit/config.toml` ne définit donc volontairement **aucune** section `[theme]`. Les éléments de marque du contenu principal (titre, boutons) utilisent uniquement des couleurs qui restent lisibles sur fond clair **et** sur fond sombre (noir + doré, jamais de fond clair figé), donc pas besoin de dupliquer la logique clair/sombre pour eux. La sidebar fait exception assumée (fond noir fixe, texte clair fixe assorti) puisqu'elle porte l'identité de marque. L'accent doré des radios/cases à cocher du contenu principal (habituellement piloté par `primaryColor`, indisponible ici pour la raison ci-dessus) est recréé en CSS pur (`:has()`) plutôt que via le thème Streamlit.
 
 Les couleurs sémantiques propres à Streamlit (vert OK / rouge KO sur les tableaux et messages, orange avertissement) ne sont jamais modifiées par cet habillage — elles portent un sens fonctionnel indépendant du design.
 

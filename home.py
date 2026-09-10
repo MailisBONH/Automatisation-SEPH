@@ -13,7 +13,7 @@ import contextlib
 from concurrent.futures import ThreadPoolExecutor
 from collections import Counter
 from qa.archive import archive_report
-from qa.branding import inject_theme, render_banner
+from qa.branding import inject_theme, render_page_title, render_sidebar_logo
 from qa.classification import detect_classification, normalize_sequence_name, resolve_sequence_alias
 from qa.cleanup import cleanup_old_temp_files_throttled
 from qa.config import GENERIC_SHEET_KEYWORD, filename_slug
@@ -1675,13 +1675,8 @@ def _run_excel_diagnostics_batch_mode_cached(excel_path, include_generic, test_w
 
 st.set_page_config(page_title="QA Email Tool", layout="wide")
 inject_theme()
-render_banner("📧 Email QA Tool")
-
-header_col1, header_col2, header_col3 = st.columns([4, 1, 1])
-with header_col2:
-    st.page_link("pages/1_Historique.py", label="📈 Historique", use_container_width=True)
-with header_col3:
-    st.page_link("pages/2_Braze_Loader.py", label="🧪 Braze", use_container_width=True)
+render_sidebar_logo()
+render_page_title("📧 Email QA Tool")
 
 # Un identifiant unique par session de navigateur, pour que les fichiers
 # temporaires de deux utilisateurs (ou deux onglets) ne s'ecrasent pas.

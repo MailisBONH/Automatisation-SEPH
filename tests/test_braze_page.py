@@ -3,9 +3,6 @@ Tests de fumee pour pages/2_Braze_Loader.py, via streamlit.testing.v1.AppTest
 (voir tests/test_historique_page.py pour le rationnel general) - jusqu'ici
 sans aucune couverture, contrairement a home.py et pages/1_Historique.py qui
 en ont chacun un.
-
-st.page_link est stubbe pour la meme raison que dans tests/test_historique_page.py
-(limitation d'AppTest sur les apps multipage hors de app.py/st.navigation).
 """
 import os
 
@@ -33,7 +30,6 @@ def _clear_streamlit_cache():
 
 
 def _run_page():
-    st.page_link = lambda *a, **k: None
     at = AppTest.from_file(PAGE_PATH)
     at.run()
     return at
