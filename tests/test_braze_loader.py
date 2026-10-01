@@ -9,10 +9,18 @@ import requests
 import qa.braze_loader as braze_loader
 from qa.braze_loader import (
     BrazeAPIError,
+    assign_translation_ids,
+    build_expected_wordings_from_translations,
     extract_texts_from_template,
+    extract_translation_tags,
     get_email_template_html,
+    get_mock_rendered_html,
+    get_translation_map,
     list_email_templates,
+    list_template_locales,
+    run_translation_based_qa,
 )
+from qa.text_utils import normalize
 
 
 class _FakeResponse:
@@ -58,8 +66,8 @@ class TestMockMode:
         html = get_email_template_html("mock-template-seq1-non-loyal")
 
         assert calls == []
-        assert "text-contribution" in html
-        assert "audit-component-header" in html
+        assert "{% translation header_title %}" in html
+        assert "{% endtranslation %}" in html
 
 
 class TestConfigMissingOutsideMockMode:
@@ -245,52 +253,299 @@ class TestExtractTextsFromTemplate:
     """Verifie le branchement loader -> qa.html_extraction.extract_texts_from_html
     de bout en bout (voir extract_texts_from_template)."""
 
-    def test_default_mock_html_is_extracted_successfully(self, monkeypatch):
-        # _MOCK_HTML porte volontairement les marqueurs AEM
-        # (class="text-contribution"/"audit-component-*"), donc le moteur
-        # d'extraction actuel y trouve des textes sans aucune modification -
-        # preuve concrete du branchement loader -> qa.html_extraction.
+    def test_default_mock_has_no_aem_markers_so_extraction_is_empty(self, monkeypatch):
+        # Le mock par defaut (_MOCK_RAW_TEMPLATE_WITH_TRANSLATIONS) est le
+        # template SOURCE avec tags de traduction Liquid - pas de marqueur
+        # AEM (class="text-contribution"/"audit-component-*"), comme un vrai
+        # template Braze n'en aurait pas. Pas une erreur de branchement :
+        # voir run_translation_based_qa() pour la piste de QA retenue.
         monkeypatch.setattr(braze_loader, "BRAZE_MOCK_MODE", True)
 
         results = extract_texts_from_template("mock-template-seq1-non-loyal")
 
-        assert results == [
-            {
-                "text": "Hello, your points are waiting",
-                "tag": "h1",
-                "type": "H1",
-                "component_class": "audit-component-header",
-            },
-            {
-                "text": "You have 25 points available.",
-                "tag": "p",
-                "type": "Paragraph",
-                "component_class": "audit-component-body",
-            },
-            {
-                "text": "Shop now",
-                "tag": "a",
-                "type": "CTA",
-                "component_class": "audit-component-body",
-            },
-        ]
+        assert results == []
 
-    def test_html_without_aem_markers_yields_no_extracted_text(self, monkeypatch):
-        # Un template Braze REEL n'a tres probablement aucun des marqueurs
-        # AEM que le moteur d'extraction recherche (contrairement a
-        # _MOCK_HTML, qui les porte exprès pour le test ci-dessus) : ce cas
-        # doit rester couvert separement - pas une erreur de branchement,
-        # voir la docstring de extract_texts_from_template.
-        html_without_markers = """
+    def test_extraction_still_works_when_aem_markers_are_present(self, monkeypatch):
+        # Si un template (Braze ou autre) portait malgre tout ces marqueurs,
+        # le moteur d'extraction les traiterait sans aucune modification -
+        # preuve que le branchement loader -> qa.html_extraction reste
+        # correct independamment de la question Liquid/traduction.
+        html_with_markers = """
         <html><body>
-        <h1>Hello, your points are waiting</h1>
-        <p>You have 25 points available.</p>
+        <div class="text-contribution audit-component-header">
+            <h1>Hello, your points are waiting</h1>
+        </div>
         </body></html>
         """
         monkeypatch.setattr(
-            braze_loader, "get_email_template_html", lambda template_id: html_without_markers
+            braze_loader, "get_email_template_html", lambda template_id: html_with_markers
         )
 
         results = extract_texts_from_template("whatever-id")
 
-        assert results == []
+        assert results == [{
+            "text": "Hello, your points are waiting",
+            "tag": "h1",
+            "type": "H1",
+            "component_class": "audit-component-header",
+        }]
+
+
+class TestExtractTranslationTags:
+    """extract_translation_tags : parsing des tags Liquid natifs Braze
+    `{% translation id %}...{% endtranslation %}` depuis le HTML SOURCE
+    (non rendu) d'un template."""
+
+    def test_extracts_ids_and_source_text_in_order(self):
+        raw = (
+            "<h1>{% translation header_title %}Hello{% endtranslation %}</h1>"
+            "<p>{% translation body_text %}World{% endtranslation %}</p>"
+        )
+        tags = extract_translation_tags(raw)
+        assert tags == [
+            {"translation_id": "header_title", "source_text": "Hello"},
+            {"translation_id": "body_text", "source_text": "World"},
+        ]
+
+    def test_no_tags_yields_empty_list(self):
+        assert extract_translation_tags("<h1>Hello</h1>") == []
+
+    def test_empty_input_yields_empty_list(self):
+        assert extract_translation_tags("") == []
+        assert extract_translation_tags(None) == []
+
+    def test_source_text_whitespace_is_collapsed(self):
+        raw = "{% translation id_0 %}  Hello   \n   World  {% endtranslation %}"
+        assert extract_translation_tags(raw) == [{"translation_id": "id_0", "source_text": "Hello World"}]
+
+    def test_default_mock_raw_template_has_four_tags_in_order(self):
+        tags = extract_translation_tags(braze_loader._MOCK_RAW_TEMPLATE_WITH_TRANSLATIONS)
+        assert [t["translation_id"] for t in tags] == [
+            "header_title", "intro_text", "offer_title", "cta_label",
+        ]
+
+
+class TestLocalesAndTranslationMapMockMode:
+    def test_list_template_locales_returns_static_mock_data(self, monkeypatch):
+        monkeypatch.setattr(braze_loader, "BRAZE_MOCK_MODE", True)
+        calls = []
+        monkeypatch.setattr(requests, "get", lambda *a, **k: calls.append(1))
+
+        locales = list_template_locales("mock-template-seq1-non-loyal")
+
+        assert calls == []
+        assert {l["uuid"] for l in locales} == {"locale-fr-fr", "locale-de-de"}
+
+    def test_get_translation_map_returns_static_mock_data(self, monkeypatch):
+        monkeypatch.setattr(braze_loader, "BRAZE_MOCK_MODE", True)
+
+        tmap = get_translation_map("mock-template-seq1-non-loyal", "locale-fr-fr")
+
+        assert tmap["header_title"] == "Joyeux anniversaire !"
+
+    def test_get_translation_map_unknown_combination_returns_empty_dict(self, monkeypatch):
+        monkeypatch.setattr(braze_loader, "BRAZE_MOCK_MODE", True)
+
+        assert get_translation_map("unknown-template", "locale-fr-fr") == {}
+
+    def test_get_mock_rendered_html_returns_html_for_known_locale(self, monkeypatch):
+        monkeypatch.setattr(braze_loader, "BRAZE_MOCK_MODE", True)
+
+        html = get_mock_rendered_html("locale-fr-fr")
+
+        assert "Joyeux anniversaire" in html
+
+    def test_get_mock_rendered_html_outside_mock_mode_returns_empty_string(self, monkeypatch):
+        # Pas d'equivalent Braze reel a ce helper de demonstration (voir sa
+        # docstring) : hors mode mock, rien a simuler.
+        monkeypatch.setattr(braze_loader, "BRAZE_MOCK_MODE", False)
+
+        assert get_mock_rendered_html("locale-fr-fr") == ""
+
+
+class TestLocalesAndTranslationMapRealApiMocked:
+    def _configure(self, monkeypatch):
+        monkeypatch.setattr(braze_loader, "BRAZE_MOCK_MODE", False)
+        monkeypatch.setattr(braze_loader, "BRAZE_API_KEY", "fake-api-key")
+        monkeypatch.setattr(braze_loader, "BRAZE_REST_ENDPOINT", "https://rest.fake-01.braze.com")
+
+    def test_list_template_locales_calls_the_expected_endpoint(self, monkeypatch):
+        self._configure(monkeypatch)
+        captured = {}
+
+        def _get(url, headers, params, timeout):
+            captured["url"] = url
+            captured["params"] = params
+            return _FakeResponse(200, {"locales": [{"uuid": "real-locale"}]})
+
+        monkeypatch.setattr(requests, "get", _get)
+
+        locales = list_template_locales("real-template-id")
+
+        assert locales == [{"uuid": "real-locale"}]
+        assert captured["url"] == "https://rest.fake-01.braze.com/templates/email/translations/"
+        assert captured["params"] == {"template_id": "real-template-id"}
+
+    def test_get_translation_map_calls_the_expected_endpoint(self, monkeypatch):
+        self._configure(monkeypatch)
+        captured = {}
+
+        def _get(url, headers, params, timeout):
+            captured["url"] = url
+            captured["params"] = params
+            return _FakeResponse(200, {"translation_map": {"id_0": "real text"}})
+
+        monkeypatch.setattr(requests, "get", _get)
+
+        tmap = get_translation_map("real-template-id", "real-locale-id")
+
+        assert tmap == {"id_0": "real text"}
+        assert captured["url"] == "https://rest.fake-01.braze.com/templates/translations/email"
+        assert captured["params"] == {"template_id": "real-template-id", "locale_id": "real-locale-id"}
+
+    def test_get_translation_map_http_error_raises(self, monkeypatch):
+        self._configure(monkeypatch)
+        monkeypatch.setattr(requests, "get", lambda *a, **k: _FakeResponse(403, text="forbidden"))
+
+        try:
+            get_translation_map("real-template-id", "real-locale-id")
+            assert False, "BrazeAPIError attendue"
+        except BrazeAPIError as exc:
+            assert "403" in str(exc)
+
+
+class TestBuildExpectedWordingsFromTranslations:
+    def test_uses_translation_map_value_when_present(self):
+        tags = [{"translation_id": "header_title", "source_text": "Default text"}]
+        tmap = {"header_title": "Texte traduit"}
+
+        wordings = build_expected_wordings_from_translations(tags, tmap)
+
+        assert len(wordings) == 1
+        w = wordings[0]
+        assert w["Wording"] == "Texte traduit"
+        assert w["Technical"] == "header_title"
+        assert w["Component"] == "header_title"
+        assert w["Element"] == "header_title"
+        assert w["norm"] == normalize("Texte traduit")
+        assert w["Sheet"] == "Braze translations"
+
+    def test_falls_back_to_source_text_when_translation_missing(self):
+        tags = [{"translation_id": "header_title", "source_text": "Default text"}]
+
+        wordings = build_expected_wordings_from_translations(tags, {})
+
+        assert wordings[0]["Wording"] == "Default text"
+
+    def test_empty_tags_yields_empty_list(self):
+        assert build_expected_wordings_from_translations([], {"a": "b"}) == []
+
+
+class TestAssignTranslationIds:
+    def test_assigns_ids_positionally(self):
+        html_texts = [{"text": "A", "component_class": None}, {"text": "B", "component_class": None}]
+        tags = [{"translation_id": "id_a"}, {"translation_id": "id_b"}]
+
+        aligned = assign_translation_ids(html_texts, tags)
+
+        assert [i["component_class"] for i in aligned] == ["id_a", "id_b"]
+
+    def test_does_not_mutate_the_input_list(self):
+        html_texts = [{"text": "A", "component_class": None}]
+        tags = [{"translation_id": "id_a"}]
+
+        assign_translation_ids(html_texts, tags)
+
+        assert html_texts[0]["component_class"] is None
+
+    def test_extra_html_items_beyond_tag_count_keep_component_class_none(self):
+        html_texts = [{"text": "A", "component_class": None}, {"text": "Extra", "component_class": None}]
+        tags = [{"translation_id": "id_a"}]
+
+        aligned = assign_translation_ids(html_texts, tags)
+
+        assert aligned[1]["component_class"] is None
+
+    def test_fewer_html_items_than_tags_is_safe(self):
+        html_texts = [{"text": "A", "component_class": None}]
+        tags = [{"translation_id": "id_a"}, {"translation_id": "id_b"}]
+
+        aligned = assign_translation_ids(html_texts, tags)
+
+        assert len(aligned) == 1
+        assert aligned[0]["component_class"] == "id_a"
+
+
+class TestRunTranslationBasedQa:
+    """Integration bout-en-bout : template source (tags) + HTML rendu +
+    translation_map -> reutilisation de qa.wording_qa.run_wording_qa, memes
+    colonnes/criticite que le pipeline AEM (voir qa.matching.make_row)."""
+
+    def test_end_to_end_via_get_email_template_html(self, monkeypatch):
+        # Regression : un premier branchement passait
+        # _MOCK_RAW_TEMPLATE_WITH_TRANSLATIONS directement en entree, sans
+        # jamais verifier que get_email_template_html() (reellement appelee
+        # par pages/2_Braze_Loader.py) renvoyait bien CE MEME contenu -
+        # get_email_template_html() renvoyait encore l'ancien mock AEM, ce
+        # qui donnait 0 tag de traduction trouve et 0/4 OK dans la vraie
+        # page, invisible depuis un test qui court-circuitait cet appel.
+        monkeypatch.setattr(braze_loader, "BRAZE_MOCK_MODE", True)
+        template_id = "mock-template-seq1-non-loyal"
+        locale_id = "locale-fr-fr"
+
+        raw_template_html = get_email_template_html(template_id)
+        tmap = get_translation_map(template_id, locale_id)
+        rendered = get_mock_rendered_html(locale_id)
+
+        results = run_translation_based_qa(raw_template_html, rendered, tmap)
+
+        assert len(results) == 4
+        assert all(r["Status"] == "OK" for r in results)
+
+    def test_matching_locale_is_all_ok(self, monkeypatch):
+        monkeypatch.setattr(braze_loader, "BRAZE_MOCK_MODE", True)
+        tmap = get_translation_map("mock-template-seq1-non-loyal", "locale-fr-fr")
+        rendered = get_mock_rendered_html("locale-fr-fr")
+
+        results = run_translation_based_qa(
+            braze_loader._MOCK_RAW_TEMPLATE_WITH_TRANSLATIONS, rendered, tmap
+        )
+
+        assert len(results) == 4
+        assert all(r["Status"] == "OK" for r in results)
+        assert {r["Component Name"] for r in results} == {
+            "header_title", "intro_text", "offer_title", "cta_label",
+        }
+
+    def test_diverging_locale_flags_the_mismatched_field_as_ko(self, monkeypatch):
+        # _MOCK_RENDERED_HTML_BY_LOCALE["locale-de-de"] contient une
+        # divergence volontaire sur le CTA - preuve que la comparaison
+        # detecte un vrai ecart, pas seulement le cas 100% OK.
+        monkeypatch.setattr(braze_loader, "BRAZE_MOCK_MODE", True)
+        tmap = get_translation_map("mock-template-seq1-non-loyal", "locale-de-de")
+        rendered = get_mock_rendered_html("locale-de-de")
+
+        results = run_translation_based_qa(
+            braze_loader._MOCK_RAW_TEMPLATE_WITH_TRANSLATIONS, rendered, tmap
+        )
+
+        by_component = {r["Component Name"]: r for r in results}
+        assert by_component["cta_label"]["Status"] == "KO"
+        assert by_component["header_title"]["Status"] == "OK"
+        assert by_component["intro_text"]["Status"] == "OK"
+        assert by_component["offer_title"]["Status"] == "OK"
+
+    def test_empty_translation_map_falls_back_to_source_text_and_stays_ok(self, monkeypatch):
+        # Si la locale n'a pas encore de traduction, le rendu "mock" ne
+        # correspondrait normalement pas au texte SOURCE (anglais) - ici on
+        # verifie plutot le cas degenere ou le rendu EST le texte source
+        # (ex. template pas encore traduit, affiche tel quel).
+        monkeypatch.setattr(braze_loader, "BRAZE_MOCK_MODE", True)
+        tags = extract_translation_tags(braze_loader._MOCK_RAW_TEMPLATE_WITH_TRANSLATIONS)
+        source_rendered_html = "".join(f"<p>{t['source_text']}</p>" for t in tags)
+
+        results = run_translation_based_qa(
+            braze_loader._MOCK_RAW_TEMPLATE_WITH_TRANSLATIONS, source_rendered_html, {}
+        )
+
+        assert all(r["Status"] == "OK" for r in results)

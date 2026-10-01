@@ -53,17 +53,17 @@ class TestMockModeDefault:
         options = at.selectbox[0].options
         assert len(options) == 2
 
-    def test_clicking_load_and_extract_shows_raw_html_and_extracted_texts(self):
+    def test_clicking_load_and_extract_shows_raw_html(self):
         at = _run_page()
         at.button[0].click().run()
 
         assert not at.exception
-        assert any("Hello, your points are waiting" in c.value for c in at.code)
-        assert "Textes extraits : 3" in at.subheader[0].value
-        rows = at.dataframe[0].value.to_dict("records")
-        assert len(rows) == 3
-        assert rows[0]["text"] == "Hello, your points are waiting"
-        assert rows[0]["component_class"] == "audit-component-header"
+        assert any("{% translation header_title %}" in c.value for c in at.code)
+        # Le mock par defaut (tags de traduction Liquid, pas de marqueur
+        # AEM) n'est justement PAS extrait par ce moteur - voir
+        # TestNoExtractedText et la section 4 (translation_map) pour la
+        # piste de QA retenue sur ce meme mock.
+        assert "Textes extraits : 0" in at.subheader[0].value
 
     def test_fetches_the_template_html_exactly_once_per_click(self, monkeypatch):
         # Regression : la page appelait get_email_template_html() une
@@ -130,6 +130,38 @@ class TestRealApiModeIndicator:
         assert not at.exception
         assert not any("mock" in w.value for w in at.warning)
         assert any("Mode API reelle" in s.value for s in at.success)
+
+
+class TestTranslationBasedQAFlow:
+    """Section 4 (prototype 'traduction native') : template source + HTML
+    rendu mock + translation_map -> un vrai resultat OK/KO, reutilisant
+    qa.wording_qa.run_wording_qa. Couvre, au niveau de la PAGE, le meme bug
+    que qa.braze_loader - get_email_template_html() renvoyait un mock
+    DIFFERENT de celui utilise par les tests unitaires de
+    run_translation_based_qa, invisible tant qu'aucun test n'appelait les
+    deux ensemble comme le fait reellement cette page."""
+
+    def test_comparing_default_locale_yields_all_ok(self):
+        at = _run_page()
+        at.button[1].click().run()
+
+        assert not at.exception
+        assert at.metric[0].value == "100.0%"
+        rows = at.dataframe[-1].value.to_dict("records")
+        assert len(rows) == 4
+        assert all(r["Status"] == "OK" for r in rows)
+
+    def test_comparing_diverging_locale_flags_one_ko(self):
+        at = _run_page()
+        at.selectbox(key="translation_locale").set_value("locale-de-de").run()
+        at.button[1].click().run()
+
+        assert not at.exception
+        assert at.metric[0].value == "75.0%"
+        rows = at.dataframe[-1].value.to_dict("records")
+        statuses = {r["Component Name"]: r["Status"] for r in rows}
+        assert statuses["cta_label"] == "KO"
+        assert statuses["header_title"] == "OK"
 
 
 class TestNoExtractedText:

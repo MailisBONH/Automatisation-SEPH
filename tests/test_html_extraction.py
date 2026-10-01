@@ -5,6 +5,7 @@ from qa.html_extraction import (
     extract_anchor_links,
     extract_real_html_from_viewsource,
     extract_texts_from_textcontribution,
+    extract_texts_in_order,
 )
 
 
@@ -358,3 +359,52 @@ class TestExtractAnchorLinks:
         html = '<div class="audit-component-cta"><a href="https://example.com/shop">Shop</a></div>'
         links = extract_anchor_links(html)
         assert links == [{"href": "https://example.com/shop", "component_class": "audit-component-cta"}]
+
+
+class TestExtractTextsInOrder:
+    """extract_texts_in_order : variante d'extract_texts_from_textcontribution
+    qui ne requiert AUCUN marqueur de composant (pensee pour un HTML sans
+    convention AEM, ex. un template Braze - voir qa.braze_loader)."""
+
+    def test_extracts_extractable_tags_in_document_order(self):
+        html = "<html><body><h1>Titre</h1><p>Paragraphe</p><a href='x'>CTA independant</a></body></html>"
+        results = extract_texts_in_order(html)
+        assert [r["text"] for r in results] == ["Titre", "Paragraphe", "CTA independant"]
+        assert all(r["component_class"] is None for r in results)
+
+    def test_does_not_require_any_component_class_marker(self):
+        # Contrairement a extract_texts_from_textcontribution, aucun
+        # class="text-contribution" necessaire pour que le texte soit trouve.
+        html = "<div><h2>Sans aucun marqueur</h2></div>"
+        results = extract_texts_in_order(html)
+        assert [r["text"] for r in results] == ["Sans aucun marqueur"]
+
+    def test_link_nested_in_an_already_extracted_paragraph_is_not_duplicated(self):
+        html = '<p>Visitez <a href="https://example.com">notre site</a> maintenant.</p>'
+        results = extract_texts_in_order(html)
+        assert [r["text"] for r in results] == ["Visitez notre site maintenant."]
+
+    def test_standalone_link_next_to_a_paragraph_is_extracted_separately(self):
+        html = '<p>Un paragraphe.</p><a href="https://example.com">Un CTA</a>'
+        results = extract_texts_in_order(html)
+        assert [r["text"] for r in results] == ["Un paragraphe.", "Un CTA"]
+
+    def test_inline_emphasis_nested_in_an_extractable_ancestor_is_not_duplicated(self):
+        html = "<p>Du texte <strong>important</strong> ici.</p>"
+        results = extract_texts_in_order(html)
+        assert [r["text"] for r in results] == ["Du texte important ici."]
+
+    def test_duplicate_text_is_deduplicated(self):
+        html = "<h2>Shop now</h2><a href='x'>Shop now</a>"
+        results = extract_texts_in_order(html)
+        assert [r["text"] for r in results] == ["Shop now"]
+
+    def test_technical_noise_is_filtered_like_the_rest_of_the_pipeline(self):
+        # Meme filtre is_valid que extract_texts_from_textcontribution : un
+        # texte trop court ou trop technique (ex. une url seule) est ignore.
+        html = "<p>ok</p><a href='x'>https://example.com/path</a>"
+        results = extract_texts_in_order(html)
+        assert results == []
+
+    def test_empty_html_yields_empty_list(self):
+        assert extract_texts_in_order("") == []

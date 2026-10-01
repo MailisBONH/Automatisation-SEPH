@@ -380,6 +380,64 @@ def load_and_extract_html_texts(html_path: str) -> list:
     return extract_texts_from_html(raw)
 
 
+def extract_texts_in_order(raw: str) -> list:
+    """
+    Extraction generique, SANS dependance a un marqueur de composant AEM
+    (contrairement a extract_texts_from_textcontribution, qui exige un
+    bloc englobant class="text-contribution") : parcourt tout le <body> dans
+    l'ORDRE D'APPARITION et retourne chaque texte des tags extractibles
+    (_EXTRACTABLE_TAGS), en filtrant le bruit (qa.text_utils.is_valid) et en
+    evitant de dupliquer un tag deja couvert par un ancetre extractible
+    (meme logique que extract_texts_from_textcontribution, mais appliquee
+    aussi aux liens `<a>`, pas seulement aux tags de pure emphase - sans
+    bloc de reference, un lien a l'interieur d'un paragraphe reste la seule
+    facon de reperer qu'il fait double emploi).
+
+    Pensee pour un HTML qui n'a AUCUNE convention de marquage par composant,
+    ex. un template Braze construit par glisser-deposer (voir
+    qa.braze_loader) : chaque texte garde `component_class=None` ici - a
+    l'appelant d'assigner, le cas echeant, un identifiant positionnel base
+    sur CET ordre d'apparition (voir qa.braze_loader.assign_translation_ids,
+    qui aligne ces items avec les tags de traduction Braze du template
+    source).
+    """
+    soup = BeautifulSoup(raw, "lxml")
+
+    for tag in soup(["script", "style", "meta", "link", "head"]):
+        tag.decompose()
+
+    root = soup.body or soup
+    results = []
+    seen = set()
+
+    for el in root.find_all(True):
+        name = el.name.lower()
+        if name not in _EXTRACTABLE_TAGS:
+            continue
+        if name in _INLINE_EMPHASIS_TAGS and _has_extractable_ancestor_within(el, root):
+            continue
+        if name == "a" and _has_extractable_ancestor_within(el, root):
+            continue
+
+        raw_text = el.get_text(" ", strip=True)
+        text = clean_text_preserving_conditionals(raw_text)
+        check_text = clean_text(raw_text)
+        if not check_text or not is_valid(check_text):
+            continue
+        if text in seen:
+            continue
+
+        results.append({
+            "text": text,
+            "tag": name,
+            "type": get_type(name),
+            "component_class": None,
+        })
+        seen.add(text)
+
+    return results
+
+
 def find_component_class(tag):
     """
     Remonte dans les parents pour trouver une classe audit-component
