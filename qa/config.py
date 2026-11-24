@@ -83,10 +83,7 @@ def _env_flag(name: str, default_on: bool) -> bool:
     `default_on`, plutot que de traiter la seconde comme "desactive" par
     accident : os.environ.get(name, "1") ne retourne son defaut QUE si la
     cle est absente, jamais si elle vaut "" (la cle existe alors, avec cette
-    valeur) - piege trouve dans une premiere version de
-    qa.braze_loader.BRAZE_MOCK_MODE, corrige ici une fois pour toutes plutot
-    que specifiquement pour ce seul appelant. Partagee par DEBUG_MODE
-    ci-dessous et qa.braze_loader.BRAZE_MOCK_MODE."""
+    valeur). Utilisee par DEBUG_MODE ci-dessous."""
     raw = os.environ.get(name, "").strip().lower()
     if not raw:
         return default_on
@@ -98,20 +95,6 @@ def _env_flag(name: str, default_on: bool) -> bool:
 # toucher au code via la variable d'environnement QA_TEAMS_WEBHOOK_URL. Vide
 # par defaut => notification desactivee (no-op silencieux, jamais d'erreur).
 TEAMS_WEBHOOK_URL = os.environ.get("QA_TEAMS_WEBHOOK_URL", "").strip()
-
-# Chargeur Braze exploratoire (voir qa/braze_loader.py, branche `braze`,
-# prototype pour la future migration AEM -> Braze) : memes conventions que
-# TEAMS_WEBHOOK_URL ci-dessus (vide par defaut, aucune erreur tant que ce
-# loader n'est pas reellement appele hors mode mock). BRAZE_MOCK_MODE actif
-# par defaut (pas de cle/endpoint configures = pas d'acces reel possible) ;
-# BRAZE_REQUEST_TIMEOUT distinct du timeout de qa.notifications (10s, un
-# simple POST de notification best-effort) : l'API Templates Braze renvoie
-# potentiellement un corps HTML plus volumineux, un delai plus genereux
-# evite un timeout premature sur un template lourd.
-BRAZE_API_KEY = os.environ.get("BRAZE_API_KEY", "").strip()
-BRAZE_REST_ENDPOINT = os.environ.get("BRAZE_REST_ENDPOINT", "").strip().rstrip("/")
-BRAZE_MOCK_MODE = _env_flag("BRAZE_MOCK_MODE", default_on=True)
-BRAZE_REQUEST_TIMEOUT = 15
 
 WORDING_COLUMN_NAME = "TRANSLATION"       # Mot-clé (insensible à la casse) de la colonne wording dans l'Excel
 CAMPAIGN_KEYWORD = "HugPlan S1 Bronze"    # Mot-clé pour sélectionner l'onglet dans l'Excel

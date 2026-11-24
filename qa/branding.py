@@ -1,6 +1,6 @@
 """
-Habillage visuel "Sephora friendly" partage par les 3 pages de l'app
-(home.py, pages/1_Historique.py, pages/2_Braze_Loader.py) : palette
+Habillage visuel "Sephora friendly" partage par les 2 pages de l'app
+(home.py, pages/1_Historique.py) : palette
 noir / blanc / dore et typographie elegante, sans logo officiel integre
 (aucun asset de marque fourni - identite visuelle generaliste Sephora,
 voir README). Volontairement limite au "chrome" de l'appli (sidebar de
@@ -145,7 +145,7 @@ def render_sidebar_logo() -> None:
     """Wordmark "SEPHORA" (SVG maison, aucun logo officiel fourni - voir
     docstring du module) dans l'emplacement dedie de Streamlit en tete de
     sidebar (st.logo(), voir app.py, st.navigation(position="sidebar")) -
-    rendu AU-DESSUS de la liste des 3 pages generee automatiquement, pas
+    rendu AU-DESSUS de la liste des 2 pages generee automatiquement, pas
     en dessous. A appeler une fois par page, comme inject_theme()."""
     st.logo(_LOGO_PATH)
 

@@ -342,30 +342,24 @@ def load_raw_html(html_path: str) -> str:
     return raw
 
 
-def extract_texts_from_html(raw: str) -> list:
-    """
-    Parse le HTML deja en memoire (soup + extraction) et retourne les textes
-    prets pour la comparaison. Factorisee hors de load_and_extract_html_texts
-    pour etre appelable avec du HTML qui ne vient pas d'un fichier sur disque
-    (ex. qa.braze_loader.extract_texts_from_template, template recupere via
-    l'API Braze plutot qu'un upload) - load_and_extract_html_texts reste le
-    point d'entree pour le cas fichier (AEM), celui-ci pour le HTML brut.
+def load_and_extract_html_texts(html_path: str) -> list:
+    # Pas de nettoyage AEM avant le parsing : BeautifulSoup traite les blocs
+    # <% if %>/<%= %> comme du texte litteral (ce ne sont pas des tags HTML
+    # valides), donc les stripper ici detruirait la structure if/else avant
+    # meme que le DOM existe - avant expand_conditional_variants ait sa
+    # chance de la voir a la comparaison (voir qa/matching.py).
+    #
+    # Parser "lxml" (pas "html.parser") : implemente les regles de fermeture
+    # implicite du HTML5 (ex: un <p> imbrique dans un autre <p> referme
+    # automatiquement le premier, comme le ferait un vrai navigateur/AEM).
+    # "html.parser" garde la structure litteralement telle qu'ecrite dans le
+    # HTML source, meme invalide - un <p>A<p>B</p></p> y devient un <p>
+    # contenant un autre <p>, dont le get_text() combine A et B en un seul
+    # texte fantome qui ne correspond a rien de reellement rendu.
+    raw = load_raw_html(html_path)
 
-    Pas de nettoyage AEM avant le parsing : BeautifulSoup traite les blocs
-    <% if %>/<%= %> comme du texte litteral (ce ne sont pas des tags HTML
-    valides), donc les stripper ici detruirait la structure if/else avant
-    meme que le DOM existe - avant expand_conditional_variants ait sa
-    chance de la voir a la comparaison (voir qa/matching.py).
-
-    Parser "lxml" (pas "html.parser") : implemente les regles de fermeture
-    implicite du HTML5 (ex: un <p> imbrique dans un autre <p> referme
-    automatiquement le premier, comme le ferait un vrai navigateur/AEM).
-    "html.parser" garde la structure litteralement telle qu'ecrite dans le
-    HTML source, meme invalide - un <p>A<p>B</p></p> y devient un <p>
-    contenant un autre <p>, dont le get_text() combine A et B en un seul
-    texte fantome qui ne correspond a rien de reellement rendu.
-    """
     soup = BeautifulSoup(raw, "lxml")
+
 
     for tag in soup(["script", "style", "meta", "link", "head"]):
         tag.decompose()
@@ -373,69 +367,6 @@ def extract_texts_from_html(raw: str) -> list:
     title_to_component = build_title_to_component_map(soup)
 
     return extract_texts_from_textcontribution(soup, title_to_component)
-
-
-def load_and_extract_html_texts(html_path: str) -> list:
-    raw = load_raw_html(html_path)
-    return extract_texts_from_html(raw)
-
-
-def extract_texts_in_order(raw: str) -> list:
-    """
-    Extraction generique, SANS dependance a un marqueur de composant AEM
-    (contrairement a extract_texts_from_textcontribution, qui exige un
-    bloc englobant class="text-contribution") : parcourt tout le <body> dans
-    l'ORDRE D'APPARITION et retourne chaque texte des tags extractibles
-    (_EXTRACTABLE_TAGS), en filtrant le bruit (qa.text_utils.is_valid) et en
-    evitant de dupliquer un tag deja couvert par un ancetre extractible
-    (meme logique que extract_texts_from_textcontribution, mais appliquee
-    aussi aux liens `<a>`, pas seulement aux tags de pure emphase - sans
-    bloc de reference, un lien a l'interieur d'un paragraphe reste la seule
-    facon de reperer qu'il fait double emploi).
-
-    Pensee pour un HTML qui n'a AUCUNE convention de marquage par composant,
-    ex. un template Braze construit par glisser-deposer (voir
-    qa.braze_loader) : chaque texte garde `component_class=None` ici - a
-    l'appelant d'assigner, le cas echeant, un identifiant positionnel base
-    sur CET ordre d'apparition (voir qa.braze_loader.assign_translation_ids,
-    qui aligne ces items avec les tags de traduction Braze du template
-    source).
-    """
-    soup = BeautifulSoup(raw, "lxml")
-
-    for tag in soup(["script", "style", "meta", "link", "head"]):
-        tag.decompose()
-
-    root = soup.body or soup
-    results = []
-    seen = set()
-
-    for el in root.find_all(True):
-        name = el.name.lower()
-        if name not in _EXTRACTABLE_TAGS:
-            continue
-        if name in _INLINE_EMPHASIS_TAGS and _has_extractable_ancestor_within(el, root):
-            continue
-        if name == "a" and _has_extractable_ancestor_within(el, root):
-            continue
-
-        raw_text = el.get_text(" ", strip=True)
-        text = clean_text_preserving_conditionals(raw_text)
-        check_text = clean_text(raw_text)
-        if not check_text or not is_valid(check_text):
-            continue
-        if text in seen:
-            continue
-
-        results.append({
-            "text": text,
-            "tag": name,
-            "type": get_type(name),
-            "component_class": None,
-        })
-        seen.add(text)
-
-    return results
 
 
 def find_component_class(tag):

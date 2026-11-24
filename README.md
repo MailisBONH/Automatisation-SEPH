@@ -26,7 +26,6 @@ Interface Streamlit + moteur de comparaison Python, avec export du résultat en 
 - [Digest périodique Teams](#digest-périodique-teams)
 - [Nettoyage automatique des fichiers temporaires](#nettoyage-automatique-des-fichiers-temporaires)
 - [Habillage visuel (Sephora friendly)](#habillage-visuel-sephora-friendly)
-- [Page Braze (exploration, branche `braze`)](#page-braze-exploration-branche-braze)
 - [Intégration continue (CI)](#intégration-continue-ci)
 - [Configuration](#configuration)
 - [Documentation Confluence](#documentation-confluence)
@@ -82,20 +81,18 @@ Interface Streamlit + moteur de comparaison Python, avec export du résultat en 
 ## Architecture du projet
 
 ```
-app.py                     Point d'entrée : navigation multipage (st.navigation, sidebar native) entre home.py, pages/1_Historique.py et pages/2_Braze_Loader.py
+app.py                     Point d'entrée : navigation multipage (st.navigation, sidebar native) entre home.py et pages/1_Historique.py
 home.py                     Interface Streamlit principale : upload, lancement de la QA, affichage, export, archivage automatique
 assets/
 └── sephora_wordmark.svg     Wordmark "SEPHORA" (SVG maison, sans logo officiel) affiché en tête de la sidebar via st.logo() — voir qa/branding.py
 pages/
-├── 1_Historique.py          Page Historique : navigation Pays > Trigger > Séquence, rapports + graphique d'évolution
-└── 2_Braze_Loader.py         Page Braze (exploration, branche `braze`) : voir section dédiée
+└── 1_Historique.py          Page Historique : navigation Pays > Trigger > Séquence, rapports + graphique d'évolution
 qa/
 ├── engine.py               Orchestrateur : run_qa_for_sequence() (1 sequence) et run_qa() (+ rapport)
-├── config.py                Constantes de configuration (colonnes Excel, regex, seuils, tables pays, config Braze)
-├── branding.py               Habillage visuel partagé par les 3 pages (sidebar, titres, boutons) — voir section dédiée
-├── braze_loader.py           Chargement de templates/traductions email via l'API REST Braze (mock ou réelle) — exploration branche `braze`, voir section dédiée
+├── config.py                Constantes de configuration (colonnes Excel, regex, seuils, tables pays)
+├── branding.py               Habillage visuel partagé par les 2 pages (sidebar, titres, boutons) — voir section dédiée
 ├── text_utils.py             Nettoyage/normalisation de texte (clean_text, normalize, normalize_currency, expand_conditional_variants, clean_display_text)
-├── html_extraction.py         Extraction du wording depuis le HTML (parser lxml) ; extract_texts_in_order() : variante sans marqueur de composant requis, pour un HTML sans convention AEM (voir qa/braze_loader.py)
+├── html_extraction.py         Extraction du wording depuis le HTML (parser lxml)
 ├── excel_loader.py            Lecture de la feuille Excel référentielle (+ find_sibling_sequence_sheet/load_sibling_sequence_wordings et find_sibling_url_section/load_sibling_url_section pour l'onglet/la section frère LOYAL/NON LOYAL, list_wording_sheet_choices/list_url_sequence_choices pour les menus de sélection filtrés/regroupés) — classeur mis en cache (_open_excel_file) par chemin+date de modification+taille, pour ne pas le reparser à chaque interaction Streamlit
 ├── matching.py                 compare() + stratégies de matching HTML <-> Excel (mode Wording)
 ├── wording_qa.py                Pipeline de QA "wording" (run_wording_qa)
@@ -127,10 +124,10 @@ En mode multi-séquences, l'app appelle directement `run_qa_for_sequence` une fo
 
 ## Installation
 
-Prérequis : Python 3.10+.
+Prérequis : Python 3.11+ (`pandas>=3.0` ne s'installe pas sur Python 3.10 ; la CI et la version de référence sont en 3.12) et `git`. Aucune base de données ni service externe à installer : l'historique est un fichier SQLite local (`output/history.db`), l'outil tourne entièrement en local. Variables d'environnement **optionnelles** : `QA_TEAMS_WEBHOOK_URL` (notifications/digest Teams), `QA_DEBUG_MODE`.
 
 ```bash
-git clone https://github.com/MailisBO/Automatisation-SEPH.git
+git clone https://github.com/MailisBONH/Automatisation-SEPH.git
 cd Automatisation-SEPH
 python -m venv .venv
 .venv\Scripts\activate        # Windows
@@ -163,7 +160,7 @@ L'interface Streamlit (`home.py`, `pages/1_Historique.py`) est couverte par `tes
 
 Les générateurs de classeurs Excel de test réutilisés par plusieurs fichiers (`make_wording_workbook`, `make_utm_workbook`) vivent dans `tests/conftest.py`, pour éviter que chacun ne réimplémente sa propre version.
 
-La page Braze d'exploration (branche `braze`, voir [section dédiée](#page-braze-exploration-branche-braze)) est couverte par `tests/test_braze_loader.py` (mode mock, mode API réelle avec `requests.get` monkeypatché, erreurs réseau/JSON/HTTP toutes remontées en `BrazeAPIError`, filtrage par tag toujours côté client, parsing des tags de traduction, construction du référentiel attendu à partir d'un `translation_map`, alignement positionnel HTML↔id de traduction, et l'orchestration bout-en-bout `run_translation_based_qa` — y compris un test de régression qui passe par `get_email_template_html()` plutôt que par la constante mock directement, pour ne pas reproduire le bug de branchement corrigé le 2026-10-01) et `tests/test_braze_page.py` (smoke tests `AppTest` : chargement, sélection puis extraction, un seul appel réseau par clic, bannière mock vs API réelle, gestion d'erreur à chaque étape, et le flux de comparaison via le `translation_map` — locale 100% conforme et locale avec un écart volontaire sur un champ). `tests/test_html_extraction.py` couvre aussi `extract_texts_in_order` (extraction générique sans marqueur de composant requis, pensée pour un HTML sans convention AEM). `tests/test_config.py` couvre `qa.config._env_flag`, le helper partagé qui évite qu'une variable d'environnement booléenne explicitement vide (`NAME=`) soit interprétée à tort comme "désactivée".
+`tests/test_config.py` couvre `qa.config._env_flag`, le helper partagé qui évite qu'une variable d'environnement booléenne explicitement vide (`NAME=`) soit interprétée à tort comme "désactivée".
 
 ## Utilisation
 
@@ -531,9 +528,9 @@ Les fichiers Excel/HTML uploadés (`temp/`) sont supprimés automatiquement dès
 
 ## Habillage visuel (Sephora friendly)
 
-Les 3 pages de l'app (`home.py`, `pages/1_Historique.py`, `pages/2_Braze_Loader.py`) partagent un habillage visuel léger inspiré de l'identité Sephora (noir/doré, typographie élégante) via [`qa/branding.py`](qa/branding.py).
+Les 2 pages de l'app (`home.py`, `pages/1_Historique.py`) partagent un habillage visuel léger inspiré de l'identité Sephora (noir/doré, typographie élégante) via [`qa/branding.py`](qa/branding.py).
 
-**Navigation** : la barre latérale (sidebar) **native** de Streamlit (`app.py`, `st.navigation(position="sidebar")`) liste les 3 pages, plutôt qu'un menu de liens maison recréé en HTML/CSS par-dessus une navigation masquée — deux essais dans ce sens (boutons encadrés en haut à droite, puis liens fusionnés au bas d'un bandeau) sont restés peu naturels malgré les retouches. Le wordmark "SEPHORA" (SVG maison, [`assets/sephora_wordmark.svg`](assets/sephora_wordmark.svg), aucun logo officiel fourni) est placé via `st.logo()` — l'emplacement dédié de Streamlit en tête de sidebar, au-dessus de la liste des pages. La sidebar garde un fond noir permanent (identité de marque, dans les deux thèmes), la page active y est surlignée en doré.
+**Navigation** : la barre latérale (sidebar) **native** de Streamlit (`app.py`, `st.navigation(position="sidebar")`) liste les 2 pages, plutôt qu'un menu de liens maison recréé en HTML/CSS par-dessus une navigation masquée — deux essais dans ce sens (boutons encadrés en haut à droite, puis liens fusionnés au bas d'un bandeau) sont restés peu naturels malgré les retouches. Le wordmark "SEPHORA" (SVG maison, [`assets/sephora_wordmark.svg`](assets/sephora_wordmark.svg), aucun logo officiel fourni) est placé via `st.logo()` — l'emplacement dédié de Streamlit en tête de sidebar, au-dessus de la liste des pages. La sidebar garde un fond noir permanent (identité de marque, dans les deux thèmes), la page active y est surlignée en doré.
 
 **Contenu principal** : titre de page en police de marque avec une fine ligne dorée (`render_page_title`, remplace `st.title()`), boutons d'action noirs à bordure dorée.
 
@@ -541,44 +538,9 @@ Les 3 pages de l'app (`home.py`, `pages/1_Historique.py`, `pages/2_Braze_Loader.
 
 Les couleurs sémantiques propres à Streamlit (vert OK / rouge KO sur les tableaux et messages, orange avertissement) ne sont jamais modifiées par cet habillage — elles portent un sens fonctionnel indépendant du design.
 
-## Page Braze (exploration, branche `braze`)
-
-> ⚠️ Prototype d'exploration pour la migration future vers Braze, **séparé** du pipeline de comparaison principal. Les étapes 1-3 prouvent juste que la récupération (mock ou API réelle) et l'extraction du wording fonctionnent de bout en bout ; l'étape 4 va plus loin et produit un **vrai résultat de QA (score + OK/KO)**, mais repose sur des endpoints Braze en **early access** — voir plus bas.
-
-Accessible via la page **🧪 Braze (exploration)** (`pages/2_Braze_Loader.py`) :
-
-1. **1️⃣ Entrée** : contrairement à l'outil AEM (upload d'un fichier HTML), Braze stocke les templates côté serveur — l'entrée est un identifiant de template (`email_template_id`), choisi dans une liste déroulante (`qa.braze_loader.list_email_templates`) plutôt que copié-collé à l'avance.
-2. **2️⃣ Récupération** : le HTML source du template choisi est récupéré via `qa.braze_loader.get_email_template_html` et affiché brut.
-3. **3️⃣ Sortie** : ce HTML est passé dans le même moteur d'extraction que le pipeline AEM (`qa.html_extraction.extract_texts_from_html`) — un vrai template Braze n'a très probablement pas les marqueurs AEM attendus (`class="text-contribution"`, `audit-component-*`), donc un résultat vide à ce stade n'est pas un bug de branchement (le mock par défaut n'en a volontairement pas non plus depuis l'adoption de la piste ci-dessous).
-4. **4️⃣ Prototype de QA via le système de traduction natif Braze** : la piste retenue (voir discussion du 2026-10-01, après examen d'un vrai export de template Braze) pour remplacer le référentiel Excel côté Braze. Sélection d'une locale, affichage du `translation_map` correspondant, zone de texte pour le HTML réellement rendu (pré-rempli en mode mock) et bouton de comparaison — produit un score et un tableau OK/KO par id de traduction, en réutilisant **tel quel** `qa.wording_qa.run_wording_qa` (mêmes règles de matching/scoring/criticité que le pipeline AEM).
-
-### Le système de traduction natif Braze comme référentiel
-
-Un vrai export de template Braze ne porte aucune classe CSS équivalente à `audit-component-*` (templates construits par glisser-déposer de blocs, sans marquage métier) — confirmé le 2026-10-01 sur un export réel. La piste retenue s'appuie plutôt sur le système de **traduction natif** de Braze ([doc](https://www.braze.com/docs/user_guide/message_building_by_channel/email/using_locales)) : les rédacteurs entourent chaque texte à traduire d'un tag Liquid avec un id choisi par eux (`{% translation header_title %}Texte{% endtranslation %}`), et Braze expose ensuite un `translation_map` (id → texte attendu) par template et par locale.
-
-Ce `translation_map` a exactement la forme du référentiel Excel actuel (id technique → wording attendu), ce qui permet de réutiliser le moteur de comparaison existant sans le modifier :
-
-- `qa.braze_loader.extract_translation_tags` parse les tags du template source et retourne, dans l'ordre d'apparition, chaque id de traduction + son texte par défaut.
-- `qa.braze_loader.build_expected_wordings_from_translations` combine ces tags avec un `translation_map` pour produire une liste au format `{Component, Element, Wording, Technical, norm, curr, ...}` — un remplacement direct du référentiel Excel.
-- `qa.html_extraction.extract_texts_in_order` extrait les textes du HTML **réellement rendu** (post-Liquid, donc sans ces tags) dans l'ordre d'apparition, **sans nécessiter aucune classe de composant** (contrairement à `extract_texts_from_textcontribution`, pensée pour AEM).
-- `qa.braze_loader.assign_translation_ids` relie les deux : chaque texte rendu reçoit l'id de traduction du tag source à la **même position** (alignement positionnel) — hypothèse plausible mais **non vérifiée sur un vrai template** (aucun export avec tags de traduction observé à ce jour).
-- `qa.braze_loader.run_translation_based_qa` orchestre ces 4 étapes puis appelle `qa.wording_qa.run_wording_qa` sans le modifier.
-
-**Mode mock par défaut** (`BRAZE_MOCK_MODE`, actif tant que `BRAZE_API_KEY`/`BRAZE_REST_ENDPOINT` ne sont pas configurées) : aucun appel réseau. Le template mock (`_MOCK_RAW_TEMPLATE_WITH_TRANSLATIONS`, inspiré d'un vrai export "Birthday seq1 gold" partagé le 2026-10-01) porte 4 tags de traduction ; 2 locales mock sont disponibles (`fr-fr` 100% conforme, `de-de` avec un écart volontaire sur le CTA pour démontrer la détection d'un vrai KO, pas seulement le cas 100% OK). Pour interroger une vraie instance Braze : définir `BRAZE_API_KEY` et `BRAZE_REST_ENDPOINT` (URL de l'instance, ex. `https://rest.iad-01.braze.com` — varie selon la région/le cluster du compte), puis `BRAZE_MOCK_MODE=0` (mêmes conventions que `QA_TEAMS_WEBHOOK_URL`, voir [Configuration](#configuration)). Le filtrage par tag (`list_email_templates(tag=...)`) se fait toujours **côté client** : l'API Braze (`GET /templates/email/list`) ne documente aucun paramètre de filtre par tag, seulement `limit`/`offset`/`modified_after`/`modified_before`.
-
-Toute erreur API (statut HTTP non-2xx, réseau injoignable, réponse 2xx illisible en JSON) est capturée et affichée proprement (`qa.braze_loader.BrazeAPIError`) plutôt que de faire planter la page. Les appels à `qa.wording_qa`/`qa.html_extraction` (étapes 3 et 4) sont exécutés avec stdout redirigé vers un buffer mémoire (même principe que `home.run_with_debug_capture`) : leurs logs de debug (`qa.config.DEBUG_MODE`) contiennent des emojis qui font planter l'affichage avec une `UnicodeEncodeError` sous Windows si le flux de sortie réel du process Streamlit n'est pas en UTF-8 — observé en conditions réelles le 2026-10-01 malgré le `sys.stdout.reconfigure(encoding="utf-8")` fait par `app.py` au démarrage.
-
-> ⚠️ **Accès bloquant** : les 3 endpoints de traduction Braze utilisés ci-dessus (`GET /templates/email/translations/source`, `GET /templates/email/translations/`, `GET /templates/translations/email`) sont en **early access** chez Braze — pas disponibles par défaut sur un compte standard. Il faut demander l'activation à l'interlocuteur/account manager Braze de Sephora avant de pouvoir les appeler en réel. Les chemins/noms de champs ci-dessus viennent de la documentation publique Braze (recherche du 2026-10-01), **pas d'un appel réel** : à revérifier dès que l'accès sera obtenu.
-
-**Limitations connues, à valider dès qu'un accès réel sera disponible** (voir la docstring de [`qa/braze_loader.py`](qa/braze_loader.py)) :
-
-- **Alignement positionnel non vérifié** : suppose que l'ordre et le nombre de textes extraits du HTML rendu correspondent exactement à l'ordre et au nombre de tags `{% translation %}` du template source — à confirmer sur un vrai template.
-- **Templating Liquid pour les blocs conditionnels** : Braze utilise Liquid (`{% if %}`/`{{ variable }}`), pas la syntaxe AEM (`<% if %>`/`<%= %>`) gérée aujourd'hui par `qa.text_utils.expand_conditional_variants` — une variante Liquid sera nécessaire pour les wordings contenant un bloc conditionnel (non couverte par ce prototype). Plus immédiat : `qa.text_utils.is_valid` rejette déjà tout texte dont les caractères techniques (`<>{}[]`) dépassent 5 % de sa longueur, ce qu'une simple accolade Liquid double (`{{ }}`) peut déclencher sur un texte court — sans impact une fois le HTML rendu (post-Liquid), mais à garder en tête si un jour on extrait depuis un template non rendu.
-- **Ancien branchement par marqueurs AEM** (`qa.braze_loader.extract_texts_from_template`, étape 3) conservé pour référence/tests, mais plus la piste principale : un template Braze réel n'a pas ces marqueurs.
-
 ## Intégration continue (CI)
 
-Un workflow GitHub Actions ([`.github/workflows/tests.yml`](.github/workflows/tests.yml)) exécute automatiquement `pytest` (installation via `requirements-dev.txt`, Python 3.12) à chaque `push` et `pull request`, sur **toutes** les branches — pas seulement `main` — pour détecter une régression avant qu'elle n'atteigne la branche principale, y compris pendant l'exploration sur une branche de travail comme `braze`.
+Un workflow GitHub Actions ([`.github/workflows/tests.yml`](.github/workflows/tests.yml)) exécute automatiquement `pytest` (installation via `requirements-dev.txt`, Python 3.12) à chaque `push` et `pull request`, sur **toutes** les branches — pas seulement `main` — pour détecter une régression avant qu'elle n'atteigne la branche principale.
 
 ## Configuration
 
@@ -610,10 +572,6 @@ Les réglages globaux sont centralisés dans [`qa/config.py`](qa/config.py) :
 | `UNCLASSIFIED_LABEL` | Nom de dossier utilisé si pays/trigger/séquence est vide | `"Non classé"` |
 | `REGRESSION_ALERT_THRESHOLD` | Baisse de score (points de %) au-delà de laquelle une régression est signalée (voir `qa.history.find_regression`) | `5` |
 | `TEAMS_WEBHOOK_URL` | URL du webhook entrant Teams pour la notification automatique (`qa.notifications`), configurable via la variable d'environnement `QA_TEAMS_WEBHOOK_URL` — vide = notification désactivée | `""` |
-| `BRAZE_API_KEY` | Clé API REST Braze (page d'exploration, voir [section dédiée](#page-braze-exploration-branche-braze)), via la variable d'environnement `BRAZE_API_KEY` | `""` |
-| `BRAZE_REST_ENDPOINT` | URL de l'instance Braze (varie selon la région/le cluster du compte), via la variable d'environnement `BRAZE_REST_ENDPOINT` | `""` |
-| `BRAZE_MOCK_MODE` | Utilise des templates d'exemple statiques plutôt que d'appeler l'API Braze, via la variable d'environnement `BRAZE_MOCK_MODE` (`0`/`false` pour désactiver) | `True` |
-| `BRAZE_REQUEST_TIMEOUT` | Timeout (secondes) des appels HTTP à l'API Braze | `15` |
 
 ## Documentation Confluence
 

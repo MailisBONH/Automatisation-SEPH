@@ -1,10 +1,9 @@
 """
 Tests de qa.config._env_flag : parsing partage des variables d'environnement
-booleennes (DEBUG_MODE, qa.braze_loader.BRAZE_MOCK_MODE). Regression tenue a
-distance : une premiere version de BRAZE_MOCK_MODE traitait une valeur
-EXPLICITEMENT VIDE (ex. `NAME=` dans un .env) comme "desactive", au meme
-titre que "0"/"false", plutot que de retomber sur le defaut comme le fait
-deja une variable totalement absente.
+booleennes (DEBUG_MODE). Regression tenue a distance : une valeur
+EXPLICITEMENT VIDE (ex. `NAME=` dans un .env) ne doit pas etre traitee comme
+"desactive", au meme titre que "0"/"false", mais retomber sur le defaut comme
+le fait deja une variable totalement absente.
 """
 import qa.config as config
 from qa.config import _env_flag
@@ -39,11 +38,9 @@ class TestEnvFlag:
             monkeypatch.setenv("SOME_FLAG", value)
             assert _env_flag("SOME_FLAG", default_on=False) is True
 
-    def test_debug_mode_and_braze_mock_mode_are_both_built_on_env_flag(self):
-        # Verrouille le partage effectif du helper (pas juste sa disponibilite) -
-        # une regression qui reintroduirait un parsing ad-hoc pour l'un des
-        # deux casserait ce test plutot que de passer inapercue.
+    def test_debug_mode_is_built_on_env_flag(self):
+        # Verrouille l'usage effectif du helper : une regression qui
+        # reintroduirait un parsing ad-hoc casserait ce test.
         import inspect
         source = inspect.getsource(config)
         assert 'DEBUG_MODE = _env_flag("QA_DEBUG_MODE"' in source
-        assert 'BRAZE_MOCK_MODE = _env_flag("BRAZE_MOCK_MODE"' in source

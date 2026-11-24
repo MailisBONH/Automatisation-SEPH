@@ -1,7 +1,6 @@
 """
 Point d'entree de l'app : declare la navigation multipage (v2, st.navigation)
-entre l'outil QA (home.py), la page Historique (pages/1_Historique.py) et la
-page Braze d'exploration (pages/2_Braze_Loader.py).
+entre l'outil QA (home.py) et la page Historique (pages/1_Historique.py).
 
 La barre de navigation NATIVE de Streamlit est utilisee (position="sidebar",
 la valeur par defaut, rendue explicite ici) plutot qu'un menu maison
@@ -32,7 +31,6 @@ except (AttributeError, ValueError):
 
 home_page = st.Page("home.py", title="QA Email Tool", icon="📧", default=True)
 historique_page = st.Page("pages/1_Historique.py", title="Historique", icon="📈")
-braze_loader_page = st.Page("pages/2_Braze_Loader.py", title="Braze (exploration)", icon="🧪")
 
-pg = st.navigation([home_page, historique_page, braze_loader_page], position="sidebar")
+pg = st.navigation([home_page, historique_page], position="sidebar")
 pg.run()
