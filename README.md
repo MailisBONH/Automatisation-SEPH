@@ -143,6 +143,12 @@ streamlit run app.py
 
 L'application s'ouvre dans le navigateur (par défaut sur `http://localhost:8501`).
 
+Si Windows répond « `streamlit` is not recognized » (le dossier `Scripts` de Python n'est pas dans le `PATH`, ou le venv n'est pas activé), lancer plutôt :
+
+```bash
+python -m streamlit run app.py
+```
+
 ## Tests
 
 ```bash
